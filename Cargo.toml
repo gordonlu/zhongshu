@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["zhongshu-core", "zhongshu-cli", "zhongshu-orb"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"

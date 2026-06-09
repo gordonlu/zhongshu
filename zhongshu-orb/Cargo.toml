@@ -1,0 +1,21 @@
+[package]
+name = "zhongshu-orb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "中书 Orb — desktop overlay companion for zhongshu."
+
+[dependencies]
+zhongshu-core = { path = "../zhongshu-core" }
+winit = "0.30"
+softbuffer = "0.4"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+egui = "0.31"
+egui-winit = "0.31"
+egui-wgpu = "0.31"
+wgpu = "24"
+pollster = "0.4"

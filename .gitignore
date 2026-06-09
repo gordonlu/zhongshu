@@ -1,0 +1,6 @@
+target/
+.deeplossless/
+*.db
+*.db-wal
+*.db-shm
+.env

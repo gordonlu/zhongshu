@@ -150,6 +150,7 @@ impl ZhongshuApp {
             .with_decorations(true).with_window_level(WindowLevel::Normal);
         let w = Arc::new(el.create_window(attrs).unwrap());
         let id = w.id();
+        let vp_id = egui::viewport::ViewportId::from_hash_of(id);
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(w.clone()).unwrap();
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions{
@@ -166,7 +167,7 @@ impl ZhongshuApp {
             desired_maximum_frame_latency:1,
         };
         surface.configure(&device,&config);
-        let state = egui_winit::State::new(self.egui_ctx.clone().unwrap_or_default(),egui::viewport::ViewportId::from(id),&w,None,None,None);
+        let state = egui_winit::State::new(self.egui_ctx.clone().unwrap_or_default(),vp_id,&w,None,None,None);
         let renderer = egui_wgpu::Renderer::new(&device,config.format,None,1,false);
         self.overlays.insert(id,EguiOverlay{window:w.clone(),surface,device,queue,config,state,renderer,input:String::new(),messages:Vec::new()});
         w.focus_window(); w.request_redraw();
@@ -204,7 +205,7 @@ impl ZhongshuApp {
         });
         self.egui_ctx = Some(ctx.clone());
         ov.state.handle_platform_output(&ov.window, out.platform_output);
-        if let Some(inp) = send { if !inp.trim().is_empty() { self.run_agent(inp); } }
+        let inp = send.take().filter(|s|!s.trim().is_empty());
 
         let pj = ctx.tessellate(out.shapes, out.pixels_per_point);
         for (id, d) in out.textures_delta.set { ov.renderer.update_texture(&ov.device,&ov.queue,id,&d); }
@@ -218,8 +219,20 @@ impl ZhongshuApp {
         let frame = ov.surface.get_current_texture().unwrap();
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut enc = ov.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        ov.renderer.paint_and_update_textures(&ov.device, &ov.queue, &mut enc, &pj, &sd, &view, wgpu::Color::BLACK, None);
+        ov.renderer.update_buffers(&ov.device,&ov.queue,&mut enc,&pj,&sd);
+        {
+            let rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor{
+                label:Some("egui"),color_attachments:&[Some(wgpu::RenderPassColorAttachment{
+                    view:&view,resolve_target:None,ops:wgpu::Operations{load:wgpu::LoadOp::Load,store:wgpu::StoreOp::Store},
+                })],depth_stencil_attachment:None,timestamp_writes:None,occlusion_query_set:None,
+            });
+            let mut rp_static = rp.forget_lifetime();
+            ov.renderer.render(&mut rp_static, &pj, &sd);
+        }
         ov.queue.submit([enc.finish()]); frame.present();
+        let _ = ov;
+
+        if let Some(input) = inp { self.run_agent(input); }
     }
 }
 

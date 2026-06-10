@@ -1,5 +1,6 @@
+use std::sync::Arc;
 use winit::event_loop::ActiveEventLoop;
-use winit::window::WindowId;
+use winit::window::{Window, WindowId};
 use zhongshu_core::event::AgentState;
 
 // ── Windows: transparent orb ────────────────────────────────────────
@@ -12,6 +13,8 @@ mod orb {
     use winit::dpi::{LogicalSize, PhysicalPosition};
     use winit::event_loop::ActiveEventLoop;
     use winit::window::{Window, WindowAttributes, WindowId, WindowLevel};
+    #[cfg(target_os = "windows")]
+    use winit::platform::windows::WindowAttributesExtWindows;
     use zhongshu_core::event::AgentState;
     use crate::render::{self, OrbState};
 
@@ -33,23 +36,28 @@ mod orb {
 
     impl OrbIndicator {
         pub fn create(el: &ActiveEventLoop, size: u32) -> Self {
-            let attrs = WindowAttributes::default()
+            let mut attrs = WindowAttributes::default()
                 .with_title("zhongshu")
                 .with_inner_size(LogicalSize::new(size, size))
                 .with_resizable(false).with_decorations(false)
                 .with_window_level(WindowLevel::AlwaysOnTop)
                 .with_transparent(true).with_active(false);
+            #[cfg(target_os = "windows")]
+            { attrs = attrs.with_skip_taskbar(true); }
             let w = Arc::new(el.create_window(attrs).unwrap());
-            if let Some(m) = el.primary_monitor() {
-                let p = m.position(); let s = m.size();
-                let _ = w.set_outer_position(PhysicalPosition::new(p.x + s.width as i32 - 80, p.y + s.height as i32 - 100));
-            }
+        if let Some(m) = el.primary_monitor() {
+            let p = m.position(); let s = m.size();
+            let x = p.x + s.width as i32 / 2 - size as i32 / 2;
+            let y = p.y + s.height as i32 / 2 - size as i32 / 2;
+            let _ = w.set_outer_position(PhysicalPosition::new(x.max(0), y.max(0)));
+        }
             let ctx = softbuffer::Context::new(w.clone()).unwrap();
             let surface = softbuffer::Surface::new(&ctx, w.clone()).unwrap();
             w.request_redraw();
             OrbIndicator { window: w.clone(), surface, state: AgentState::Idle, start_time: Instant::now() }
         }
         pub fn set_state(&mut self, state: AgentState) { self.state = state; self.window.request_redraw(); }
+        pub fn window(&self) -> &Arc<Window> { &self.window }
         pub fn window_id(&self) -> WindowId { self.window.id() }
         pub fn render(&mut self) {
             let sz = self.window.inner_size(); let (ww, hh) = (sz.width, sz.height);
@@ -243,6 +251,13 @@ impl Indicator {
         match self {
             #[cfg(not(target_os = "linux"))] Indicator::Orb(o) => o.set_state(state),
             #[cfg(target_os = "linux")] Indicator::Tray(t) => t.set_state(state),
+        }
+    }
+
+    pub fn window(&self) -> Option<&Arc<Window>> {
+        match self {
+            #[cfg(not(target_os = "linux"))] Indicator::Orb(o) => Some(o.window()),
+            #[cfg(target_os = "linux")] Indicator::Tray(_) => None,
         }
     }
 

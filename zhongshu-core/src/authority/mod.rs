@@ -557,7 +557,15 @@ fn timestamp() -> String {
 // ── Global singleton ─────────────────────────────────────────────────
 
 static GLOBAL_GATE: OnceLock<Mutex<AuthorityGate>> = OnceLock::new();
-static PENDING_AUTH: OnceLock<Mutex<Option<(String, String)>>> = OnceLock::new();
+static PENDING_AUTH: OnceLock<Mutex<Option<PendingRequest>>> = OnceLock::new();
+
+/// Full detail of a pending authorisation request (stored for UI display).
+#[derive(Debug, Clone)]
+pub struct PendingRequest {
+    pub tool: String,
+    pub program: String,
+    pub command: String,
+}
 
 /// Initialise the global authority gate (called once at startup).
 pub fn init(gate: AuthorityGate) {
@@ -587,17 +595,27 @@ pub fn check_tool(tool: &str) -> CheckResult {
     }
 }
 
-/// Remember the last tool that asked for authorisation.
-pub fn set_pending(tool: &str, program: &str) {
+/// Remember the last tool / command that asked for authorisation.
+pub fn set_pending(tool: &str, program: &str, command: &str) {
     let cell = PENDING_AUTH.get_or_init(|| Mutex::new(None));
-    *cell.lock().unwrap() = Some((tool.to_string(), program.to_string()));
+    *cell.lock().unwrap() = Some(PendingRequest {
+        tool: tool.to_string(),
+        program: program.to_string(),
+        command: command.to_string(),
+    });
+}
+
+/// Take the most recent pending request (i.e. consume it).
+pub fn take_pending() -> Option<PendingRequest> {
+    let cell = PENDING_AUTH.get_or_init(|| Mutex::new(None));
+    cell.lock().unwrap().take()
 }
 
 /// Approve the last pending auth request (if any).
 pub fn approve_pending() {
     let cell = PENDING_AUTH.get_or_init(|| Mutex::new(None));
-    if let Some((tool, program)) = cell.lock().unwrap().take() {
-        approve(&tool, &program);
+    if let Some(req) = cell.lock().unwrap().take() {
+        approve(&req.tool, &req.program);
     }
 }
 
@@ -858,5 +876,48 @@ mod tests {
         let mut gate = AuthorityGate::new(true, 1800);
         let result = gate.check("shell", "cat ~/.ssh/id_rsa");
         assert!(matches!(result, CheckResult::RequireAuth { .. }));
+    }
+
+    // ── Pending request tests ─────────────────────────────────────
+
+    #[test]
+    fn pending_request_roundtrip() {
+        init(AuthorityGate::new(true, 1800));
+        set_pending("shell", "rm", "rm -rf ~/temp");
+        let req = take_pending().expect("pending set should be retrievable");
+        assert_eq!(req.tool, "shell");
+        assert_eq!(req.program, "rm");
+        assert_eq!(req.command, "rm -rf ~/temp");
+        // take_pending consumes exactly once.
+        assert!(take_pending().is_none(), "second take must return None");
+    }
+
+    #[test]
+    fn approve_pending_end_to_end() {
+        init(AuthorityGate::new(true, 1800));
+        match check_tool("screenshot") {
+            CheckResult::RequireAuth { request } => {
+                set_pending(&request.tool, &request.program, &request.command);
+            }
+            _ => panic!("expected RequireAuth"),
+        }
+        approve_pending();
+        // After approval, the tool check passes (cached).
+        assert!(matches!(check_tool("screenshot"), CheckResult::Allow));
+    }
+
+    #[test]
+    fn shell_tool_sets_pending_on_auth_required() {
+        init(AuthorityGate::new(true, 1800));
+        match check("shell", "rm file.txt") {
+            CheckResult::RequireAuth { request } => {
+                set_pending(&request.tool, &request.program, &request.command);
+            }
+            _ => panic!("expected RequireAuth"),
+        }
+        let req = take_pending().unwrap();
+        assert_eq!(req.tool, "shell");
+        assert_eq!(req.program, "rm");
+        assert!(!req.command.is_empty(), "command should not be empty");
     }
 }

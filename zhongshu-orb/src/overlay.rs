@@ -76,6 +76,14 @@ impl StreamingState {
     }
 }
 
+#[derive(Clone)]
+pub struct ApprovalRequest {
+    pub id: u64,
+    pub tool: String,
+    pub program: String,
+    pub command: String,
+}
+
 pub struct Overlay {
     pub window: Arc<Window>,
     pub state: egui_winit::State,
@@ -85,6 +93,9 @@ pub struct Overlay {
     pub input: String,
     pub entries: Vec<ChatEntry>,
     pub streaming: Option<StreamingState>,
+    pub approval_request: Option<ApprovalRequest>,
+    pub request_quit: bool,
+    pub request_new_conversation: bool,
     ctx: egui::Context,
 }
 
@@ -143,6 +154,9 @@ impl Overlay {
             input: String::new(),
             entries: Vec::new(),
             streaming: None,
+            approval_request: None,
+            request_quit: false,
+            request_new_conversation: false,
             ctx,
         }
     }
@@ -164,13 +178,13 @@ impl Overlay {
                     .stroke(egui::Stroke::new(1.0, Color32::from_rgb(48, 48, 52)))
                     .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
-                        let resp = ui.add(
+                        let _resp = ui.add(
                             egui::TextEdit::singleline(&mut self.input)
                                 .hint_text("给 中书 发消息...")
                                 .desired_width(f32::INFINITY)
                         );
 
-                        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        if cx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
                             let msg = self.input.trim().to_string();
                             if !msg.is_empty() {
                                 send = Some(msg);
@@ -179,6 +193,38 @@ impl Overlay {
                         }
                     });
             });
+
+            if let Some(ref req) = self.approval_request.clone() {
+                egui::TopBottomPanel::top("approval").show(cx, |ui| {
+                    let bg = Color32::from_rgba_premultiplied(180, 60, 20, 220);
+                    egui::Frame::new()
+                        .fill(bg)
+                        .corner_radius(6)
+                        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(208, 96, 50)))
+                        .inner_margin(egui::Margin::symmetric(12, 8))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.colored_label(Color32::from_rgb(255, 200, 80), "[!]");
+                                ui.strong(" 需要授权");
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    let approve = ui.button("批准").clicked();
+                                    let deny = ui.button("拒绝").clicked();
+                                    if approve {
+                                        zhongshu_core::authority::approve(&req.tool, &req.program);
+                                        self.approval_request = None;
+                                        self.window.request_redraw();
+                                    }
+                                    if deny {
+                                        self.approval_request = None;
+                                        self.window.request_redraw();
+                                    }
+                                });
+                            });
+                            ui.label(format!("工具：{}", req.tool));
+                            ui.label(format!("指令：{}", req.command));
+                        });
+                });
+            }
 
             egui::CentralPanel::default().show(cx, |ui| {
                 ui.add_space(4.0);
@@ -477,13 +523,29 @@ fn render_tool_timeline(ui: &mut egui::Ui, tools: &[ToolCallEntry]) {
 }
 
 pub fn configure_fonts(ctx: &egui::Context, search_paths: &[String]) {
-    let data = search_paths.iter().find_map(|p| std::fs::read(p).ok());
+    let data = search_paths.iter().find_map(|p| {
+        let result = std::fs::read(p);
+        match &result {
+            Ok(bytes) => tracing::info!("loaded font: {} ({} bytes)", p, bytes.len()),
+            Err(e) => tracing::debug!("font unreadable: {} ({})", p, e),
+        }
+        result.ok()
+    });
 
-    if let Some(data) = data {
-        let mut fonts = egui::FontDefinitions::default();
-        fonts.font_data.insert("cjk".into(), Arc::new(egui::FontData::from_owned(data)));
-        fonts.families.entry(egui::FontFamily::Proportional).or_default().insert(0, "cjk".into());
-        ctx.set_fonts(fonts);
+    match data {
+        Some(data) => {
+            let mut fonts = egui::FontDefinitions::default();
+            fonts.font_data.insert("cjk".into(), Arc::new(egui::FontData::from_owned(data)));
+            for (_, family_fonts) in fonts.families.iter_mut() {
+                family_fonts.insert(0, "cjk".into());
+            }
+            ctx.set_fonts(fonts);
+            tracing::info!("CJK font applied to all families");
+        }
+        None => {
+            tracing::warn!("no CJK font found; Chinese text will show as squares");
+            tracing::warn!("searched paths: {:?}", search_paths);
+        }
     }
 }
 

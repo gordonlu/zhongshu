@@ -8,9 +8,11 @@ use global_hotkey::{
 // ── HotkeyManager ───────────────────────────────────────────────────
 
 pub struct HotkeyManager {
+    #[allow(dead_code)]
     active: HotKey,
     events: crossbeam_channel::Receiver<GlobalHotKeyEvent>,
-    owns_manager: bool,
+    #[allow(dead_code)]
+    manager: Option<GlobalHotKeyManager>,
 }
 
 impl HotkeyManager {
@@ -24,9 +26,8 @@ impl HotkeyManager {
         }
 
         let events = GlobalHotKeyEvent::receiver().clone();
-        std::mem::forget(manager);
 
-        Ok(HotkeyManager { active, events, owns_manager: true })
+        Ok(HotkeyManager { active, events, manager: Some(manager) })
     }
 
     /// Create a no-op manager when hotkey registration is unavailable.
@@ -35,22 +36,13 @@ impl HotkeyManager {
         HotkeyManager {
             active: HotKey::new(None, Code::Semicolon),
             events: rx,
-            owns_manager: false,
+            manager: None,
         }
     }
 
     /// Consume the next pending hotkey event.  Call from a single owner.
     pub fn try_recv(&mut self) -> Option<GlobalHotKeyEvent> {
         self.events.try_recv().ok()
-    }
-}
-
-impl Drop for HotkeyManager {
-    fn drop(&mut self) {
-        if !self.owns_manager { return; }
-        if let Ok(manager) = GlobalHotKeyManager::new() {
-            let _ = manager.unregister(self.active);
-        }
     }
 }
 

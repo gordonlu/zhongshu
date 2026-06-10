@@ -18,7 +18,7 @@ use winit::window::WindowId;
 
 use zhongshu_core::event::{
     AgentState,
-    Event, AgentEvent, ToolEvent,
+    Event, AgentEvent, ToolEvent, TaskEvent,
     ResponseEvent, ResponseRole, MessageId,
     EventBus, EventRx, ResponseTx, ResponseRx,
 };
@@ -35,7 +35,7 @@ use gpu::GpuContext;
 use indicator::tray::TrayEvent;
 use zhongshu_core::tool::default_registry;
 use zhongshu_core::agent::llm::OpenAiProvider;
-use zhongshu_core::task::{TaskScheduler, IntervalTrigger};
+use zhongshu_core::task::{TaskScheduler, IntervalTrigger, ReminderTrigger, FileWatchTrigger};
 use zhongshu_core::authority::{self, AuthorityGate};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -76,6 +76,12 @@ struct ZhongshuApp {
     hotkey: HotkeyManager,
     gpu: Arc<GpuContext>,
     last_activity: Instant,
+    pending_auth_seq: u64,
+    is_dragging: bool,
+    cursor_pos: (f64, f64),
+    drag_start_cursor: (f64, f64),
+    drag_start_win: (i32, i32),
+    ctrl_held: bool,
 }
 
 impl ZhongshuApp {
@@ -96,6 +102,7 @@ impl ZhongshuApp {
             config, controller, inbox, indicator: None, indicator_state: AgentState::Idle,
             overlays: HashMap::new(), event_bus, event_rx, response_tx, response_rx,
             hotkey, gpu, last_activity: Instant::now(),
+            pending_auth_seq: 0, is_dragging: false, cursor_pos: (0.0, 0.0), drag_start_cursor: (0.0, 0.0), drag_start_win: (0, 0), ctrl_held: false,
         })
     }
 
@@ -103,7 +110,31 @@ impl ZhongshuApp {
 
     fn drain(&mut self) {
         let activity = self.reduce_events() | self.reduce_responses();
+        self.poll_pending_auth();
         if activity { self.last_activity = Instant::now(); }
+    }
+
+    /// Poll for pending authority requests and show in overlay.
+    fn poll_pending_auth(&mut self) {
+        if let Some(req) = zhongshu_core::authority::take_pending() {
+            self.pending_auth_seq += 1;
+            let request = overlay::ApprovalRequest {
+                id: self.pending_auth_seq,
+                tool: req.tool,
+                program: req.program,
+                command: req.command,
+            };
+            if self.config.agent.desktop_notification {
+                let _ = zhongshu_core::desktop::notification::show_urgent(
+                    "需要授权",
+                    &format!("{} - {}", request.tool, request.command),
+                );
+            }
+            for ov in self.overlays.values_mut() {
+                ov.approval_request = Some(request.clone());
+                ov.window.request_redraw();
+            }
+        }
     }
 
     fn reduce_events(&mut self) -> bool {
@@ -117,6 +148,15 @@ impl ZhongshuApp {
                             if matches!(to, AgentState::Done { .. }) || matches!(to, AgentState::Idle) {
                                 for ov in self.overlays.values_mut() {
                                     ov.flush_streaming(self.config.ui.max_chat_entries);
+                                }
+                            }
+                            if self.config.agent.desktop_notification {
+                                if let AgentState::Done { success } = to {
+                                    if success {
+                                        let _ = zhongshu_core::desktop::notification::show("完成", "任务完成");
+                                    } else {
+                                        let _ = zhongshu_core::desktop::notification::show("失败", "任务出错");
+                                    }
                                 }
                             }
                             self.indicator_state = to;
@@ -148,6 +188,16 @@ impl ZhongshuApp {
                                     }
                                 }
                                 ov.window.request_redraw();
+                            }
+                        }
+                        Event::Task(TaskEvent::Triggered { name }) => {
+                            if self.config.agent.desktop_notification {
+                                let _ = zhongshu_core::desktop::notification::show("任务触发", &name);
+                            }
+                        }
+                        Event::Task(TaskEvent::Completed { name }) => {
+                            if self.config.agent.desktop_notification {
+                                let _ = zhongshu_core::desktop::notification::show("任务完成", &name);
                             }
                         }
                         _ => {}
@@ -205,6 +255,20 @@ impl ZhongshuApp {
 
     // ── Overlay management ──────────────────────────────────────────
 
+    fn load_saved_overlay_pos() -> Option<(i32, i32)> {
+        let path = crate::config::config_dir().join("overlay_pos.json");
+        std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok())
+    }
+
+    fn save_overlay_pos(&self, id: WindowId) {
+        if let Some(ov) = self.overlays.get(&id) {
+            if let Ok(pos) = ov.window.outer_position() {
+                let path = crate::config::config_dir().join("overlay_pos.json");
+                let _ = std::fs::write(path, serde_json::to_string_pretty(&(pos.x, pos.y)).unwrap());
+            }
+        }
+    }
+
     fn try_open_overlay(&mut self, el: &ActiveEventLoop) {
         if self.overlays.is_empty() {
             self.controller.init_engine(&self.config.llm.api_key());
@@ -213,6 +277,9 @@ impl ZhongshuApp {
                 self.config.ui.overlay_width, self.config.ui.overlay_height,
                 &self.config.ui.font_search_paths,
             );
+            if let Some((x, y)) = Self::load_saved_overlay_pos() {
+                let _ = ov.window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+            }
             let id = ov.window.id();
             self.overlays.insert(id, ov);
         }
@@ -239,21 +306,72 @@ impl ApplicationHandler for ZhongshuApp {
             }
         }
         let orb_id = self.indicator.as_ref().and_then(|i| i.window_id());
+        #[allow(unused)]
+        let on_orb = orb_id == Some(id);
         match event {
             WindowEvent::CloseRequested => {
-                if orb_id == Some(id) { el.exit(); } else { self.overlays.remove(&id); }
+                if orb_id == Some(id) { el.exit(); } else {
+                    self.save_overlay_pos(id);
+                    self.overlays.remove(&id);
+                }
             }
             WindowEvent::RedrawRequested => {
                 if orb_id == Some(id) {
                     self.indicator.as_mut().unwrap().render();
                 } else if let Some(ov) = self.overlays.get_mut(&id) {
+                    let _ = ov.state.on_window_event(&ov.window, &event);
                     if let Some(input) = ov.render() {
                         self.inbox.submit(input);
                     }
+                    if ov.request_quit { el.exit(); }
+                    if ov.request_new_conversation {
+                        ov.entries.clear();
+                        ov.streaming = None;
+                        ov.input.clear();
+                        ov.request_new_conversation = false;
+                        self.controller.init_engine(&self.config.llm.api_key());
+                    }
                 }
             }
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
-                if orb_id == Some(id) { self.try_open_overlay(el); }
+            WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } => {
+                if on_orb && button == MouseButton::Left {
+                    if let Some(w) = self.indicator.as_ref().unwrap().window() {
+                        if let Ok(p) = w.outer_position() {
+                            self.drag_start_win = (p.x, p.y);
+                            self.drag_start_cursor = self.cursor_pos;
+                            self.is_dragging = true;
+                        }
+                    }
+                }
+                if on_orb && button == MouseButton::Right {
+                    match show_context_menu(self.indicator.as_ref().unwrap().window()) {
+                        MenuAction::NewConversation => self.new_conversation(el),
+                        MenuAction::Quit => el.exit(),
+                        MenuAction::None => {}
+                    }
+                }
+            }
+            WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
+                if on_orb { self.is_dragging = false; }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_pos = (position.x, position.y);
+                if on_orb && self.is_dragging {
+                    let dx = position.x - self.drag_start_cursor.0;
+                    let dy = position.y - self.drag_start_cursor.1;
+                    if let Some(w) = self.indicator.as_ref().unwrap().window() {
+                        let _ = w.set_outer_position(winit::dpi::PhysicalPosition::new(
+                            (self.drag_start_win.0 as f64 + dx) as i32,
+                            (self.drag_start_win.1 as f64 + dy) as i32,
+                        ));
+                    }
+                }
+            }
+            WindowEvent::ModifiersChanged(m) => {
+                self.ctrl_held = m.state().control_key();
+            }
+            WindowEvent::KeyboardInput { event, is_synthetic: false, .. } if self.ctrl_held && event.state == ElementState::Pressed && event.logical_key == "q" => {
+                el.exit();
             }
             _ => {}
         }
@@ -310,10 +428,68 @@ impl ApplicationHandler for ZhongshuApp {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MenuAction { NewConversation, Quit, None }
+
+/// Show a right-click context menu on the orb.
+#[cfg(target_os = "windows")]
+fn show_context_menu(orb_window: Option<&std::sync::Arc<winit::window::Window>>) -> MenuAction {
+    use winit::raw_window_handle::HasWindowHandle;
+    let w = match orb_window { Some(w) => w, None => return MenuAction::None };
+    let handle = match w.window_handle() { Ok(h) => h, Err(_) => return MenuAction::None };
+    let hwnd = match handle.as_ref() {
+        winit::raw_window_handle::RawWindowHandle::Win32(h) => h.hwnd.get(),
+        _ => return MenuAction::None,
+    };
+
+    const MF_STRING: u32 = 0;
+    const TPM_RETURNCMD: u32 = 0x0100;
+
+    #[repr(C)]
+    struct POINT { x: i32, y: i32 }
+
+    extern "system" {
+        fn CreatePopupMenu() -> *mut std::ffi::c_void;
+        fn AppendMenuW(hmenu: *mut std::ffi::c_void, flags: u32, id: usize, text: *const u16) -> i32;
+        fn TrackPopupMenu(hmenu: *mut std::ffi::c_void, flags: u32, x: i32, y: i32, reserved: i32, hwnd: isize, rect: *const std::ffi::c_void) -> u32;
+        fn DestroyMenu(hmenu: *mut std::ffi::c_void) -> i32;
+        fn GetCursorPos(pt: *mut POINT) -> i32;
+    }
+
+    unsafe {
+        let hmenu = CreatePopupMenu();
+        if hmenu.is_null() { return MenuAction::None; }
+
+        let new_conv: Vec<u16> = "新建对话\0".encode_utf16().collect();
+        let quit: Vec<u16> = "退出\0".encode_utf16().collect();
+
+        AppendMenuW(hmenu, MF_STRING, 1, new_conv.as_ptr());
+        AppendMenuW(hmenu, MF_STRING, 2, quit.as_ptr());
+
+        let mut pt = POINT { x: 0, y: 0 };
+        GetCursorPos(&mut pt);
+
+        let cmd = TrackPopupMenu(hmenu, TPM_RETURNCMD, pt.x, pt.y, 0, hwnd as isize, std::ptr::null());
+
+        DestroyMenu(hmenu);
+
+        match cmd {
+            1 => MenuAction::NewConversation,
+            2 => MenuAction::Quit,
+            _ => MenuAction::None,
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn show_context_menu(_orb_window: Option<&std::sync::Arc<winit::window::Window>>) -> MenuAction {
+    MenuAction::None
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_env("ZHONGSHU_LOG")
-                            .unwrap_or_else(|_| "info,wgpu_hal=error,wgpu_core=error,naga=error,sctk_adwaita=error".into()))
+                            .unwrap_or_else(|_| "info,wgpu_hal=off,wgpu_core=error,naga=error,sctk_adwaita=error".into()))
         .init();
 
     preflight_checks();
@@ -347,6 +523,24 @@ fn main() {
     let mut task_scheduler = TaskScheduler::new(Duration::from_secs(1));
     task_scheduler.register(IntervalTrigger::new("hourly-check", "agent", serde_json::json!({"prompt":"[定时检查]"}),
         Duration::from_secs(3600)));
+
+    // Register reminders from config.
+    for r in &cfg.scheduler.reminders {
+        if let Some(trigger) = ReminderTrigger::from_rfc3339(&r.id, &r.message, &r.at) {
+            task_scheduler.register(trigger);
+            tracing::info!("registered reminder '{}' at {}", r.id, r.at);
+        } else {
+            tracing::warn!("failed to parse reminder '{}' at {}", r.id, r.at);
+        }
+    }
+
+    // Register file watches from config.
+    for w in &cfg.scheduler.file_watches {
+        let watch = FileWatchTrigger::new(&w.id, std::path::PathBuf::from(&w.path));
+        task_scheduler.register(watch);
+        tracing::info!("registered file watch '{}' on {}", w.id, w.path);
+    }
+
     let task_queue = task_scheduler.queue().clone();
     task_scheduler.spawn();
     AgentTaskDispatcher::spawn(task_queue, inbox.clone());

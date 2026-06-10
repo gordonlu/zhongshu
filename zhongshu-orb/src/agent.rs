@@ -15,6 +15,8 @@ pub struct AgentProfile {
     pub goals: Vec<Goal>,
     #[serde(default)]
     pub todos: Vec<TodoItem>,
+    #[serde(default)]
+    pub long_term_memory: Vec<MemoryEntry>,
 }
 
 fn default_version() -> u32 { 1 }
@@ -43,6 +45,14 @@ pub struct TodoItem {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryEntry {
+    pub id: String,
+    pub text: String,
+    pub source: String,
+    pub created_at: String,
+}
+
 impl AgentProfile {
     pub fn new() -> Self {
         let ts = timestamp();
@@ -52,6 +62,7 @@ impl AgentProfile {
             created_at: ts.to_string(),
             goals: Vec::new(),
             todos: Vec::new(),
+            long_term_memory: Vec::new(),
         }
     }
 
@@ -160,6 +171,38 @@ impl AgentMemory {
         }
     }
 
+    /// Keep at most `keep_completed` completed goals, archiving the
+    /// oldest excess ones.  Active and already-archived goals are
+    /// left untouched.
+    pub fn archive_completed_goals(&self, keep_completed: usize) {
+        if let Ok(mut p) = self.profile.try_write() {
+            let completed_indices: Vec<usize> = p.goals.iter().enumerate()
+                .filter(|(_, g)| g.status == GoalStatus::Completed)
+                .map(|(i, _)| i)
+                .collect();
+            let to_archive = completed_indices.len().saturating_sub(keep_completed);
+            if to_archive == 0 { return; }
+            for &i in completed_indices.iter().take(to_archive) {
+                p.goals[i].status = GoalStatus::Archived;
+            }
+            save_to_disk(&self.path, &p);
+        }
+    }
+
+    /// Store a structured memory observation (fact, preference, etc.).
+    pub fn add_memory_entry(&self, text: &str, source: &str) {
+        if let Ok(mut p) = self.profile.try_write() {
+            let ts = timestamp().to_string();
+            p.long_term_memory.push(MemoryEntry {
+                id: format!("mem-{ts}"),
+                text: text.to_string(),
+                source: source.to_string(),
+                created_at: ts,
+            });
+            save_to_disk(&self.path, &p);
+        }
+    }
+
     /// Scan the assistant response for completed-goal markers
     /// (lines starting with `- [x] goal-name`) and mark matching
     /// active goals as completed.
@@ -263,4 +306,63 @@ mod tests {
         assert!(ctx.contains("active goal"));
         assert!(!ctx.contains("done goal"));
     }
+
+    #[test]
+    fn archive_completed_goals_removes_old_completed() {
+        let mem = test_memory();
+        mem.add_goal("g1");
+        mem.add_goal("g2");
+        mem.add_goal("g3");
+        mem.complete_goal("g1");
+        mem.complete_goal("g2");
+        // 1 active (g3), 2 completed (g1, g2). Archive oldest completed.
+        mem.archive_completed_goals(1);
+        {
+            let p = mem.profile.try_read().unwrap();
+            assert_eq!(p.goals.iter().filter(|g| g.status == GoalStatus::Active).count(), 1);
+            assert_eq!(p.goals[0].status, GoalStatus::Archived, "g1 archived");
+            assert_eq!(p.goals[1].status, GoalStatus::Completed, "g2 kept");
+            assert_eq!(p.goals[2].status, GoalStatus::Active, "g3 active");
+        }
+    }
+
+    #[test]
+    fn archive_completed_goals_does_nothing_when_under_limit() {
+        let mem = test_memory();
+        mem.add_goal("g1");
+        mem.add_goal("g2");
+        mem.complete_goal("g1");
+        // 1 completed, keep 2 → nothing archived.
+        mem.archive_completed_goals(2);
+        {
+            let p = mem.profile.try_read().unwrap();
+            assert_eq!(p.goals.iter().filter(|g| g.status == GoalStatus::Completed).count(), 1);
+            assert_eq!(p.goals.iter().filter(|g| g.status == GoalStatus::Archived).count(), 0);
+        }
+    }
+
+    #[test]
+    fn archive_completed_goals_no_completed_noop() {
+        let mem = test_memory();
+        mem.add_goal("g1");
+        // 1 active, 0 completed → nothing to archive.
+        mem.archive_completed_goals(0);
+        {
+            let p = mem.profile.try_read().unwrap();
+            assert_eq!(p.goals.iter().filter(|g| g.status == GoalStatus::Active).count(), 1);
+            assert_eq!(p.goals.iter().filter(|g| g.status == GoalStatus::Archived).count(), 0);
+        }
+    }
+
+    #[test]
+    fn add_memory_entry_stores_observation() {
+        let mem = test_memory();
+        mem.add_memory_entry("user prefers dark mode", "observation");
+        let p = mem.profile.try_read().unwrap();
+        assert_eq!(p.long_term_memory.len(), 1);
+        assert_eq!(p.long_term_memory[0].text, "user prefers dark mode");
+        assert_eq!(p.long_term_memory[0].source, "observation");
+        assert!(!p.long_term_memory[0].id.is_empty());
+    }
+
 }

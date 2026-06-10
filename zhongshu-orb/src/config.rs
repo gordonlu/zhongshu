@@ -18,6 +18,8 @@ pub struct AppConfig {
     pub ui: UiConfig,
     #[serde(default)]
     pub agent: AgentConfig,
+    #[serde(default)]
+    pub scheduler: SchedulerConfig,
 }
 
 impl Default for AppConfig {
@@ -28,6 +30,7 @@ impl Default for AppConfig {
             hotkey: HotkeyConfig::default(),
             ui: UiConfig::default(),
             agent: AgentConfig::default(),
+            scheduler: SchedulerConfig::default(),
         }
     }
 }
@@ -87,7 +90,7 @@ impl Default for HotkeyConfig {
     }
 }
 
-fn default_hotkey_modifiers() -> Vec<String> { vec!["Meta".into()] }
+fn default_hotkey_modifiers() -> Vec<String> { vec!["Alt".into()] }
 fn default_hotkey_key() -> String { "Semicolon".into() }
 
 // ── UI ──────────────────────────────────────────────────────────────
@@ -118,6 +121,15 @@ impl Default for UiConfig {
                 "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc".into(),
                 "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc".into(),
                 "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf".into(),
+                // Windows
+                "C:\\Windows\\Fonts\\msyh.ttc".into(),
+                "C:\\Windows\\Fonts\\msyhbd.ttc".into(),
+                "C:\\Windows\\Fonts\\msyhl.ttc".into(),
+                "C:\\Windows\\Fonts\\simsun.ttc".into(),
+                "C:\\Windows\\Fonts\\simsun.ttf".into(),
+                "C:\\Windows\\Fonts\\simhei.ttf".into(),
+                "C:\\Windows\\Fonts\\deng.ttf".into(),
+                "C:\\Windows\\Fonts\\yahei.ttf".into(),
             ],
         }
     }
@@ -230,6 +242,39 @@ fn default_max_tool_calls() -> u32 { 20 }
 fn default_token_limit() -> u32 { 128_000 }
 fn default_streaming_timeout_secs() -> u64 { 60 }
 fn default_response_capacity() -> usize { 512 }
+
+// ── Scheduler ───────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchedulerConfig {
+    #[serde(default)]
+    pub reminders: Vec<ReminderEntry>,
+    #[serde(default)]
+    pub file_watches: Vec<FileWatchEntry>,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        SchedulerConfig {
+            reminders: Vec::new(),
+            file_watches: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReminderEntry {
+    pub id: String,
+    pub message: String,
+    /// RFC 3339 / ISO 8601 timestamp
+    pub at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileWatchEntry {
+    pub id: String,
+    pub path: String,
+}
 
 // ── File I/O ────────────────────────────────────────────────────────
 

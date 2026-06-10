@@ -1,279 +1,365 @@
 mod app;
 mod render;
+mod indicator;
+mod overlay;
+mod hotkey;
+mod config;
+mod gpu;
+mod agent;
 
 use std::collections::HashMap;
-use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Instant;
 
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::window::{Window, WindowAttributes, WindowId, WindowLevel};
+use winit::window::WindowId;
 
-use render::{draw_orb, OrbState};
-use app::{AgentRuntime, UiBridge, UiEvent, SessionState};
-use zhongshu_core::agent::llm::{Message, OpenAiProvider};
-use zhongshu_core::agent::loop_::{AgentBudget, AgentLoop};
+use zhongshu_core::event::{
+    AgentState,
+    Event, AgentEvent, ToolEvent,
+    ResponseEvent, ResponseRole, MessageId,
+    EventBus, EventRx, ResponseTx, ResponseRx,
+};
+use indicator::Indicator;
+use app::{SessionState, AgentController, BackgroundRunner, AgentInbox, AgentTaskDispatcher};
+use overlay::{ToolCallEntry, ToolStatus};
+use overlay::EntryRole;
+use overlay::Overlay;
+use overlay::StreamingState;
+use hotkey::HotkeyManager;
+use config::AppConfig;
+use gpu::GpuContext;
+#[cfg(target_os = "linux")]
+use indicator::tray::TrayEvent;
 use zhongshu_core::tool::default_registry;
-use zhongshu_core::integration::{ContextConfig, ContextEngine};
+use zhongshu_core::agent::llm::OpenAiProvider;
+use zhongshu_core::task::{TaskScheduler, IntervalTrigger};
+use zhongshu_core::authority::{self, AuthorityGate};
+use std::time::Duration;
+use tokio::sync::mpsc;
 
-const ORB_SIZE: u32 = 64;
-const SYSTEM_PROMPT: &str = "\
-你是「中书」(Zhongshu)，桌面 AI 助手。回复简洁，末尾加 <final_answer>。中文回复。";
+fn preflight_checks() {
+    // Event bus: subscribe first, then publish & receive must work.
+    let bus = Arc::new(EventBus::new(4));
+    let mut rx = bus.subscribe();
+    bus.publish(Event::Agent(AgentEvent::StateChanged {
+        from: AgentState::Idle, to: AgentState::Thinking,
+    }));
+    assert!(rx.try_recv().is_ok(), "preflight: event bus failed");
 
-struct EguiOverlay {
-    window: Arc<Window>,
-    state: egui_winit::State,
-    renderer: egui_wgpu::Renderer,
-    surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-    input: String,
-    messages: Vec<String>,
+    // Response channel: send & receive must work.
+    let (tx, mut response_rx) = mpsc::channel::<ResponseEvent>(4);
+    let id = MessageId::new();
+    assert!(tx.try_send(ResponseEvent::MessageStarted { id, role: ResponseRole::System }).is_ok(), "preflight: response tx failed");
+    assert!(response_rx.try_recv().is_ok(), "preflight: response rx failed");
+
+    // egui context: must be constructable and renderable.
+    let ctx = egui::Context::default();
+    let _out = ctx.run(Default::default(), |_cx| {});
+
+    tracing::info!("preflight checks passed");
 }
 
 struct ZhongshuApp {
-    orb_window: Option<Arc<Window>>,
-    orb_surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
-    orb_state: OrbState,
-    orb_positioned: bool,
-    overlays: HashMap<WindowId, EguiOverlay>,
-    start_time: Instant,
-    bridge: UiBridge,
-    runtime: AgentRuntime,
-    session: SessionState,
-    egui_ctx: Option<egui::Context>,
+    config: AppConfig,
+    controller: Arc<AgentController>,
+    inbox: Arc<AgentInbox>,
+    indicator: Option<Indicator>,
+    indicator_state: AgentState,
+    overlays: HashMap<WindowId, Overlay>,
+    event_bus: Arc<EventBus>,
+    event_rx: EventRx,
+    response_tx: ResponseTx,
+    response_rx: ResponseRx,
+    hotkey: HotkeyManager,
+    gpu: Arc<GpuContext>,
+    last_activity: Instant,
 }
 
 impl ZhongshuApp {
-    fn new(bridge: UiBridge, runtime: AgentRuntime, session: SessionState) -> Self {
-        ZhongshuApp {
-            orb_window: None, orb_surface: None, orb_state: OrbState::Idle,
-            orb_positioned: false, overlays: HashMap::new(),
-            start_time: Instant::now(), bridge, runtime, session, egui_ctx: None,
-        }
+    fn new(
+        config: AppConfig,
+        controller: Arc<AgentController>,
+        inbox: Arc<AgentInbox>,
+        event_bus: Arc<EventBus>,
+        event_rx: EventRx,
+        response_tx: ResponseTx,
+        response_rx: ResponseRx,
+        gpu: Arc<GpuContext>,
+    ) -> anyhow::Result<Self> {
+        let hotkey = HotkeyManager::new(&config.hotkey).unwrap_or_else(|e| {
+            tracing::warn!("Global hotkey unavailable: {e:#}"); HotkeyManager::passive()
+        });
+        Ok(ZhongshuApp {
+            config, controller, inbox, indicator: None, indicator_state: AgentState::Idle,
+            overlays: HashMap::new(), event_bus, event_rx, response_tx, response_rx,
+            hotkey, gpu, last_activity: Instant::now(),
+        })
     }
 
-    fn position_orb(&mut self) {
-        if self.orb_positioned { return; }
-        if let Some(w) = &self.orb_window {
-            if let Some(m) = w.current_monitor() {
-                let p = m.position(); let s = m.size();
-                w.set_outer_position(PhysicalPosition::new(p.x + s.width as i32 - 80, p.y + s.height as i32 - 100));
-                self.orb_positioned = true;
-            }
-        }
-    }
+    // ── Event reducers ──────────────────────────────────────────────
 
     fn drain(&mut self) {
-        while let Ok(ev) = self.bridge.rx.try_recv() {
+        let activity = self.reduce_events() | self.reduce_responses();
+        if activity { self.last_activity = Instant::now(); }
+    }
+
+    fn reduce_events(&mut self) -> bool {
+        let mut active = false;
+        loop {
+            match self.event_rx.try_recv() {
+                Ok(ev) => {
+                    active = true;
+                    match ev {
+                        Event::Agent(AgentEvent::StateChanged { from: _, to }) => {
+                            if matches!(to, AgentState::Done { .. }) || matches!(to, AgentState::Idle) {
+                                for ov in self.overlays.values_mut() {
+                                    ov.flush_streaming(self.config.ui.max_chat_entries);
+                                }
+                            }
+                            self.indicator_state = to;
+                            if let Some(ind) = self.indicator.as_mut() { ind.set_state(to); }
+                        }
+                        Event::Tool(ToolEvent::Started { name }) => {
+                            self.indicator_state = AgentState::Executing;
+                            if let Some(ind) = self.indicator.as_mut() { ind.set_state(AgentState::Executing); }
+                            for ov in self.overlays.values_mut() {
+                                if let Some(ref mut s) = ov.streaming {
+                                    s.tool_calls.push(ToolCallEntry::new(name.clone()));
+                                } else {
+                                    ov.streaming = Some(StreamingState::new(EntryRole::Assistant));
+                                    ov.streaming.as_mut().unwrap().tool_calls.push(ToolCallEntry::new(name.clone()));
+                                }
+                                ov.window.request_redraw();
+                            }
+                        }
+                        Event::Tool(ToolEvent::Completed { name, success }) => {
+                            for ov in self.overlays.values_mut() {
+                                if let Some(ref mut s) = ov.streaming {
+                                    if let Some(last) = s.tool_calls.iter_mut().rev().find(|t| matches!(t.status, ToolStatus::Running)) {
+                                        let elapsed = last.started_at.elapsed().as_millis() as u64;
+                                        last.status = ToolStatus::Done { success, duration_ms: elapsed };
+                                    } else {
+                                        let mut tc = ToolCallEntry::new(name.clone());
+                                        tc.status = ToolStatus::Done { success, duration_ms: 0 };
+                                        s.tool_calls.push(tc);
+                                    }
+                                }
+                                ov.window.request_redraw();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
+                    tracing::warn!("event bus lagged: {n} events dropped"); active = true;
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Closed)
+                | Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+            }
+        }
+        active
+    }
+
+    fn reduce_responses(&mut self) -> bool {
+        let mut active = false;
+        while let Ok(ev) = self.response_rx.try_recv() {
+            active = true;
             match ev {
-                UiEvent::SetState(s) => { self.orb_state = s; if let Some(w) = &self.orb_window { w.request_redraw(); } }
-                UiEvent::TextDelta(t) => {
-                    for ov in self.overlays.values_mut() { ov.messages.push(t.clone()); ov.window.request_redraw(); }
+                ResponseEvent::MessageStarted { role, .. } => {
+                    let erole = match role {
+                        ResponseRole::User => EntryRole::User,
+                        ResponseRole::Assistant => EntryRole::Assistant,
+                        ResponseRole::System => EntryRole::System,
+                    };
+                    for ov in self.overlays.values_mut() {
+                        ov.flush_streaming(self.config.ui.max_chat_entries);
+                        ov.streaming = Some(StreamingState::new(erole));
+                        ov.window.request_redraw();
+                    }
                 }
-                UiEvent::ToolStart => {
-                    self.orb_state = OrbState::Executing { pulse: 0.0 };
-                    if let Some(w) = &self.orb_window { w.request_redraw(); }
+                ResponseEvent::MessageDelta { delta, .. } => {
+                    for ov in self.overlays.values_mut() {
+                        if let Some(ref mut s) = ov.streaming {
+                            s.content.push_str(&delta);
+                        } else {
+                            let mut s = StreamingState::new(EntryRole::Assistant);
+                            s.content.push_str(&delta);
+                            ov.streaming = Some(s);
+                        }
+                        ov.window.request_redraw();
+                    }
                 }
-                UiEvent::ToolDone(ok) => {
-                    let icon = if ok { "✓" } else { "✗" };
-                    for ov in self.overlays.values_mut() { ov.messages.push(icon.to_string()); ov.window.request_redraw(); }
+                ResponseEvent::MessageCompleted { .. } => {
+                    for ov in self.overlays.values_mut() {
+                        ov.flush_streaming(self.config.ui.max_chat_entries);
+                        ov.window.request_redraw();
+                    }
                 }
             }
         }
+        active
     }
 
-    fn run_agent(&mut self, input: String) {
-        let tx = self.bridge.tx.clone();
-        let p = self.runtime.provider.clone();
-        let t = self.runtime.tools.clone();
-        let m = self.runtime.model.clone();
-        let e = self.session.engine.clone();
-        let c = self.session.conv_id.clone();
-        tx.send(UiEvent::SetState(OrbState::Thinking { progress: 0.0 })).ok();
-        tx.send(UiEvent::TextDelta(format!("你: {}", input))).ok();
-        tokio::spawn(async move {
-            let eng = e.lock().await.clone();
-            let cid = *c.lock().await;
-            let mctx = eng.as_ref().map_or(String::new(), |x| x.build_context(cid, 5000, &input).unwrap_or_default());
-            let mut msgs = vec![Message::system(SYSTEM_PROMPT)];
-            if !mctx.is_empty() { msgs.push(Message::user(format!("<context>\n{mctx}\n</context>"))); }
-            msgs.push(Message::user(input.clone()));
-            let agent = AgentLoop::new(p, t, m).with_budget(AgentBudget::default()).with_messages(msgs);
-            let r = agent.run_streaming("",
-                { let tx=tx.clone(); move |x|{tx.send(UiEvent::TextDelta(x.to_string())).ok();} },
-                { let tx=tx.clone(); move |_|{tx.send(UiEvent::ToolStart).ok();} },
-                { let tx=tx.clone(); move |_,ok|{tx.send(UiEvent::ToolDone(ok)).ok();} },
-            ).await;
-            match r {
-                Ok(rr) => {
-                    if let Some(ref en) = eng { let _=en.append_turn(cid,&format!("[u]:{input}"),&format!("[a]:{}",rr.messages.last().map(|x|x.content.as_str()).unwrap_or(""))); if en.check_compression(cid).should_compress{let _=en.trigger_compaction(cid).await;} }
-                    tx.send(UiEvent::SetState(OrbState::Done{success:true})).ok();
-                }
-                Err(e) => { tx.send(UiEvent::TextDelta(format!("错误:{e}"))).ok(); tx.send(UiEvent::SetState(OrbState::Done{success:false})).ok(); }
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            tx.send(UiEvent::SetState(OrbState::Idle)).ok();
-        });
-    }
+    // ── Overlay management ──────────────────────────────────────────
 
-    fn init_engine(&mut self) {
-        let ak = std::env::var("DEEPSEEK_API_KEY").unwrap_or_default();
-        if ak.is_empty() { return; }
-        let m = self.runtime.model.clone();
-        let ea = self.session.engine.clone(); let ca = self.session.conv_id.clone();
-        tokio::spawn(async move {
-            if let Ok(e) = ContextEngine::new(ContextConfig{api_key:ak,..ContextConfig::default()}).await {
-                let cid = e.find_or_create_conv(SYSTEM_PROMPT,&m).unwrap_or(1);
-                *ea.lock().await = Some(Arc::new(e)); *ca.lock().await = cid;
-            }
-        });
-    }
-
-    fn create_orb(&mut self, el: &ActiveEventLoop) {
-        let attrs = WindowAttributes::default().with_title("zhongshu")
-            .with_inner_size(LogicalSize::new(ORB_SIZE,ORB_SIZE)).with_resizable(false)
-            .with_decorations(false).with_window_level(WindowLevel::AlwaysOnTop).with_active(false);
-        let w = Arc::new(el.create_window(attrs).unwrap());
-        let ctx = softbuffer::Context::new(w.clone()).unwrap();
-        self.orb_surface = Some(softbuffer::Surface::new(&ctx,w.clone()).unwrap());
-        self.orb_window = Some(w.clone()); w.request_redraw();
-    }
-
-    fn create_overlay(&mut self, el: &ActiveEventLoop) {
-        let attrs = WindowAttributes::default().with_title("zhongshu 对话")
-            .with_inner_size(LogicalSize::new(480.0,580.0)).with_resizable(true)
-            .with_decorations(true).with_window_level(WindowLevel::Normal);
-        let w = Arc::new(el.create_window(attrs).unwrap());
-        let id = w.id();
-        let vp_id = egui::viewport::ViewportId::from_hash_of(id);
-        let instance = wgpu::Instance::default();
-        let surface = instance.create_surface(w.clone()).unwrap();
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions{
-            power_preference:wgpu::PowerPreference::LowPower,compatible_surface:Some(&surface),force_fallback_adapter:false,
-        })).unwrap();
-        let (device,queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(),None)).unwrap();
-        let sz = w.inner_size();
-        let config = wgpu::SurfaceConfiguration{
-            usage:wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format:surface.get_capabilities(&adapter).formats[0],
-            width:sz.width,height:sz.height,
-            present_mode:wgpu::PresentMode::AutoVsync,
-            alpha_mode:wgpu::CompositeAlphaMode::Auto,view_formats:vec![],
-            desired_maximum_frame_latency:1,
-        };
-        surface.configure(&device,&config);
-        let state = egui_winit::State::new(self.egui_ctx.clone().unwrap_or_default(),vp_id,&w,None,None,None);
-        let renderer = egui_wgpu::Renderer::new(&device,config.format,None,1,false);
-        self.overlays.insert(id,EguiOverlay{window:w.clone(),surface,device,queue,config,state,renderer,input:String::new(),messages:Vec::new()});
-        w.focus_window(); w.request_redraw();
-    }
-
-    fn render_orb(&mut self) {
-        self.position_orb();
-        let (w,s) = match(&self.orb_window,&mut self.orb_surface){(Some(w),Some(s))=>(w,s),_=>return};
-        let sz=w.inner_size();let(ww,hh)=(sz.width,sz.height);
-        if ww==0||hh==0{return;}
-        s.resize(NonZeroU32::new(ww).unwrap(),NonZeroU32::new(hh).unwrap()).ok();
-        let mut buf=match s.buffer_mut(){Ok(b)=>b,Err(_)=>return};
-        draw_orb(&mut buf,ww,hh,self.orb_state,self.start_time.elapsed().as_secs_f64());
-        buf.present().unwrap();
-        if !matches!(self.orb_state,OrbState::Idle){w.request_redraw();}
-    }
-
-    fn render_overlay(&mut self, id: WindowId) {
-        let ov = match self.overlays.get_mut(&id) { Some(o) => o, None => return };
-        let sz = ov.window.inner_size(); if sz.width==0||sz.height==0{return;}
-        let raw = ov.state.take_egui_input(&ov.window);
-        let ctx = self.egui_ctx.clone().unwrap_or_default();
-        let mut send: Option<String> = None;
-        let out = ctx.run(raw, |cx| {
-            egui::CentralPanel::default().show(cx, |ui| {
-                egui::ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
-                    for m in &ov.messages { ui.label(m.as_str()); }
-                });
-            });
-            egui::TopBottomPanel::bottom("input").show(cx, |ui| {
-                let r = ui.add(egui::TextEdit::singleline(&mut ov.input).hint_text("输入，Enter 发送..."));
-                if r.lost_focus()&&ui.input(|i|i.key_pressed(egui::Key::Enter)){send=Some(std::mem::take(&mut ov.input));}
-                r.request_focus();
-            });
-        });
-        self.egui_ctx = Some(ctx.clone());
-        ov.state.handle_platform_output(&ov.window, out.platform_output);
-        let inp = send.take().filter(|s|!s.trim().is_empty());
-
-        let pj = ctx.tessellate(out.shapes, out.pixels_per_point);
-        for (id, d) in out.textures_delta.set { ov.renderer.update_texture(&ov.device,&ov.queue,id,&d); }
-        for id in out.textures_delta.free { ov.renderer.free_texture(&id); }
-
-        if ov.config.width!=sz.width||ov.config.height!=sz.height {
-            ov.config.width=sz.width; ov.config.height=sz.height;
-            ov.surface.configure(&ov.device,&ov.config);
+    fn try_open_overlay(&mut self, el: &ActiveEventLoop) {
+        if self.overlays.is_empty() {
+            self.controller.init_engine(&self.config.llm.api_key());
+            let ov = Overlay::new(
+                el, self.gpu.clone(),
+                self.config.ui.overlay_width, self.config.ui.overlay_height,
+                &self.config.ui.font_search_paths,
+            );
+            let id = ov.window.id();
+            self.overlays.insert(id, ov);
         }
-        let sd = egui_wgpu::ScreenDescriptor{size_in_pixels:[ov.config.width,ov.config.height],pixels_per_point:ov.window.scale_factor() as f32};
-        let frame = ov.surface.get_current_texture().unwrap();
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut enc = ov.device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        ov.renderer.update_buffers(&ov.device,&ov.queue,&mut enc,&pj,&sd);
-        {
-            let rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor{
-                label:Some("egui"),color_attachments:&[Some(wgpu::RenderPassColorAttachment{
-                    view:&view,resolve_target:None,ops:wgpu::Operations{load:wgpu::LoadOp::Load,store:wgpu::StoreOp::Store},
-                })],depth_stencil_attachment:None,timestamp_writes:None,occlusion_query_set:None,
-            });
-            let mut rp_static = rp.forget_lifetime();
-            ov.renderer.render(&mut rp_static, &pj, &sd);
-        }
-        ov.queue.submit([enc.finish()]); frame.present();
-        let _ = ov;
+    }
 
-        if let Some(input) = inp { self.run_agent(input); }
+    fn new_conversation(&mut self, el: &ActiveEventLoop) {
+        let ids: Vec<WindowId> = self.overlays.keys().copied().collect();
+        for id in ids { self.overlays.remove(&id); }
+        self.try_open_overlay(el);
     }
 }
 
 impl ApplicationHandler for ZhongshuApp {
-    fn resumed(&mut self, el: &ActiveEventLoop) { if self.orb_window.is_none() { self.init_engine(); self.create_orb(el); } }
+    fn resumed(&mut self, el: &ActiveEventLoop) {
+        self.indicator = Some(Indicator::create(el, self.config.ui.orb_size));
+    }
     fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         self.drain();
         let is_ol = self.overlays.contains_key(&id);
-        if is_ol { if let Some(ov) = self.overlays.get_mut(&id) { let _ = ov.state.on_window_event(&ov.window, &event); } }
+        if is_ol {
+            if let Some(ov) = self.overlays.get_mut(&id) {
+                let _ = ov.state.on_window_event(&ov.window, &event);
+                ov.window.request_redraw();
+            }
+        }
+        let orb_id = self.indicator.as_ref().and_then(|i| i.window_id());
         match event {
             WindowEvent::CloseRequested => {
-                if self.orb_window.as_ref().map(|w|w.id())==Some(id){el.exit();}else{self.overlays.remove(&id);}
+                if orb_id == Some(id) { el.exit(); } else { self.overlays.remove(&id); }
             }
             WindowEvent::RedrawRequested => {
-                if self.orb_window.as_ref().map(|w|w.id())==Some(id){self.render_orb();}else{self.render_overlay(id);}
-            }
-            WindowEvent::MouseInput{state:ElementState::Pressed,button:MouseButton::Left,..} => {
-                if self.orb_window.as_ref().map(|w|w.id())==Some(id)&&self.overlays.is_empty() {
-                    if self.session.engine.try_lock().map(|g|g.is_none()).unwrap_or(true){self.init_engine();}
-                    self.create_overlay(el);
+                if orb_id == Some(id) {
+                    self.indicator.as_mut().unwrap().render();
+                } else if let Some(ov) = self.overlays.get_mut(&id) {
+                    if let Some(input) = ov.render() {
+                        self.inbox.submit(input);
+                    }
                 }
+            }
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+                if orb_id == Some(id) { self.try_open_overlay(el); }
             }
             _ => {}
         }
     }
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         self.drain();
-        el.set_control_flow(if matches!(self.orb_state,OrbState::Idle){ControlFlow::Wait}else{ControlFlow::Poll});
+
+        if self.hotkey.try_recv().is_some() { self.try_open_overlay(el); }
+
+        #[cfg(target_os = "linux")]
+        {
+            let mut tray_events = Vec::new();
+            if let Some(Indicator::Tray(t)) = self.indicator.as_mut() {
+                while let Ok(ev) = t.rx.try_recv() { tray_events.push(ev); }
+            }
+            for ev in tray_events {
+                match ev {
+                    TrayEvent::OpenOverlay => self.try_open_overlay(el),
+                    TrayEvent::NewConversation => self.new_conversation(el),
+                    TrayEvent::Quit => {
+                        tracing::info!("tray quit");
+                        el.exit();
+                    }
+                }
+            }
+        }
+
+        // Streaming timeout
+        let elapsed = self.last_activity.elapsed().as_secs();
+        let timeout = self.config.agent.streaming_timeout_secs;
+        if !matches!(self.indicator_state, AgentState::Idle) && elapsed > timeout {
+            tracing::warn!("streaming timeout after {elapsed}s (limit {timeout}s)");
+            self.event_bus.publish(Event::Agent(AgentEvent::StateChanged {
+                from: self.indicator_state, to: AgentState::Done { success: false },
+            }));
+            let mid = MessageId::new();
+            let _ = self.response_tx.try_send(ResponseEvent::MessageStarted { id: mid, role: ResponseRole::System });
+            let _ = self.response_tx.try_send(ResponseEvent::MessageDelta { id: mid, delta: format!("[连接超时: {elapsed}s 无响应]") });
+            let _ = self.response_tx.try_send(ResponseEvent::MessageCompleted { id: mid });
+            self.last_activity = Instant::now(); self.drain();
+        }
+
+        let idle = matches!(self.indicator_state, AgentState::Idle);
+        let tray_active = cfg!(target_os = "linux");
+        el.set_control_flow(
+            if !self.overlays.is_empty() || !idle {
+                ControlFlow::Poll
+            } else if tray_active {
+                ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(200))
+            } else {
+                ControlFlow::Wait
+            }
+        );
     }
 }
 
 fn main() {
-    tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_|"info".into())).init();
-    let ak = std::env::var("DEEPSEEK_API_KEY").expect("DEEPSEEK_API_KEY");
-    let model = std::env::var("ZHONGSHU_MODEL").unwrap_or_else(|_|"deepseek-v4-flash".into());
-    let p = OpenAiProvider::new(&ak,&model);
-    let t = default_registry().register(zhongshu_core::tool::search::WebSearchTool).register(zhongshu_core::tool::browser::BrowserTool).register(zhongshu_core::tool::screenshot::ScreenshotTool).register(zhongshu_core::tool::automation::AutomationTool);
-    let b = UiBridge::new();
-    let rt = AgentRuntime{provider:p,tools:t,model};
-    let s = SessionState::new();
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_env("ZHONGSHU_LOG")
+                            .unwrap_or_else(|_| "info,wgpu_hal=error,wgpu_core=error,naga=error,sctk_adwaita=error".into()))
+        .init();
+
+    preflight_checks();
+
+    let cfg = config::load();
+    let ak = cfg.llm.api_key();
+    if ak.is_empty() { tracing::warn!("{} not set; agent will not function", cfg.llm.api_key_env); }
+
+    let eb = Arc::new(EventBus::new(256));
+    let (response_tx, response_rx) = mpsc::channel::<ResponseEvent>(cfg.agent.response_capacity);
+    let event_rx = eb.subscribe();
+
+    authority::init(AuthorityGate::new(cfg.agent.authority.enabled, cfg.agent.authority.sudo_timeout_secs));
+
+    let controller = Arc::new(AgentController::new(
+        eb.clone(), response_tx.clone(),
+        OpenAiProvider::new(&ak, &cfg.llm.model),
+        default_registry().register(zhongshu_core::tool::search::WebSearchTool)
+            .register(zhongshu_core::tool::browser::BrowserTool)
+            .register(zhongshu_core::tool::screenshot::ScreenshotTool)
+            .register(zhongshu_core::tool::automation::AutomationTool),
+        cfg.llm.model.clone(), SessionState::new(), cfg.agent.system_prompt.clone(),
+        config::config_dir().join("agent.json"),
+    ));
+    let inbox = Arc::new(AgentInbox::new(controller.clone()));
+
     let r = tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build().unwrap();
     let _g = r.enter();
-    EventLoop::new().unwrap().run_app(&mut ZhongshuApp::new(b,rt,s)).unwrap();
+    inbox.start();
+
+    let mut task_scheduler = TaskScheduler::new(Duration::from_secs(1));
+    task_scheduler.register(IntervalTrigger::new("hourly-check", "agent", serde_json::json!({"prompt":"[定时检查]"}),
+        Duration::from_secs(3600)));
+    let task_queue = task_scheduler.queue().clone();
+    task_scheduler.spawn();
+    AgentTaskDispatcher::spawn(task_queue, inbox.clone());
+
+    let gpu = match GpuContext::new() { Ok(g) => Arc::new(g), Err(e) => { tracing::error!("GPU: {e:#}"); return; } };
+    let mut app = match ZhongshuApp::new(cfg, controller, inbox.clone(), eb, event_rx, response_tx, response_rx, gpu) {
+        Ok(app) => app, Err(e) => { tracing::error!("init: {e:#}"); return; }
+    };
+
+    if app.config.agent.background.enabled {
+        BackgroundRunner::new(app.config.agent.background.interval_secs, app.config.agent.background.prompt.clone(), app.controller.state())
+            .spawn(app.inbox.clone());
+    }
+
+    EventLoop::new().unwrap().run_app(&mut app).unwrap();
 }

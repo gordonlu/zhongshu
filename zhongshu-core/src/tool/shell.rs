@@ -1,3 +1,4 @@
+use crate::authority::{self, CheckResult};
 use crate::tool::{Tool, ToolOutput};
 use async_trait::async_trait;
 use serde_json::json;
@@ -30,8 +31,20 @@ impl Tool for ShellTool {
             Some(c) => c,
             None => return ToolOutput::error("'command' must be a string"),
         };
-        let cwd = arguments["cwd"].as_str();
 
+        // Authority gate check.
+        let result = authority::check("shell", command);
+        match result {
+            CheckResult::Deny { reason } => {
+                return ToolOutput::error(format!("[BLOCKED] {reason}"));
+            }
+            CheckResult::RequireAuth { request } => {
+                return ToolOutput::auth_required(&request.program, &request.command);
+            }
+            CheckResult::Allow => {}
+        }
+
+        let cwd = arguments["cwd"].as_str();
         let (shell, flag) = if cfg!(target_os = "windows") {
             ("cmd", "/C")
         } else {
@@ -56,3 +69,9 @@ impl Tool for ShellTool {
         }
     }
 }
+
+pub fn approve(tool: &str, program: &str) {
+    authority::approve(tool, program);
+}
+
+pub fn deny(_tool: &str, _program: &str) {}

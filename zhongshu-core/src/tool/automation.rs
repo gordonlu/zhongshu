@@ -1,3 +1,4 @@
+use crate::authority::{self, CheckResult};
 use crate::tool::{Tool, ToolOutput};
 use async_trait::async_trait;
 use serde_json::json;
@@ -27,6 +28,15 @@ impl Tool for AutomationTool {
     }
 
     async fn execute(&self, arguments: &serde_json::Value) -> ToolOutput {
+        match authority::check_tool("automation") {
+            CheckResult::Deny { reason } => return ToolOutput::error(format!("[BLOCKED] {reason}")),
+            CheckResult::RequireAuth { request } => {
+                authority::set_pending(&request.tool, &request.program);
+                return ToolOutput::auth_required(&request.program, &request.command);
+            }
+            CheckResult::Allow => {}
+        }
+
         let action = match arguments["action"].as_str() {
             Some(a) => a,
             None => return ToolOutput::error("'action' must be a string"),

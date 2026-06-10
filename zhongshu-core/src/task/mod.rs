@@ -13,6 +13,7 @@ pub struct Task {
     pub arguments: serde_json::Value,
 }
 
+#[derive(Clone)]
 pub struct TaskQueue {
     tx: mpsc::UnboundedSender<Task>,
     rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<Task>>>,
@@ -30,6 +31,21 @@ impl TaskQueue {
 
     pub fn submit(&self, task: Task) {
         let _ = self.tx.send(task);
+    }
+
+    /// Block until a task is available, then return it.
+    /// Returns `None` if the channel is closed and empty.
+    pub async fn recv(&self) -> Option<Task> {
+        loop {
+            let task = {
+                let mut guard = self.rx.lock().await;
+                guard.try_recv().ok()
+            };
+            if let Some(task) = task {
+                return Some(task);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
     }
 }
 
@@ -57,6 +73,9 @@ impl TaskWorker {
                     }
                     crate::tool::ToolStatus::Error => {
                         tracing::warn!(task = %task.id, error = ?output.error, "task failed");
+                    }
+                    crate::tool::ToolStatus::AuthRequired => {
+                        tracing::warn!(task = %task.id, "task requires authorization");
                     }
                 }
             }
@@ -150,7 +169,7 @@ pub struct IntervalTrigger {
 
 impl IntervalTrigger {
     pub fn new(id: impl Into<String>, tool: impl Into<String>, args: serde_json::Value, interval: Duration) -> Self {
-        IntervalTrigger { id: id.into(), tool: tool.into(), args, interval, last_fired: None }
+        IntervalTrigger { id: id.into(), tool: tool.into(), args, interval, last_fired: Some(tokio::time::Instant::now()) }
     }
 }
 

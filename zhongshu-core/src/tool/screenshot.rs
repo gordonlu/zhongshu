@@ -1,3 +1,4 @@
+use crate::authority::{self, CheckResult};
 use crate::tool::{Tool, ToolOutput};
 use async_trait::async_trait;
 use serde_json::json;
@@ -14,6 +15,15 @@ impl Tool for ScreenshotTool {
     }
 
     async fn execute(&self, _arguments: &serde_json::Value) -> ToolOutput {
+        match authority::check_tool("screenshot") {
+            CheckResult::Deny { reason } => return ToolOutput::error(format!("[BLOCKED] {reason}")),
+            CheckResult::RequireAuth { request } => {
+                authority::set_pending(&request.tool, &request.program);
+                return ToolOutput::auth_required(&request.program, &request.command);
+            }
+            CheckResult::Allow => {}
+        }
+
         let monitors = match xcap::Monitor::all() {
             Ok(m) => m,
             Err(e) => return ToolOutput::error(format!("枚举显示器失败: {e}")),

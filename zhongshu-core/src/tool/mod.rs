@@ -18,22 +18,41 @@ pub struct ToolOutput {
     pub data: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_program: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum ToolStatus {
     Success,
     Error,
+    AuthRequired,
 }
 
 impl ToolOutput {
     pub fn success(data: serde_json::Value) -> Self {
-        ToolOutput { status: ToolStatus::Success, data: Some(data), error: None }
+        ToolOutput { status: ToolStatus::Success, data: Some(data), error: None, auth_program: None, auth_command: None }
     }
 
     pub fn error(msg: impl Into<String>) -> Self {
-        ToolOutput { status: ToolStatus::Error, data: None, error: Some(msg.into()) }
+        ToolOutput { status: ToolStatus::Error, data: None, error: Some(msg.into()), auth_program: None, auth_command: None }
+    }
+
+    pub fn auth_required(program: &str, command: &str) -> Self {
+        ToolOutput {
+            status: ToolStatus::AuthRequired,
+            data: None,
+            error: Some(format!("Command '{}' requires approval", program)),
+            auth_program: Some(program.to_string()),
+            auth_command: Some(command.to_string()),
+        }
+    }
+
+    pub fn is_auth_required(&self) -> bool {
+        self.status == ToolStatus::AuthRequired
     }
 
     pub fn render_observation(&self, tool_name: &str) -> String {
@@ -52,6 +71,7 @@ impl ToolOutput {
         match self.status {
             ToolStatus::Success => "success",
             ToolStatus::Error => "error",
+            ToolStatus::AuthRequired => "auth_required",
         }
     }
 }

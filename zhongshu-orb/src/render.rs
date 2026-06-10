@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OrbState {
     Idle,
@@ -23,7 +24,7 @@ pub fn draw_orb(pixels: &mut [u32], w: u32, h: u32, state: OrbState, t: f64) {
 
 fn draw_idle(buf: &mut [u32], w: u32, cx: f32, cy: f32, r: f32) {
     let red = pack(200, 40, 40, 255);
-    fill_rect(buf, pack(24, 24, 28, 255));
+    fill_rect(buf, pack(0, 0, 0, 0));
     fill_circle_solid(buf, w, cx, cy, r, red);
 }
 fn draw_listening(buf: &mut [u32], w: u32, cx: f32, cy: f32, r: f32, t: f64) {
@@ -37,7 +38,7 @@ fn draw_executing(buf: &mut [u32], w: u32, cx: f32, cy: f32, r: f32, pulse: f32)
 }
 fn draw_done(buf: &mut [u32], w: u32, cx: f32, cy: f32, r: f32, success: bool) {
     let _ = success;
-    fill_rect(buf, pack(24, 24, 28, 255));
+    fill_rect(buf, pack(0, 0, 0, 0));
     let green = pack(40, 200, 60, 255);
     fill_circle_solid(buf, w, cx, cy, r, green);
 }

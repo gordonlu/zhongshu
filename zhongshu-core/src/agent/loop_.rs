@@ -150,6 +150,11 @@ impl AgentLoop {
                         self.messages.push(Message::tool_result(&tc.id, output.render_observation(&tc.function.name)));
                         if let Some(ref cb) = stream_cb { (cb.on_tool_done)(&tc.function.name, true); }
                     }
+                    ToolStatus::AuthRequired => {
+                        // Not a tool failure — the LLM should ask the user for approval.
+                        info!(tool = %tc.function.name, status = "auth_required");
+                        self.messages.push(Message::tool_result(&tc.id, output.render_observation(&tc.function.name)));
+                    }
                     ToolStatus::Error => {
                         consecutive_tool_failures += 1;
                         warn!(tool = %tc.function.name, error = ?output.error, consec = consecutive_tool_failures, "✗");

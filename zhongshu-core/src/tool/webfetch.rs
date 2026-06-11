@@ -5,21 +5,20 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const BROWSER_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 
-pub struct BrowserTool;
+pub struct WebFetchTool;
 
 #[async_trait]
-impl Tool for BrowserTool {
-    fn name(&self) -> &str { "browser" }
+impl Tool for WebFetchTool {
+    fn name(&self) -> &str { "webfetch" }
     fn description(&self) -> &str {
-        "Read a web page and return its text content. Use this to check weather, read articles, inspect websites, etc. Optionally also opens the page in your default browser if you want to see it visually."
+        "Fetch a URL and return the page text content (HTML stripped). Use this to read articles, check weather, or get structured data from web pages."
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "url": {"type": "string", "description": "The URL to read"},
-                "open_browser": {"type": "boolean", "description": "Also open in your default browser so you can see it (default false)", "default": false},
+                "url": {"type": "string", "description": "The URL to fetch"},
                 "max_length": {"type": "integer", "description": "Max characters to return (default 5000)", "default": 5000}
             },
             "required": ["url"]
@@ -32,7 +31,6 @@ impl Tool for BrowserTool {
             None => return ToolOutput::error("'url' must be a string"),
         };
         let max_len = arguments["max_length"].as_u64().unwrap_or(5000).min(20000) as usize;
-        let open_browser = arguments["open_browser"].as_bool().unwrap_or(false);
 
         let client = match reqwest::Client::builder()
             .user_agent(BROWSER_UA)
@@ -44,7 +42,7 @@ impl Tool for BrowserTool {
 
         // Simulate human-like delay (500-2000ms) to avoid bot detection.
         let ns = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let delay_ms = 500 + (ns % 1501) as u64; // 500..2000
+        let delay_ms = 500 + (ns % 1501) as u64;
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
 
         let html = match client.get(url).send().await {
@@ -62,21 +60,18 @@ impl Tool for BrowserTool {
             text
         };
 
-        if open_browser {
-            let _ = open::that(url);
-        }
-
         ToolOutput::success(json!({
             "url": url,
             "content": truncated,
             "chars": truncated.len(),
-            "browser_opened": open_browser,
         }))
     }
 }
 
+/// Simple HTML-to-text extraction: strip tags, extract meaningful content.
 fn extract_text(html: &str) -> String {
     let mut result = String::new();
+    let mut in_tag = false;
     let mut in_script = false;
     let mut in_style = false;
 
@@ -85,13 +80,17 @@ fn extract_text(html: &str) -> String {
 
     while i < bytes.len() {
         if bytes[i] == b'<' {
+            // Check for script/style tags to skip their content
             let lower = html[i..].to_lowercase();
             if lower.starts_with("<script") { in_script = true; }
             if lower.starts_with("<style") { in_style = true; }
+            in_tag = true;
+            // Find end of tag
             while i < bytes.len() && bytes[i] != b'>' { i += 1; }
-            if i < bytes.len() { i += 1; }
+            if i < bytes.len() { i += 1; } // skip '>'
             if lower.starts_with("</script") { in_script = false; }
             if lower.starts_with("</style") { in_style = false; }
+            in_tag = false;
             continue;
         }
 
@@ -117,6 +116,7 @@ fn extract_text(html: &str) -> String {
             }
         }
 
+        // Collapse multiple whitespace/newlines
         if bytes[i] == b'\n' || bytes[i] == b'\r' {
             if !result.ends_with('\n') { result.push('\n'); }
             i += 1;
@@ -132,6 +132,7 @@ fn extract_text(html: &str) -> String {
         i += 1;
     }
 
+    // Remove excessive blank lines
     let lines: Vec<&str> = result.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
     lines.join("\n")
 }
@@ -152,7 +153,7 @@ mod tests {
     fn extract_text_handles_script() {
         let html = "<html><script>alert('x')</script><body><p>Content</p></body></html>";
         let text = extract_text(html);
-        assert!(!text.contains("alert"));
+        assert!(!text.contains("alert"), "script content leaked: {text}");
         assert!(text.contains("Content"));
     }
 

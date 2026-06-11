@@ -20,6 +20,16 @@ impl ToolCallId {
 #[derive(Clone, Copy, PartialEq)]
 pub enum EntryRole { User, Assistant, System }
 
+impl std::fmt::Debug for EntryRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EntryRole::User => write!(f, "User"),
+            EntryRole::Assistant => write!(f, "Assistant"),
+            EntryRole::System => write!(f, "System"),
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum ToolStatus { Running, Done { success: bool, duration_ms: u64 } }
 
@@ -46,7 +56,7 @@ pub struct ChatEntry {
     pub role: EntryRole,
     pub content: String,
     pub tool_calls: Vec<ToolCallEntry>,
-    cached_job: Option<(u64, egui::text::LayoutJob)>,
+    pub cached_job: Option<(u64, egui::text::LayoutJob)>,
 }
 
 pub struct StreamingState {
@@ -78,10 +88,10 @@ impl StreamingState {
 
 #[derive(Clone)]
 pub struct ApprovalRequest {
-    pub id: u64,
     pub tool: String,
     pub program: String,
     pub command: String,
+    pub source: String,
 }
 
 pub struct Overlay {
@@ -96,6 +106,8 @@ pub struct Overlay {
     pub approval_request: Option<ApprovalRequest>,
     pub request_quit: bool,
     pub request_new_conversation: bool,
+    pub pending_personality: Option<String>,
+    pub request_stop: bool,
     ctx: egui::Context,
 }
 
@@ -157,6 +169,8 @@ impl Overlay {
             approval_request: None,
             request_quit: false,
             request_new_conversation: false,
+            pending_personality: None,
+            request_stop: false,
             ctx,
         }
     }
@@ -305,11 +319,7 @@ impl Overlay {
         if let Some(s) = self.streaming.take() {
             if !s.content.is_empty() || !s.tool_calls.is_empty() {
                 let mut entry = s.finish();
-                entry.content = entry.content
-                    .replace("<final_answer>", "")
-                    .replace("</final_answer>", "")
-                    .replace("<final_answer", "")
-                    .replace("</final_answer", "");
+                entry.content = strip_final_answer(&entry.content).trim().to_string();
                 self.entries.push(entry);
             }
         }
@@ -319,6 +329,7 @@ impl Overlay {
             self.entries.drain(0..remove);
         }
     }
+
 }
 
 fn hash_str(s: &str) -> u64 {
@@ -326,6 +337,28 @@ fn hash_str(s: &str) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     s.hash(&mut h);
     h.finish()
+}
+
+pub fn strip_final_answer(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'<' {
+            let rest = &text[i..];
+            let lower = rest.to_lowercase();
+            if lower.starts_with("<final_answer") || lower.starts_with("</final_answer")
+                || lower.starts_with("<final") || lower.starts_with("</final")
+            {
+                while i < bytes.len() && bytes[i] != b'>' { i += 1; }
+                if i < bytes.len() { i += 1; }
+                continue;
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
 }
 
 pub fn render_chat(
@@ -350,20 +383,33 @@ fn render_entry(ui: &mut egui::Ui, entry: &mut ChatEntry) {
         EntryRole::System => Color32::from_rgba_premultiplied(50, 50, 55, 180),
     };
 
-    egui::Frame::new()
-        .fill(card_bg)
-        .corner_radius(8)
-        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(48, 48, 52)))
-        .inner_margin(egui::Margin::symmetric(12, 8))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.colored_label(role_color, role_label);
+    let is_user = matches!(entry.role, EntryRole::User);
+    let mut render_card = |ui: &mut egui::Ui| {
+        egui::Frame::new()
+            .fill(card_bg)
+            .corner_radius(8)
+            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(48, 48, 52)))
+            .inner_margin(egui::Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(role_color, role_label);
+                });
+                if !entry.tool_calls.is_empty() {
+                    render_tool_timeline(ui, &entry.tool_calls);
+                }
+                render_markdown_cached(ui, &entry.content, &mut entry.cached_job);
             });
-            if !entry.tool_calls.is_empty() {
-                render_tool_timeline(ui, &entry.tool_calls);
-            }
-            render_markdown_cached(ui, &entry.content, &mut entry.cached_job);
+    };
+
+    if is_user {
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                render_card(ui);
+            });
         });
+    } else {
+        render_card(ui);
+    }
     ui.add_space(6.0);
 }
 
@@ -404,11 +450,7 @@ fn render_markdown_cached(
         return;
     }
 
-    let text = text
-        .replace("<final_answer>", "")
-        .replace("</final_answer>", "")
-        .replace("<final_answer", "")
-        .replace("</final_answer", "");
+    let text = strip_final_answer(text).trim().to_string();
 
     let hash = hash_str(&text);
 

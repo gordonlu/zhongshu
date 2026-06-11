@@ -1,0 +1,37 @@
+use std::sync::Arc;
+
+use crate::agent::llm::LlmProvider;
+use crate::agent::loop_::AgentBudget;
+use crate::tool::ToolRegistry;
+
+/// Long-lived execution context for an agent.
+///
+/// Holds the provider, tool set, model ID, and budget that together
+/// define *how* an agent can act.  No per-turn state (messages,
+/// conversation history) lives here — that belongs in the caller
+/// (the Invocation Layer).
+///
+/// Cheap to clone — the provider is reference-counted.
+#[derive(Clone)]
+pub struct AgentRuntime {
+    pub provider: Arc<dyn LlmProvider>,
+    pub registry: ToolRegistry,
+    pub model: String,
+    pub budget: AgentBudget,
+}
+
+impl AgentRuntime {
+    pub fn new(
+        provider: impl LlmProvider + 'static,
+        registry: ToolRegistry,
+        model: impl Into<String>,
+        budget: AgentBudget,
+    ) -> Self {
+        AgentRuntime {
+            provider: Arc::new(provider),
+            registry,
+            model: model.into(),
+            budget,
+        }
+    }
+}

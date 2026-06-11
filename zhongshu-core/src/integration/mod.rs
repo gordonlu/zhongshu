@@ -1,5 +1,3 @@
 pub mod deeplossless;
 
-pub use deeplossless::{
-    CompressDecision, CompressReason, ContextConfig, ContextEngine,
-};
+pub use deeplossless::{DeeplosslessConfig, DeeplosslessProxy};

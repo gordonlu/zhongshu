@@ -4,6 +4,8 @@ pub mod fs;
 pub mod screenshot;
 pub mod search;
 pub mod shell;
+pub mod system_info;
+pub mod webfetch;
 
 use crate::agent::llm::{ToolDef, ToolFunctionDef};
 use async_trait::async_trait;
@@ -110,6 +112,11 @@ impl ToolRegistry {
         self
     }
 
+    /// Register a tool at runtime (equipment installation).
+    pub fn register_ref(&mut self, tool: Arc<dyn Tool>) {
+        self.tools.insert(tool.name().to_string(), tool);
+    }
+
     pub fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {
         self.tools.get(name)
     }
@@ -135,6 +142,16 @@ impl ToolRegistry {
     pub fn as_tool_defs(&self) -> Vec<ToolDef> {
         self.tools.values().map(|t| t.to_tool_def()).collect()
     }
+
+    /// Build a sub-registry containing only the named tools.
+    /// Tools not in the registry are silently skipped.
+    pub fn select(&self, names: &[&str]) -> Self {
+        ToolRegistry {
+            tools: names.iter()
+                .filter_map(|n| self.tools.get(*n).map(|t| (n.to_string(), t.clone())))
+                .collect(),
+        }
+    }
 }
 
 pub fn default_registry() -> ToolRegistry {
@@ -143,4 +160,5 @@ pub fn default_registry() -> ToolRegistry {
         .register(fs::ReadFileTool)
         .register(fs::WriteFileTool)
         .register(fs::ListDirTool)
+        .register(system_info::SystemInfoTool)
 }

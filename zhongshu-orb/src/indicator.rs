@@ -3,6 +3,18 @@ use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowId};
 use zhongshu_core::event::AgentState;
 
+// ── State color palette (shared by orb + tray) ───────────────────────
+
+fn state_color(state: AgentState) -> (u8, u8, u8) {
+    match state {
+        AgentState::Idle => (100, 140, 255),                     // soft indigo
+        AgentState::Thinking => (255, 200, 60),                  // warm amber
+        AgentState::Executing => (255, 100, 60),                 // coral
+        AgentState::Done { success: true } => (60, 200, 100),    // green
+        AgentState::Done { success: false } => (220, 60, 60),    // red
+    }
+}
+
 // ── Windows: transparent orb ────────────────────────────────────────
 
 #[cfg(not(target_os = "linux"))]
@@ -16,22 +28,60 @@ mod orb {
     #[cfg(target_os = "windows")]
     use winit::platform::windows::WindowAttributesExtWindows;
     use zhongshu_core::event::AgentState;
-    use crate::render::{self, OrbState};
+    use crate::render;
+
+    use super::state_color;
+
+    fn to_orb_mode(state: AgentState) -> crate::render::OrbMode {
+        match state {
+            AgentState::Idle => crate::render::OrbMode::Idle,
+            AgentState::Thinking => crate::render::OrbMode::Thinking,
+            AgentState::Executing => crate::render::OrbMode::Executing,
+            AgentState::Done { .. } => crate::render::OrbMode::Done,
+        }
+    }
+
+    /// Smooth color interpolator for state transitions.
+    struct ColorLerp {
+        current: (f32, f32, f32),
+        target: (f32, f32, f32),
+        transition_t0: f64,
+    }
+
+    impl ColorLerp {
+        fn new(r: u8, g: u8, b: u8) -> Self {
+            ColorLerp {
+                current: (r as f32, g as f32, b as f32),
+                target: (r as f32, g as f32, b as f32),
+                transition_t0: 0.0,
+            }
+        }
+
+        fn set_target(&mut self, r: u8, g: u8, b: u8, t: f64) {
+            let prev = self.get(t);
+            self.current = (prev.0 as f32, prev.1 as f32, prev.2 as f32);
+            self.target = (r as f32, g as f32, b as f32);
+            self.transition_t0 = t;
+        }
+
+        fn get(&self, t: f64) -> (u8, u8, u8) {
+            let dur = 0.3;
+            let frac = ((t - self.transition_t0) / dur).min(1.0).max(0.0);
+            let ease = (frac * frac * (3.0 - 2.0 * frac)) as f32;
+            (
+                (self.current.0 + (self.target.0 - self.current.0) * ease) as u8,
+                (self.current.1 + (self.target.1 - self.current.1) * ease) as u8,
+                (self.current.2 + (self.target.2 - self.current.2) * ease) as u8,
+            )
+        }
+    }
 
     pub struct OrbIndicator {
         window: Arc<Window>,
         surface: softbuffer::Surface<Arc<Window>, Arc<Window>>,
         state: AgentState,
+        color: ColorLerp,
         start_time: Instant,
-    }
-
-    fn to_orb_state(s: AgentState) -> OrbState {
-        match s {
-            AgentState::Idle => OrbState::Idle,
-            AgentState::Thinking => OrbState::Thinking { progress: 0.0 },
-            AgentState::Executing => OrbState::Executing { pulse: 0.0 },
-            AgentState::Done { success } => OrbState::Done { success },
-        }
     }
 
     impl OrbIndicator {
@@ -39,16 +89,21 @@ mod orb {
             let mut attrs = WindowAttributes::default()
                 .with_title("zhongshu")
                 .with_inner_size(LogicalSize::new(size, size))
-                .with_resizable(false).with_decorations(false)
+                .with_resizable(false)
+                .with_decorations(false)
                 .with_window_level(WindowLevel::AlwaysOnTop)
-                .with_transparent(true).with_active(false);
+                .with_transparent(true)
+                .with_active(false);
             #[cfg(target_os = "windows")]
-            { attrs = attrs.with_skip_taskbar(true); }
+            {
+                attrs = attrs.with_skip_taskbar(true);
+            }
             let w = Arc::new(el.create_window(attrs).unwrap());
 
             // Default: bottom-right, 20% inset from edges.
             if let Some(m) = el.primary_monitor() {
-                let p = m.position(); let s = m.size();
+                let p = m.position();
+                let s = m.size();
                 let x = p.x + s.width as i32 - size as i32 - (s.width as f64 * 0.2) as i32;
                 let y = p.y + s.height as i32 - size as i32 - (s.height as f64 * 0.2) as i32;
                 let _ = w.set_outer_position(PhysicalPosition::new(x.max(0), y.max(0)));
@@ -64,12 +119,31 @@ mod orb {
 
             let ctx = softbuffer::Context::new(w.clone()).unwrap();
             let surface = softbuffer::Surface::new(&ctx, w.clone()).unwrap();
+            let c = state_color(AgentState::Idle);
             w.request_redraw();
-            OrbIndicator { window: w.clone(), surface, state: AgentState::Idle, start_time: Instant::now() }
+            OrbIndicator {
+                window: w.clone(),
+                surface,
+                state: AgentState::Idle,
+                color: ColorLerp::new(c.0, c.1, c.2),
+                start_time: Instant::now(),
+            }
         }
-        pub fn set_state(&mut self, state: AgentState) { self.state = state; self.window.request_redraw(); }
-        pub fn window(&self) -> &Arc<Window> { &self.window }
-        pub fn window_id(&self) -> WindowId { self.window.id() }
+
+        pub fn set_state(&mut self, state: AgentState) {
+            self.state = state;
+            let c = state_color(state);
+            let t = self.start_time.elapsed().as_secs_f64();
+            self.color.set_target(c.0, c.1, c.2, t);
+            self.window.request_redraw();
+        }
+
+        pub fn window(&self) -> &Arc<Window> {
+            &self.window
+        }
+        pub fn window_id(&self) -> WindowId {
+            self.window.id()
+        }
 
         pub fn save_position(&self) {
             if let Ok(pos) = self.window.outer_position() {
@@ -79,28 +153,49 @@ mod orb {
                 }
             }
         }
+
         pub fn render(&mut self) {
-            let sz = self.window.inner_size(); let (ww, hh) = (sz.width, sz.height);
-            if ww == 0 || hh == 0 { return; }
-            self.surface.resize(NonZeroU32::new(ww).unwrap(), NonZeroU32::new(hh).unwrap()).ok();
-            let mut buf = match self.surface.buffer_mut() { Ok(b) => b, Err(_) => return };
-            render::draw_orb(&mut buf, ww, hh, to_orb_state(self.state), self.start_time.elapsed().as_secs_f64());
+            let sz = self.window.inner_size();
+            let (ww, hh) = (sz.width, sz.height);
+            if ww == 0 || hh == 0 {
+                return;
+            }
+            self.surface
+                .resize(NonZeroU32::new(ww).unwrap(), NonZeroU32::new(hh).unwrap())
+                .ok();
+            let mut buf = match self.surface.buffer_mut() {
+                Ok(b) => b,
+                Err(_) => return,
+            };
+
+            let t = self.start_time.elapsed().as_secs_f64();
+            let (cr, cg, cb) = self.color.get(t);
+            let mode = to_orb_mode(self.state);
+            render::draw_orb(&mut buf, ww, hh, cr, cg, cb, t, mode);
+
             buf.present().unwrap();
-            if !matches!(self.state, AgentState::Idle) { self.window.request_redraw(); }
+
+            if !matches!(self.state, AgentState::Idle) {
+                self.window.request_redraw();
+            }
         }
     }
 }
 
-// ── Linux: system tray ──────────────────────────────────────────────
+// ── Linux: system tray with breathing animation ─────────────────────
 
 #[cfg(target_os = "linux")]
 pub mod tray {
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::time::Duration;
     use crossbeam_channel::{self, Receiver, Sender};
     use ksni::TrayMethods;
     use winit::event_loop::ActiveEventLoop;
     use winit::window::WindowId;
     use zhongshu_core::event::AgentState;
+
+    use super::state_color;
 
     #[derive(Debug, Clone)]
     pub enum TrayEvent {
@@ -117,10 +212,13 @@ pub mod tray {
     struct KsniTray {
         state: Arc<std::sync::Mutex<AgentState>>,
         tx: Sender<TrayEvent>,
+        breath_phase: Arc<AtomicU32>,
     }
 
     impl ksni::Tray for KsniTray {
-        fn id(&self) -> String { "zhongshu".into() }
+        fn id(&self) -> String {
+            "zhongshu".into()
+        }
         fn title(&self) -> String {
             let s = *self.state.lock().unwrap();
             match s {
@@ -141,16 +239,18 @@ pub mod tray {
                 AgentState::Done { success: true } => "任务完成",
                 AgentState::Done { success: false } => "任务失败",
             };
+            let phase = self.breath_phase.load(Ordering::Relaxed) as f64;
             ksni::ToolTip {
                 icon_name: "".into(),
-                icon_pixmap: icon_pixmap(s),
+                icon_pixmap: icon_pixmap(s, phase),
                 title: "中书".into(),
                 description: desc.into(),
             }
         }
 
         fn icon_pixmap(&self) -> Vec<ksni::Icon> {
-            icon_pixmap(*self.state.lock().unwrap())
+            let phase = self.breath_phase.load(Ordering::Relaxed) as f64;
+            icon_pixmap(*self.state.lock().unwrap(), phase)
         }
 
         fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
@@ -162,14 +262,16 @@ pub mod tray {
                         let _ = this.tx.send(TrayEvent::OpenOverlay);
                     }),
                     ..Default::default()
-                }.into(),
+                }
+                .into(),
                 StandardItem {
                     label: "新对话".into(),
                     activate: Box::new(|this: &mut Self| {
                         let _ = this.tx.send(TrayEvent::NewConversation);
                     }),
                     ..Default::default()
-                }.into(),
+                }
+                .into(),
                 MenuItem::Separator,
                 StandardItem {
                     label: "退出".into(),
@@ -177,78 +279,129 @@ pub mod tray {
                         let _ = this.tx.send(TrayEvent::Quit);
                     }),
                     ..Default::default()
-                }.into(),
+                }
+                .into(),
             ]
         }
     }
 
-    fn icon_pixmap(state: AgentState) -> Vec<ksni::Icon> {
-        let size: i32 = 32;
-        let mut data = vec![0u8; (size * size * 4) as usize];
-        let (r, g, b): (u8, u8, u8) = match state {
-            AgentState::Idle => (60, 200, 60),
-            AgentState::Thinking => (220, 180, 40),
-            AgentState::Executing => (220, 60, 40),
-            AgentState::Done { success: true } => (60, 200, 60),
-            AgentState::Done { success: false } => (220, 40, 40),
-        };
-        let cx = size as f32 / 2.0;
-        let cy = size as f32 / 2.0;
-        let r2 = (size as f32 / 2.0 - 2.0).powi(2);
-        for y in 0..size {
-            for x in 0..size {
-                let idx = ((y * size + x) * 4) as usize;
-                let dx = x as f32 - cx;
-                let dy = y as f32 - cy;
-                if dx * dx + dy * dy <= r2 {
-                    data[idx] = 255; data[idx + 1] = r; data[idx + 2] = g; data[idx + 3] = b;
+    fn icon_pixmap(state: AgentState, phase: f64) -> Vec<ksni::Icon> {
+        // Provide multiple sizes for the system tray to pick the best match.
+        let sizes: &[i32] = &[16, 22, 24, 32, 48, 64];
+        let (r, g, b) = state_color(state);
+
+        sizes.iter().map(|size| {
+            let period = match state {
+                AgentState::Idle => 2.0,
+                AgentState::Thinking => 1.2,
+                AgentState::Executing => 0.5,
+                AgentState::Done { .. } => 2.0,
+            };
+            let breath = 1.0 + ((phase / 50.0 * std::f64::consts::TAU / period).sin() * 0.12) as f32;
+
+            let mut data = vec![0u8; (size * size * 4) as usize];
+            let cx = *size as f32 / 2.0;
+            let cy = *size as f32 / 2.0;
+            let outer_r = (*size as f32 / 2.0 - 1.0) * breath;
+            let core_r = (outer_r * 0.5).max(2.0);
+            let outer_r2 = outer_r.powi(2);
+            let core_r2 = core_r.powi(2);
+
+            for y in 0..*size {
+                for x in 0..*size {
+                    let idx = ((y * size + x) * 4) as usize;
+                    let dx = x as f32 - cx;
+                    let dy = y as f32 - cy;
+                    let dist2 = dx * dx + dy * dy;
+                    if dist2 > outer_r2 {
+                        continue;
+                    }
+
+                    let dist = dist2.sqrt();
+                    let frac = 1.0 - (dist / outer_r);
+                    let alpha = if dist2 <= core_r2 {
+                        255
+                    } else {
+                        (255.0 * frac * frac) as u8
+                    };
+
+                    data[idx] = alpha;
+                    data[idx + 1] = r;
+                    data[idx + 2] = g;
+                    data[idx + 3] = b;
                 }
             }
-        }
-        vec![ksni::Icon { width: size, height: size, data }]
+            ksni::Icon { width: *size, height: *size, data }
+        }).collect()
     }
 
     impl TrayIndicator {
         pub fn create(_el: &ActiveEventLoop) -> Self {
             let (tx, rx) = crossbeam_channel::unbounded();
             let state = Arc::new(std::sync::Mutex::new(AgentState::Idle));
-            let tray = KsniTray { state: state.clone(), tx };
+            let breath_phase = Arc::new(AtomicU32::new(0));
+            let tray = KsniTray {
+                state: state.clone(),
+                tx,
+                breath_phase: breath_phase.clone(),
+            };
 
-            let handle = tokio::runtime::Handle::current().block_on(async {
-                tray.spawn().await
-            }).expect("ksni tray spawn");
+            let handle = tokio::runtime::Handle::current()
+                .block_on(async { tray.spawn().await })
+                .expect("ksni tray spawn");
+
+            // Spawn breathing timer: tick at 50ms, update icon phase continuously.
+            let bp = breath_phase.clone();
+            let h = handle.clone();
+            tokio::runtime::Handle::current().spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_millis(50));
+                loop {
+                    interval.tick().await;
+                    bp.fetch_add(1, Ordering::Relaxed);
+                    let _ = h.update(|_: &mut KsniTray| {}).await;
+                }
+            });
 
             tracing::info!("ksni tray created");
-            TrayIndicator { rx, handle: Some(handle) }
+            TrayIndicator {
+                rx,
+                handle: Some(handle),
+            }
         }
 
         pub fn set_state(&mut self, state: AgentState) {
             if let Some(ref handle) = self.handle {
-                if handle.is_closed() { return; }
+                if handle.is_closed() {
+                    return;
+                }
                 let _ = tokio::runtime::Handle::current().block_on(async {
-                    handle.update(|tray: &mut KsniTray| {
-                        *tray.state.lock().unwrap() = state;
-                    }).await
+                    handle
+                        .update(|tray: &mut KsniTray| {
+                            *tray.state.lock().unwrap() = state;
+                        })
+                        .await
                 });
             }
         }
 
-        pub fn window_id(&self) -> Option<WindowId> { None }
+        pub fn window_id(&self) -> Option<WindowId> {
+            None
+        }
         pub fn render(&mut self) {}
     }
 
     impl Drop for TrayIndicator {
         fn drop(&mut self) {
-            // ksni::Handle::drop tries to shut down the D-Bus connection
-            // synchronously, which segfaults at process exit when the tokio
-            // runtime may already be gone.  Forget the handle to prevent Drop
-            // from running — the OS will clean up the socket.
+            // Forget our handle clone; the background task keeps its own clone
+            // which will be dropped by tokio runtime shutdown.
             if let Some(handle) = self.handle.take() {
                 std::mem::forget(handle);
             }
         }
     }
 }
+
+// ── Shared Indicator enum ───────────────────────────────────────────
 
 pub enum Indicator {
     #[cfg(not(target_os = "linux"))]
@@ -269,34 +422,44 @@ impl Indicator {
 
     pub fn set_state(&mut self, state: AgentState) {
         match self {
-            #[cfg(not(target_os = "linux"))] Indicator::Orb(o) => o.set_state(state),
-            #[cfg(target_os = "linux")] Indicator::Tray(t) => t.set_state(state),
+            #[cfg(not(target_os = "linux"))]
+            Indicator::Orb(o) => o.set_state(state),
+            #[cfg(target_os = "linux")]
+            Indicator::Tray(t) => t.set_state(state),
         }
     }
 
     pub fn window(&self) -> Option<&Arc<Window>> {
         match self {
-            #[cfg(not(target_os = "linux"))] Indicator::Orb(o) => Some(o.window()),
-            #[cfg(target_os = "linux")] Indicator::Tray(_) => None,
+            #[cfg(not(target_os = "linux"))]
+            Indicator::Orb(o) => Some(o.window()),
+            #[cfg(target_os = "linux")]
+            Indicator::Tray(_) => None,
         }
     }
 
     pub fn window_id(&self) -> Option<WindowId> {
         match self {
-            #[cfg(not(target_os = "linux"))] Indicator::Orb(o) => Some(o.window_id()),
-            #[cfg(target_os = "linux")] Indicator::Tray(t) => t.window_id(),
+            #[cfg(not(target_os = "linux"))]
+            Indicator::Orb(o) => Some(o.window_id()),
+            #[cfg(target_os = "linux")]
+            Indicator::Tray(t) => t.window_id(),
         }
     }
 
     pub fn render(&mut self) {
         match self {
-            #[cfg(not(target_os = "linux"))] Indicator::Orb(o) => o.render(),
-            #[cfg(target_os = "linux")] Indicator::Tray(t) => t.render(),
+            #[cfg(not(target_os = "linux"))]
+            Indicator::Orb(o) => o.render(),
+            #[cfg(target_os = "linux")]
+            Indicator::Tray(t) => t.render(),
         }
     }
 
     pub fn save_position(&self) {
         #[cfg(not(target_os = "linux"))]
-        if let Indicator::Orb(o) = self { o.save_position(); }
+        if let Indicator::Orb(o) = self {
+            o.save_position();
+        }
     }
 }

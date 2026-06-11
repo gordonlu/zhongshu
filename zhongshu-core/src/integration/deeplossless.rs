@@ -1,232 +1,264 @@
 use std::sync::Arc;
+
+use deeplossless::runtime::RuntimePolicyConfig;
+use deeplossless::runtime_coordinator::{CoordinatorConfig, RuntimeCoordinator};
 use tokio::sync::Mutex;
+use tracing::info;
 
-use anyhow::Context;
-use deeplossless::compactor::{CompactCommand, Compactor, CompactorConfig};
-use deeplossless::dag::{DagConfig, DagEngine, DagNode};
-use deeplossless::db::{Database, DatabaseBuilder};
-use deeplossless::summarizer::{SummarizerConfig};
-use sha2::{Digest, Sha256};
-use tracing::{debug, info, warn};
+const DEFAULT_UPSTREAM: &str = "https://api.deepseek.com";
+const PORT_RANGE: u16 = 10; // try up to 10 ports from the base
 
-const DEFAULT_CONTEXT_WINDOW: usize = 100_000;
-const DEFAULT_GROUP_SIZE: usize = 16;
-
-#[derive(Debug, Clone)]
-pub struct ContextConfig {
+pub struct DeeplosslessConfig {
     pub db_path: String,
-    pub token_budget: usize,
     pub api_key: String,
     pub upstream: String,
     pub summarize_model: String,
+    pub proxy_port: u16,
 }
 
-impl Default for ContextConfig {
+impl Default for DeeplosslessConfig {
     fn default() -> Self {
-        ContextConfig {
-            db_path: "~/.zhongshu/context.db".into(),
-            token_budget: DEFAULT_CONTEXT_WINDOW,
+        DeeplosslessConfig {
+            db_path: "~/.deeplossless/lcm.db".into(),
             api_key: String::new(),
-            upstream: "https://api.deepseek.com".into(),
+            upstream: DEFAULT_UPSTREAM.into(),
             summarize_model: "deepseek-chat".into(),
+            proxy_port: 0,
         }
     }
 }
 
-pub struct ContextEngine {
-    db: Arc<Database>,
-    dag: Arc<DagEngine>,
-    compactor: Mutex<Compactor>,
-    config: ContextConfig,
+pub struct DeeplosslessProxy {
+    coordinator: Arc<Mutex<Option<RuntimeCoordinator>>>,
+    actual_port: u16,
+    base_url: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompressReason {
-    HardLimit,
-    SoftLimit,
-    TaskBoundary,
-    TopicShift,
-}
+impl DeeplosslessProxy {
+    pub async fn new(config: DeeplosslessConfig) -> anyhow::Result<Self> {
+        let key = if config.api_key.is_empty() { None } else { Some(config.api_key.clone()) };
 
-pub struct CompressDecision {
-    pub should_compress: bool,
-    pub reason: Option<CompressReason>,
-}
-
-impl ContextEngine {
-    pub async fn new(config: ContextConfig) -> anyhow::Result<Self> {
-        let db_path = expand_tilde(&config.db_path);
-        let db = Arc::new(
-            DatabaseBuilder::new()
-                .path(&db_path)
-                .build()
-                .await
-                .context("failed to open zhongshu context database")?,
-        );
-
-        let dag_config = DagConfig {
-            soft_threshold_ratio: 0.70,
-            hard_threshold_ratio: 0.90,
-            max_level: 3,
-            max_fanout: 100,
-            max_expand_depth: 10,
-            recent_message_count: 20,
-            token_correction_factor: 1.0,
-            token_overhead: 12,
-            embedding_api_key: String::new(),
+        let coord_config = CoordinatorConfig {
+            upstream: config.upstream.clone(),
+            db_path: config.db_path.clone(),
+            api_key: key,
+            admin_key: None,
+            summarizer_model: config.summarize_model,
+            rate_limit: 100,
+            runtime_profile: "autonomous".into(),
+            dry_run: false,
+            log_dir: None,
+            record: None,
+            passthrough: false,
+            no_pipeline: false,
+            no_header_mod: false,
+            lcm_context: true,
+            cache_normalize: true,
+            lcm_context_tokens: 500,
+            dag_threshold: None,
+            summarizer_budget: 2000,
+            policy_config: RuntimePolicyConfig::default(),
+            workspace: None,
         };
 
-        let dag = Arc::new(DagEngine::builder().build(db.clone()));
+        let coordinator = RuntimeCoordinator::build(coord_config).await?;
+        info!("deeplossless coordinator built");
 
-        let compactor_config = CompactorConfig {
-            dag: dag_config,
-            summarizer: SummarizerConfig {
-                model: config.summarize_model.clone(),
-                upstream: config.upstream.clone(),
-                api_key: config.api_key.clone(),
-                ..SummarizerConfig::default()
-            },
-            soft_threshold_pct: 0.70,
-            hard_threshold_pct: 0.90,
-            group_size: DEFAULT_GROUP_SIZE,
-            age_weight: 0.4,
-            token_density_weight: 0.2,
-            novelty_weight: 0.4,
-        };
-
-        let compactor = Compactor::new(db.clone(), compactor_config, None);
-
-        Ok(ContextEngine {
-            db,
-            dag,
-            compactor: Mutex::new(compactor),
-            config,
+        Ok(DeeplosslessProxy {
+            coordinator: Arc::new(Mutex::new(Some(coordinator))),
+            actual_port: 0,
+            base_url: String::new(),
         })
     }
 
-    pub fn find_or_create_conv(&self, system_prompt: &str, model: &str) -> anyhow::Result<i64> {
-        let mut hasher = Sha256::new();
-        hasher.update(system_prompt.as_bytes());
-        hasher.update(model.as_bytes());
-        let fingerprint = hex::encode(&hasher.finalize()[..8]);
+    /// Start the HTTP proxy on the given port (0 = random).
+    /// If the port is taken, tries subsequent ports up to +PORT_RANGE.
+    pub async fn start(&mut self, desired_port: u16) -> anyhow::Result<u16> {
+        let mut guard = self.coordinator.lock().await;
+        let coordinator = guard.as_mut().expect("coordinator already taken");
 
-        self.db
-            .find_or_create_conversation(&fingerprint, model)
-            .context("failed to find or create conversation")
+        let app = coordinator.router();
+
+        let (listener, actual) = bind_socket(desired_port).await?;
+
+        info!("deeplossless proxy listening on 127.0.0.1:{actual}");
+
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, app).await {
+                tracing::warn!("deeplossless proxy stopped: {e}");
+            }
+        });
+
+        self.actual_port = actual;
+        self.base_url = format!("http://127.0.0.1:{actual}/v1");
+        Ok(actual)
     }
 
-    pub fn build_context(&self, conv_id: i64, token_budget: usize, query: &str) -> anyhow::Result<String> {
-        let nodes = self
-            .dag
-            .assemble_context(conv_id, token_budget, Some(query))
-            .context("failed to assemble context")?;
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
 
-        if nodes.is_empty() {
-            return Ok(String::new());
+    pub fn port(&self) -> u16 {
+        self.actual_port
+    }
+
+    pub async fn shutdown(&self) {
+        let mut guard = self.coordinator.lock().await;
+        if let Some(c) = guard.take() {
+            c.shutdown(std::time::Duration::from_secs(2)).await;
+            info!("deeplossless proxy shut down");
         }
-
-        Ok(render_nodes(&nodes))
     }
 
-    pub fn append_turn(
-        &self,
-        conv_id: i64,
-        user_msg: &str,
-        assistant_msg: &str,
-    ) -> anyhow::Result<()> {
-        self.dag.insert_leaf(conv_id, user_msg, estimate_tokens(user_msg))?;
-        self.dag.insert_leaf(conv_id, assistant_msg, estimate_tokens(assistant_msg))?;
-        Ok(())
-    }
+    /// Load recent chat history from lcm.db.
+    /// Returns a list of (role, content) pairs from the most recent conversation.
+    pub async fn load_chat_history(&self) -> Vec<(String, String)> {
+        let guard = self.coordinator.lock().await;
+        let coordinator = match guard.as_ref() {
+            Some(c) => c,
+            None => return Vec::new(),
+        };
+        let db = &coordinator.state.storage.db;
 
-    pub fn check_compression(&self, conv_id: i64) -> CompressDecision {
-        let total = match self.dag.total_tokens(conv_id) {
-            Ok(t) => t as usize,
+        // Get the most recent conversation
+        let conv_id = match db.last_conversation_id() {
+            Ok(Some(id)) => id,
+            _ => return Vec::new(),
+        };
+
+        // Get all leaf nodes (most recent turns in order)
+        let mut nodes = match db.get_all_dag_nodes(conv_id) {
+            Ok(n) => n,
             Err(e) => {
-                warn!("context: failed to get total tokens: {e}");
-                return CompressDecision { should_compress: false, reason: None };
+                tracing::warn!("failed to load dag nodes: {e}");
+                return Vec::new();
             }
         };
 
-        let hard = (self.config.token_budget as f64 * 0.90) as usize;
-        let soft = (self.config.token_budget as f64 * 0.70) as usize;
+        // Sort by node ID to get chronological order
+        nodes.sort_by_key(|n| n.id);
 
-        if total > hard {
-            debug!(total, hard, "hard limit exceeded");
-            return CompressDecision { should_compress: true, reason: Some(CompressReason::HardLimit) };
+        // DAG level 0 nodes store raw content text (with JSON quotes around).
+        // Alternate: odd → User, even → Assistant. Skip tool/system noise.
+        let mut turns = Vec::new();
+        let mut user_turn = true;
+        for node in &nodes {
+            if node.level > 0 {
+                continue;
+            }
+            let mut summary = node.summary.trim().to_string();
+            if summary.is_empty() || summary.len() < 3 {
+                continue;
+            }
+            // DAG summary is a JSON-encoded string (with surrounding quotes
+            // and JSON escaping). Parse it properly.
+            let raw = summary.clone();
+            if let Ok(decoded) = serde_json::from_str::<String>(&summary) {
+                summary = decoded;
+            }
+            tracing::debug!(node_id = node.id, raw = %raw, decoded = %summary, "dag node content");
+            // Skip tool call results (XML-like, JSON, or empty)
+            if summary.is_empty() || summary.starts_with('<') || summary.starts_with('{') || summary.starts_with('[') {
+                continue;
+            }
+            let role = if user_turn { "User" } else { "Assistant" };
+            turns.push((role.into(), summary));
+            user_turn = !user_turn;
         }
 
-        if total > soft {
-            debug!(total, soft, "soft limit exceeded");
-            return CompressDecision { should_compress: true, reason: Some(CompressReason::SoftLimit) };
-        }
+        turns
+    }
+}
 
-        CompressDecision { should_compress: false, reason: None }
+/// Try to bind to `start_port`; if taken, try port+1, port+2, ... up to +PORT_RANGE.
+async fn bind_socket(start_port: u16) -> anyhow::Result<(tokio::net::TcpListener, u16)> {
+    let attempts = if start_port == 0 { 1 } else { PORT_RANGE };
+    for offset in 0..attempts {
+        let port = if start_port == 0 { 0 } else { start_port + offset };
+        let addr = format!("127.0.0.1:{port}");
+        match tokio::net::TcpListener::bind(&addr).await {
+            Ok(listener) => {
+                let actual = listener.local_addr()?.port();
+                return Ok((listener, actual));
+            }
+            Err(e) if offset + 1 < attempts => {
+                tracing::warn!("port {port} in use, trying next");
+                continue;
+            }
+            Err(e) => return Err(anyhow::anyhow!("cannot bind to {addr}: {e}")),
+        }
+    }
+    Err(anyhow::anyhow!("no free port in range {}-{}", start_port, start_port + PORT_RANGE - 1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create a DeeplosslessProxy with a temporary in-memory database
+    /// and a random port. Returns the proxy and the base URL.
+    async fn test_proxy() -> (DeeplosslessProxy, String) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("test.db").to_string_lossy().to_string();
+
+        let mut proxy = DeeplosslessProxy::new(DeeplosslessConfig {
+            db_path,
+            api_key: String::new(),
+            upstream: DEFAULT_UPSTREAM.into(),
+            summarize_model: "deepseek-chat".into(),
+            proxy_port: 0,
+        })
+        .await
+        .expect("proxy build");
+
+        let _port = proxy.start(0).await.expect("proxy start");
+        let base_url = proxy.base_url().to_string();
+        (proxy, base_url)
     }
 
-    pub async fn trigger_compaction(&self, conv_id: i64) -> anyhow::Result<()> {
-        let mut compactor = self.compactor.lock().await;
-        compactor
-            .send_command(CompactCommand::ReviewAndCompact {
-                conv_id,
-                context_window: self.config.token_budget,
-            })
+    #[tokio::test]
+    async fn proxy_starts_and_listens() {
+        let (proxy, base_url) = test_proxy().await;
+        assert!(proxy.port() > 0, "should bind a random port");
+        assert_eq!(base_url, format!("http://127.0.0.1:{}/v1", proxy.port()));
+
+        // Verify the health endpoint responds
+        let health_url = format!("http://127.0.0.1:{}/v1/health", proxy.port());
+        let resp = reqwest::get(&health_url).await.expect("health check");
+        assert!(resp.status().is_success(), "health should return 200, got {}", resp.status());
+
+        proxy.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn proxy_rejects_without_api_key() {
+        let (proxy, base_url) = test_proxy().await;
+
+        // Send a chat request without API key — proxy may accept but
+        // upstream call will fail since there's no real key.
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let resp = client
+            .post(format!("{base_url}/chat/completions"))
+            .json(&serde_json::json!({
+                "model": "deepseek-chat",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": false,
+            }))
+            .send()
             .await
-            .map_err(|_| anyhow::anyhow!("compactor: failed to send command"))?;
-        info!(
-            conv_id,
-            context_window = self.config.token_budget,
-            "compaction triggered"
+            .expect("chat request");
+
+        // The proxy accepts the request and tries to forward upstream.
+        // Without a real API key, upstream returns 401 which the proxy relays.
+        assert!(
+            resp.status().is_success() || resp.status().as_u16() == 401,
+            "expected success or 401, got {}",
+            resp.status()
         );
-        Ok(())
+
+        proxy.shutdown().await;
     }
-
-    pub fn conv_token_count(&self, conv_id: i64) -> anyhow::Result<i64> {
-        self.dag.total_tokens(conv_id)
-    }
-
-    pub fn conv_leaf_count(&self, conv_id: i64) -> anyhow::Result<usize> {
-        self.dag.get_leaves(conv_id).map(|v| v.len())
-    }
-}
-
-fn expand_tilde(path: &str) -> String {
-    if path.starts_with("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return format!("{}/{}", home.to_string_lossy(), &path[2..]);
-        }
-    }
-    path.to_string()
-}
-
-fn estimate_tokens(text: &str) -> i64 {
-    (text.len() as f64 / 3.5).ceil() as i64
-}
-
-fn render_nodes(nodes: &[DagNode]) -> String {
-    let mut parts = Vec::new();
-
-    let summaries: Vec<_> = nodes.iter().filter(|n| n.level > 0).collect();
-    let leaves: Vec<_> = nodes.iter().filter(|n| n.level == 0).collect();
-
-    if !summaries.is_empty() {
-        parts.push("## 历史摘要".to_string());
-        for node in summaries {
-            parts.push(format!("[L{}] {}", node.level, node.summary));
-        }
-    }
-
-    if !leaves.is_empty() {
-        parts.push("## 近期对话".to_string());
-        for node in leaves.iter().rev().take(10) {
-            let truncated = if node.summary.len() > 500 {
-                format!("{}...", &node.summary[..500])
-            } else {
-                node.summary.clone()
-            };
-            parts.push(truncated);
-        }
-    }
-
-    parts.join("\n\n")
 }

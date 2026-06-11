@@ -223,7 +223,7 @@ impl AgentMemory {
 fn load_from_disk(path: &PathBuf) -> Option<AgentProfile> {
     let text = std::fs::read_to_string(path).ok()?;
     match serde_json::from_str(&text) {
-        Ok(p) => { tracing::info!("agent profile loaded from {}", path.display()); Some(p) }
+        Ok(p) => { tracing::info!("memory: agent memory loaded from {}", path.display()); Some(p) }
         Err(e) => { tracing::warn!("corrupt agent profile at {}: {e}", path.display()); None }
     }
 }

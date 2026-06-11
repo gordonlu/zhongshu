@@ -20,10 +20,10 @@ use zhongshu_core::event::{
     AgentState,
     Event, AgentEvent, ToolEvent, TaskEvent,
     ResponseEvent, ResponseRole, MessageId,
-    EventBus, EventRx, ResponseTx, ResponseRx,
+    EventBus, EventLogger, EventRx, ResponseTx, ResponseRx,
 };
 use indicator::Indicator;
-use app::{SessionState, AgentController, BackgroundRunner, AgentInbox, AgentTaskDispatcher};
+use app::{SessionState, AgentController, AgentInbox, TaskWorkerDispatcher};
 use overlay::{ToolCallEntry, ToolStatus};
 use overlay::EntryRole;
 use overlay::Overlay;
@@ -35,8 +35,14 @@ use gpu::GpuContext;
 use indicator::tray::TrayEvent;
 use zhongshu_core::tool::default_registry;
 use zhongshu_core::agent::llm::OpenAiProvider;
-use zhongshu_core::task::{TaskScheduler, IntervalTrigger, ReminderTrigger, FileWatchTrigger};
+use zhongshu_core::agent::{AgentBudget, AgentRuntime, AgentProfile, AttentionManager, AttentionDispatcher};
+use zhongshu_core::equipment::EquipmentRegistry;
+use zhongshu_core::rule::{Rule, RuleCondition, RuleTask, RuleEngine};
+use zhongshu_core::heartbeat::Heartbeat;
+use zhongshu_core::digest::DigestBuilder;
+use zhongshu_core::task::{TaskScheduler, ReminderTrigger, FileWatchTrigger};
 use zhongshu_core::authority::{self, AuthorityGate};
+use zhongshu_core::source::{DiskUsageSource, BatterySource, SourceManager, TimerSource};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -65,6 +71,8 @@ fn preflight_checks() {
 struct ZhongshuApp {
     config: AppConfig,
     controller: Arc<AgentController>,
+    proxy: Arc<tokio::sync::Mutex<zhongshu_core::integration::DeeplosslessProxy>>,
+    runtime: tokio::runtime::Runtime,
     inbox: Arc<AgentInbox>,
     indicator: Option<Indicator>,
     indicator_state: AgentState,
@@ -76,12 +84,15 @@ struct ZhongshuApp {
     hotkey: HotkeyManager,
     gpu: Arc<GpuContext>,
     last_activity: Instant,
-    pending_auth_seq: u64,
+
     is_dragging: bool,
     cursor_pos: (f64, f64),
     drag_start_cursor: (f64, f64),
     drag_start_win: (i32, i32),
     ctrl_held: bool,
+
+    /// Track whether we've already notified for the current pending auth.
+    pending_auth_notified: bool,
 }
 
 impl ZhongshuApp {
@@ -94,15 +105,20 @@ impl ZhongshuApp {
         response_tx: ResponseTx,
         response_rx: ResponseRx,
         gpu: Arc<GpuContext>,
+        proxy: zhongshu_core::integration::DeeplosslessProxy,
+        runtime: tokio::runtime::Runtime,
     ) -> anyhow::Result<Self> {
         let hotkey = HotkeyManager::new(&config.hotkey).unwrap_or_else(|e| {
             tracing::warn!("Global hotkey unavailable: {e:#}"); HotkeyManager::passive()
         });
         Ok(ZhongshuApp {
             config, controller, inbox, indicator: None, indicator_state: AgentState::Idle,
+            proxy: Arc::new(tokio::sync::Mutex::new(proxy)),
+            runtime,
             overlays: HashMap::new(), event_bus, event_rx, response_tx, response_rx,
             hotkey, gpu, last_activity: Instant::now(),
-            pending_auth_seq: 0, is_dragging: false, cursor_pos: (0.0, 0.0), drag_start_cursor: (0.0, 0.0), drag_start_win: (0, 0), ctrl_held: false,
+            is_dragging: false, cursor_pos: (0.0, 0.0), drag_start_cursor: (0.0, 0.0), drag_start_win: (0, 0), ctrl_held: false,
+            pending_auth_notified: false,
         })
     }
 
@@ -116,24 +132,24 @@ impl ZhongshuApp {
 
     /// Poll for pending authority requests and show in overlay.
     fn poll_pending_auth(&mut self) {
-        if let Some(req) = zhongshu_core::authority::take_pending() {
-            self.pending_auth_seq += 1;
+        if let Some(req) = zhongshu_core::authority::peek_pending() {
+            if !self.pending_auth_notified {
+                self.pending_auth_notified = true;
+                let title = if req.source.is_empty() { "需要授权".into() } else { format!("需要授权 · {}", req.source) };
+                let _ = zhongshu_core::desktop::notification::show_urgent(&title, &format!("{} - {}", req.tool, req.command));
+            }
             let request = overlay::ApprovalRequest {
-                id: self.pending_auth_seq,
                 tool: req.tool,
+                source: req.source,
                 program: req.program,
                 command: req.command,
             };
-            if self.config.agent.desktop_notification {
-                let _ = zhongshu_core::desktop::notification::show_urgent(
-                    "需要授权",
-                    &format!("{} - {}", request.tool, request.command),
-                );
-            }
             for ov in self.overlays.values_mut() {
                 ov.approval_request = Some(request.clone());
                 ov.window.request_redraw();
             }
+        } else {
+            self.pending_auth_notified = false;
         }
     }
 
@@ -277,12 +293,20 @@ impl ZhongshuApp {
 
     fn try_open_overlay(&mut self, el: &ActiveEventLoop) {
         if self.overlays.is_empty() {
-            self.controller.init_engine(&self.config.llm.api_key());
-            let ov = Overlay::new(
+            let mut ov = Overlay::new(
                 el, self.gpu.clone(),
                 self.config.ui.overlay_width, self.config.ui.overlay_height,
                 &self.config.ui.font_search_paths,
             );
+            // Load previous conversation from lcm.db
+            let proxy = self.proxy.clone();
+            let history = self.runtime.block_on(async { proxy.lock().await.load_chat_history().await });
+            ov.entries = history.into_iter().map(|(role, content)| overlay::ChatEntry {
+                role: if role == "User" { overlay::EntryRole::User } else { overlay::EntryRole::Assistant },
+                content,
+                tool_calls: Vec::new(),
+                cached_job: None,
+            }).collect();
             if let Some((x, y)) = Self::load_saved_overlay_pos() {
                 let _ = ov.window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
             }
@@ -329,13 +353,23 @@ impl ApplicationHandler for ZhongshuApp {
                     if let Some(input) = ov.render() {
                         self.inbox.submit(input);
                     }
+                    if let Some(ref p) = ov.pending_personality.take() {
+                        let mut cfg = config::load();
+                        cfg.agent.personality = p.clone();
+                        cfg.agent.personality_selected = true;
+                        config::save(&cfg);
+                        self.controller.set_system_prompt(cfg.agent.effective_system_prompt());
+                    }
                     if ov.request_quit { el.exit(); }
+                    if ov.request_stop {
+                        ov.request_stop = false;
+                        self.controller.cancel();
+                    }
                     if ov.request_new_conversation {
                         ov.entries.clear();
                         ov.streaming = None;
                         ov.input.clear();
                         ov.request_new_conversation = false;
-                        self.controller.init_engine(&self.config.llm.api_key());
                     }
                 }
             }
@@ -384,6 +418,13 @@ impl ApplicationHandler for ZhongshuApp {
             WindowEvent::KeyboardInput { event, is_synthetic: false, .. } if self.ctrl_held && event.state == ElementState::Pressed && event.logical_key == "q" => {
                 el.exit();
             }
+            // Reset IME position when overlay window regains focus.
+            WindowEvent::Focused(true) if self.overlays.contains_key(&id) => {
+                if let Some(ov) = self.overlays.get_mut(&id) {
+                    ov.window.set_ime_allowed(false);
+                    ov.window.set_ime_allowed(true);
+                }
+            }
             _ => {}
         }
     }
@@ -408,6 +449,11 @@ impl ApplicationHandler for ZhongshuApp {
                     }
                 }
             }
+        }
+
+        // Notification click → focus overlay
+        if zhongshu_core::desktop::notification::consume_focus_request() {
+            self.try_open_overlay(el);
         }
 
         // Streaming timeout
@@ -510,31 +556,77 @@ fn main() {
     let ak = cfg.llm.api_key();
     if ak.is_empty() { tracing::warn!("{} not set; agent will not function", cfg.llm.api_key_env); }
 
+    // Shared tokio runtime for all async work (proxy, agent, background).
+    let r = tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build().unwrap();
+    let _g = r.enter();
+
+    // Start deeplossless proxy.
+    let proxy_port = cfg.deeplossless.proxy_port;
+    let mut proxy = r.block_on(async {
+        zhongshu_core::integration::DeeplosslessProxy::new(
+            zhongshu_core::integration::DeeplosslessConfig {
+                api_key: ak.clone(),
+                upstream: cfg.llm.api_base.clone(),
+                proxy_port,
+                ..Default::default()
+            }
+        ).await
+    }).expect("deeplossless proxy failed to build");
+
+    let actual_port = r.block_on(async { proxy.start(proxy_port).await }).expect("deeplossless proxy failed to start");
+    let base_url = format!("http://127.0.0.1:{actual_port}/v1");
+    tracing::info!("deeplossless proxy at {base_url}");
+
     let eb = Arc::new(EventBus::new(256));
     let (response_tx, response_rx) = mpsc::channel::<ResponseEvent>(cfg.agent.response_capacity);
     let event_rx = eb.subscribe();
 
     authority::init(AuthorityGate::new(cfg.agent.authority.enabled, cfg.agent.authority.sudo_timeout_secs));
 
+    // AttentionDispatcher: shows desktop notifications for attention events.
+    let desktop_notif = cfg.agent.desktop_notification;
+    let dispatcher = AttentionDispatcher::new(
+        Box::new(move |worker, summary| {
+            if desktop_notif {
+                let _ = zhongshu_core::desktop::notification::show(worker, summary);
+            }
+        }),
+    );
+    let _dispatcher_handle = dispatcher.spawn(&eb);
+
+    // ── 军器监初始化 ──
+    let mut equipment = {
+        let dir = config::config_dir().join("equipment");
+        std::fs::create_dir_all(&dir).unwrap_or(());
+        let mut reg = zhongshu_core::equipment::EquipmentRegistry::new(dir);
+        reg.install_defaults(); // 内部已调用 scan()
+        reg
+    };
+    let equip_prompts = equipment.skill_prompts();
+    let mut system_prompt = cfg.agent.effective_system_prompt();
+    for (_id, prompt) in &equip_prompts {
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(prompt);
+    }
+
+    let provider = OpenAiProvider::new(&ak, &cfg.llm.model).with_base_url(base_url);
     let controller = Arc::new(AgentController::new(
         eb.clone(), response_tx.clone(),
-        OpenAiProvider::new(&ak, &cfg.llm.model),
+        provider.clone(),
         default_registry().register(zhongshu_core::tool::search::WebSearchTool)
             .register(zhongshu_core::tool::browser::BrowserTool)
+            .register(zhongshu_core::tool::webfetch::WebFetchTool)
             .register(zhongshu_core::tool::screenshot::ScreenshotTool)
             .register(zhongshu_core::tool::automation::AutomationTool),
-        cfg.llm.model.clone(), SessionState::new(), cfg.agent.system_prompt.clone(),
+        cfg.llm.model.clone(), SessionState::new(), system_prompt,
         config::config_dir().join("agent.json"),
     ));
     let inbox = Arc::new(AgentInbox::new(controller.clone()));
 
-    let r = tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build().unwrap();
-    let _g = r.enter();
+    // AttentionDispatcher: shows desktop notifications for attention events.
     inbox.start();
 
     let mut task_scheduler = TaskScheduler::new(Duration::from_secs(1));
-    task_scheduler.register(IntervalTrigger::new("hourly-check", "agent", serde_json::json!({"prompt":"[定时检查]"}),
-        Duration::from_secs(3600)));
 
     // Register reminders from config.
     for r in &cfg.scheduler.reminders {
@@ -554,18 +646,108 @@ fn main() {
     }
 
     let task_queue = task_scheduler.queue().clone();
+    let rule_queue = task_scheduler.queue().clone();
     task_scheduler.spawn();
-    AgentTaskDispatcher::spawn(task_queue, inbox.clone());
+
+    // Worker runtime: shares provider + registry with the primary agent.
+    let worker_runtime = Arc::new(AgentRuntime::new(
+        provider.clone(),
+        default_registry().register(zhongshu_core::tool::search::WebSearchTool)
+            .register(zhongshu_core::tool::browser::BrowserTool)
+            .register(zhongshu_core::tool::webfetch::WebFetchTool)
+            .register(zhongshu_core::tool::screenshot::ScreenshotTool)
+            .register(zhongshu_core::tool::automation::AutomationTool),
+        cfg.llm.model.clone(),
+        AgentBudget {
+            max_steps: 10,
+            max_tool_calls: 5,
+            token_limit: 32_000,
+        },
+    ));
+
+    // Worker profiles: load from ~/.config/zhongshu/profiles/*.json, fallback to default.
+    let profile_dir = config::config_dir().join("profiles");
+    let _ = std::fs::create_dir_all(&profile_dir);
+    let mut worker_profiles = AgentProfile::load_dir(&profile_dir);
+    if worker_profiles.is_empty() {
+        tracing::info!("no worker profiles in {:?}, using default task-handler", profile_dir);
+        worker_profiles.push(AgentProfile::new(
+            "task-handler",
+            "你是一个后台任务处理助手。收到定时任务或事件后，分析任务内容并执行必要的操作。",
+            vec![],
+            AgentBudget::default(),
+        ));
+    } else {
+        tracing::info!(count = worker_profiles.len(), "loaded worker profiles");
+    }
+
+    // AttentionManager: listens for WorkerReport events, routes by level.
+    let attention_mgr = AttentionManager::new((*eb).clone());
+    let (digest_queue, _attention_handle) = attention_mgr.spawn();
+
+    // SourceManager: polls event sources and publishes to EventBus.
+    let mut source_mgr = SourceManager::new((*eb).clone());
+    source_mgr.register(TimerSource::new("heartbeat", Duration::from_secs(300)));
+    source_mgr.register(DiskUsageSource::new("disk-root", "/", 0.90, Duration::from_secs(3600)));
+    source_mgr.register(BatterySource::new("battery", 20, Duration::from_secs(3600)));
+    let _source_handle = source_mgr.spawn();
+
+    // Spawn one TaskWorkerDispatcher per profile.
+    for profile in worker_profiles {
+        TaskWorkerDispatcher::spawn(task_queue.clone(), worker_runtime.clone(), profile, eb.clone());
+    }
+
+    // RuleEngine: subscribes to EventBus, matches rules → submits Tasks.
+    let mut rule_engine = RuleEngine::new((*eb).clone(), rule_queue);
+    if cfg.agent.background.enabled {
+        rule_engine.add_rule(Rule {
+            id: "heartbeat-check".into(),
+            event_pattern: "tick".into(),
+            source: None,
+            condition: RuleCondition::Always,
+            task: RuleTask {
+                source: "heartbeat".into(),
+                tool: "agent".into(),
+                arguments: serde_json::json!({"prompt": "[定时检查] 使用 system_info 工具收集系统信息并检查异常，不要使用 shell。"}),
+            },
+        });
+        tracing::info!("background rule check enabled");
+    }
+    let _rule_handle = rule_engine.spawn();
+
+    // Heartbeat: periodic runtime maintenance (no LLM).
+    if cfg.agent.background.enabled {
+        let _heartbeat_handle = Heartbeat::default().spawn();
+    }
+
+    // Daily Digest: scheduled task that aggregates digest-queue Reports.
+    {
+        let digest_eb = (*eb).clone();
+        let dq = digest_queue.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(86400));
+            // 首次 tick 立即完成，使第一次运行在完整 interval 后
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                let reports = AttentionManager::drain_queue(&dq);
+                if !reports.is_empty() {
+                    let builder = DigestBuilder::new(digest_eb.clone());
+                    builder.build_and_send(reports);
+                }
+            }
+        });
+    }
+
+    // Event log: replay past events into current subscribers, then log future events.
+    let event_log_path = config::config_dir().join("event_log.jsonl");
+    EventLogger::replay(&event_log_path, &eb);
+    let _event_logger = EventLogger::new(event_log_path).unwrap().spawn(&eb);
 
     let gpu = match GpuContext::new() { Ok(g) => Arc::new(g), Err(e) => { tracing::error!("GPU: {e:#}"); return; } };
-    let mut app = match ZhongshuApp::new(cfg, controller, inbox.clone(), eb, event_rx, response_tx, response_rx, gpu) {
+    let mut app = match ZhongshuApp::new(cfg, controller, inbox.clone(), eb, event_rx, response_tx, response_rx, gpu, proxy, r) {
         Ok(app) => app, Err(e) => { tracing::error!("init: {e:#}"); return; }
     };
-
-    if app.config.agent.background.enabled {
-        BackgroundRunner::new(app.config.agent.background.interval_secs, app.config.agent.background.prompt.clone(), app.controller.state())
-            .spawn(app.inbox.clone());
-    }
 
     EventLoop::new().unwrap().run_app(&mut app).unwrap();
 }

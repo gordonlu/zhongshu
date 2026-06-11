@@ -29,6 +29,11 @@ image = "0.25"
 sha2 = "0.10"
 hex = "0.4"
 deeplossless = "=0.6.7"
+sysinfo = "0.33"
+axum = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 enigo = { version = "0.4", default-features = false, features = ["serde", "x11rb"] }
@@ -45,4 +50,4 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Gdi",
     "Win32_Media_Speech",
 ], optional = true }
-winapi = { version = "0.3", features = ["winuser", "processthreadsapi", "winbase", "shellapi", "errhandlingapi", "synchapi"] }
+winapi = { version = "0.3", features = ["winuser", "processthreadsapi", "winbase", "fileapi", "shellapi", "errhandlingapi", "synchapi"] }

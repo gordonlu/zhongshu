@@ -2,33 +2,37 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::collections::VecDeque;
+use std::io::Write;
 use std::time::Duration;
+
+const KEEP_COMPLETED_GOALS: usize = 20;
+const AGENT_TIMEOUT: Duration = Duration::from_secs(300);
 use zhongshu_core::agent::llm::{Message, OpenAiProvider};
-use zhongshu_core::agent::loop_::{AgentBudget, AgentLoop};
+use zhongshu_core::agent::{
+    AgentBudget, AgentRuntime, AgentCallbacks, AgentProfile, Worker, run_agent,
+};
 use zhongshu_core::event::{
     AgentState,
     Event, AgentEvent, ToolEvent,
     ResponseEvent, ResponseRole, MessageId,
     EventBus, ResponseTx,
 };
-use zhongshu_core::integration::{ContextConfig, ContextEngine};
 use zhongshu_core::tool::ToolRegistry;
 use zhongshu_core::task::TaskQueue;
 use tokio::sync::RwLock;
 use crate::agent::{AgentMemory};
+use crate::config;
 
 // ── Session persistence ─────────────────────────────────────────────
 
 #[derive(Clone)]
 pub struct SessionState {
-    pub engine: Arc<tokio::sync::Mutex<Option<Arc<ContextEngine>>>>,
     pub conv_id: Arc<tokio::sync::Mutex<i64>>,
 }
 
 impl SessionState {
     pub fn new() -> Self {
         SessionState {
-            engine: Arc::new(tokio::sync::Mutex::new(None)),
             conv_id: Arc::new(tokio::sync::Mutex::new(1)),
         }
     }
@@ -43,9 +47,10 @@ pub struct AgentController {
     tools: ToolRegistry,
     model: String,
     session: SessionState,
-    system_prompt: String,
+    system_prompt: Mutex<String>,
     state: Arc<RwLock<AgentState>>,
     memory: AgentMemory,
+    current_task: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl AgentController {
@@ -61,9 +66,11 @@ impl AgentController {
     ) -> Self {
         let memory = AgentMemory::load(&profile_path);
         AgentController {
-            event_bus, response_tx, provider, tools, model, session, system_prompt,
+            event_bus, response_tx, provider, tools, model, session,
+            system_prompt: Mutex::new(system_prompt),
             state: Arc::new(RwLock::new(AgentState::Idle)),
             memory,
+            current_task: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -72,28 +79,23 @@ impl AgentController {
         self.state.clone()
     }
 
-    pub(crate) fn event_bus(&self) -> &Arc<EventBus> {
-        &self.event_bus
+    pub fn set_system_prompt(&self, prompt: String) {
+        *self.system_prompt.lock().unwrap() = prompt;
     }
 
-    /// Initialise the deeplossless context engine asynchronously.
-    pub fn init_engine(&self, api_key: &str) {
-        if api_key.is_empty() { return; }
-        let ak = api_key.to_string();
-        let m = self.model.clone();
-        let ea = self.session.engine.clone();
-        let ca = self.session.conv_id.clone();
-        let sys = self.system_prompt.clone();
+    /// Cancel the currently running agent task.
+    pub fn cancel(&self) {
+        let ct = self.current_task.clone();
         tokio::spawn(async move {
-            if let Ok(e) = ContextEngine::new(ContextConfig {
-                api_key: ak,
-                ..ContextConfig::default()
-            }).await {
-                let cid = e.find_or_create_conv(&sys, &m).unwrap_or(1);
-                *ea.lock().await = Some(Arc::new(e));
-                *ca.lock().await = cid;
+            if let Some(h) = ct.lock().await.take() {
+                h.abort();
+                tracing::info!("agent task cancelled by user");
             }
         });
+    }
+
+    pub(crate) fn event_bus(&self) -> &Arc<EventBus> {
+        &self.event_bus
     }
 
     /// Run an agent turn for the given input.  Non‑blocking — spawns
@@ -149,72 +151,75 @@ impl AgentController {
         let p = self.provider.clone();
         let t = self.tools.clone();
         let m = self.model.clone();
-        let e = self.session.engine.clone();
-        let c = self.session.conv_id.clone();
-        let sys = self.system_prompt.clone();
+        let sys = self.system_prompt.lock().unwrap().clone();
         let memory = self.memory.clone();
         let state_arc = self.state.clone();
 
         // Snapshot profile for the prompt — non‑blocking read.
         let profile_ctx = memory.prompt_context();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let aid = MessageId::new();
             let _ = tx.send(ResponseEvent::MessageStarted { id: aid, role: ResponseRole::Assistant }).await;
 
-            let eng = e.lock().await.clone();
-            let cid = *c.lock().await;
-            let mctx = eng.as_ref().map_or(String::new(), |x| x.build_context(cid, 5000, &input).unwrap_or_default());
             let mut msgs = vec![Message::system(&sys)];
             if !profile_ctx.is_empty() {
                 msgs.push(Message::system(&profile_ctx));
             }
-            if !mctx.is_empty() { msgs.push(Message::user(format!("<context>\n{mctx}\n</context>"))); }
             msgs.push(Message::user(input.clone()));
-            let agent = AgentLoop::new(p, t, m).with_budget(AgentBudget::default()).with_messages(msgs);
+            let runtime = AgentRuntime::new(p, t, m, AgentBudget::default());
 
-            let r = agent.run_streaming("",
-                {
+            let callbacks = AgentCallbacks {
+                on_text: {
                     let tx = tx.clone();
-                    move |x: &str| {
-                        let delta = x.replace("<final_answer>", "").replace("</final_answer>", "");
+                    Box::new(move |x: &str| {
+                        let delta = super::overlay::strip_final_answer(x).trim().to_string();
                         if !delta.is_empty() {
                             let _ = tx.try_send(ResponseEvent::MessageDelta { id: aid, delta });
                         }
-                    }
+                    })
                 },
-                {
+                on_tool_start: {
                     let eb = eb.clone();
-                    move |name: &str| {
+                    Box::new(move |name: &str| {
                         eb.publish(Event::Tool(ToolEvent::Started { name: name.to_string() }));
-                    }
+                    })
                 },
-                {
+                on_tool_done: {
                     let eb = eb.clone();
-                    move |name: &str, ok: bool| {
+                    Box::new(move |name: &str, ok: bool| {
                         eb.publish(Event::Tool(ToolEvent::Completed { name: name.to_string(), success: ok }));
-                    }
+                    })
                 },
-            ).await;
+            };
+
+            let r = tokio::time::timeout(AGENT_TIMEOUT, run_agent(&runtime, msgs, Some(Arc::new(callbacks)), &input)).await;
 
             match r {
-                Ok(rr) => {
+                Ok(Ok(rr)) => {
                     let last = rr.messages.last().map(|x| x.content.as_str()).unwrap_or("");
-                    if let Some(ref en) = eng {
-                        let _ = en.append_turn(cid, &format!("[u]:{}", input), &format!("[a]:{last}"));
-                        if en.check_compression(cid).should_compress { let _ = en.trigger_compaction(cid).await; }
-                    }
-                    // Extract todos and goal completions (independent of engine state).
+                    // Extract todos and goal completions.
                     memory.extract_todos(last);
                     memory.extract_goal_completions(last);
+                    // Archive old completed goals to keep the list bounded.
+                    memory.archive_completed_goals(KEEP_COMPLETED_GOALS);
                     let _ = tx.send(ResponseEvent::MessageCompleted { id: aid }).await;
                     eb.publish(Event::Agent(AgentEvent::StateChanged {
                         from: AgentState::Thinking,
                         to: AgentState::Done { success: true },
                     }));
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     let _ = tx.send(ResponseEvent::MessageDelta { id: aid, delta: format!("{e}") }).await;
+                    let _ = tx.send(ResponseEvent::MessageCompleted { id: aid }).await;
+                    eb.publish(Event::Agent(AgentEvent::StateChanged {
+                        from: AgentState::Thinking,
+                        to: AgentState::Done { success: false },
+                    }));
+                }
+                Err(_) => {
+                    tracing::warn!("agent task timed out after 300s");
+                    let _ = tx.send(ResponseEvent::MessageDelta { id: aid, delta: "[连接超时: 300s 无响应]".into() }).await;
                     let _ = tx.send(ResponseEvent::MessageCompleted { id: aid }).await;
                     eb.publish(Event::Agent(AgentEvent::StateChanged {
                         from: AgentState::Thinking,
@@ -229,42 +234,10 @@ impl AgentController {
                 to: AgentState::Idle,
             }));
         });
-    }
-}
-
-// ── Background runner ──────────────────────────────────────────────
-
-pub struct BackgroundRunner {
-    interval: Duration,
-    prompt: String,
-    state: Arc<RwLock<AgentState>>,
-}
-
-impl BackgroundRunner {
-    pub fn new(interval_secs: u64, prompt: String, state: Arc<RwLock<AgentState>>) -> Self {
-        BackgroundRunner {
-            interval: Duration::from_secs(interval_secs),
-            prompt,
-            state,
-        }
-    }
-
-    pub fn spawn(self, inbox: Arc<AgentInbox>) -> tokio::task::JoinHandle<()> {
-        assert!(self.interval > Duration::ZERO, "background interval must be positive");
+        let ct = self.current_task.clone();
         tokio::spawn(async move {
-            tracing::info!("background runner started (interval {:?})", self.interval);
-            let mut tick = tokio::time::interval(self.interval);
-            tick.tick().await;
-            loop {
-                tick.tick().await;
-                if matches!(*self.state.read().await, AgentState::Idle) {
-                    tracing::debug!("background runner firing");
-                    inbox.submit(self.prompt.clone());
-                } else {
-                    tracing::debug!("background runner skipped (agent busy)");
-                }
-            }
-        })
+            *ct.lock().await = Some(handle);
+        });
     }
 }
 
@@ -337,21 +310,54 @@ impl AgentInbox {
     }
 }
 
-// ── Task → Agent dispatcher ────────────────────────────────────────
+/// Append a worker report to ~/.config/zhongshu/check_log.jsonl.
+fn log_check(report: &zhongshu_core::agent::report::Report) {
+    let path = config::config_dir().join("check_log.jsonl");
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let line = serde_json::json!({
+            "ts": ts,
+            "task_id": report.task_id,
+            "worker": report.worker,
+            "summary": report.summary,
+            "findings": report.findings,
+            "attention": format!("{:?}", report.attention),
+        });
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+// ── Task → Worker dispatcher ─────────────────────────────────────────
 
 /// Consumes from a TaskQueue (shared with TaskScheduler) and routes
-/// fired tasks to the AgentInbox as user-visible messages.
-pub struct AgentTaskDispatcher;
+/// fired tasks to a Worker for LLM analysis, producing a Report.
+pub struct TaskWorkerDispatcher;
 
-impl AgentTaskDispatcher {
-    pub fn spawn(queue: TaskQueue, inbox: Arc<AgentInbox>) -> tokio::task::JoinHandle<()> {
+impl TaskWorkerDispatcher {
+    pub fn spawn(
+        queue: TaskQueue,
+        runtime: Arc<AgentRuntime>,
+        profile: AgentProfile,
+        eb: Arc<EventBus>,
+    ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             while let Some(task) = queue.recv().await {
-                let msg = format!("[定时任务: {}] {}", task.source, task.arguments);
-                tracing::debug!("dispatching task {} to inbox", task.id);
-                inbox.submit(msg);
+                tracing::info!(task = %task.id, source = %task.source, "dispatching to worker");
+                match Worker::execute(&runtime, &profile, task, None).await {
+                    Ok(report) => {
+                        log_check(&report);
+                        tracing::debug!(worker = %report.worker, attention = ?report.attention, "worker report");
+                        eb.publish(Event::Agent(AgentEvent::WorkerReport(report)));
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "worker execution failed");
+                    }
+                }
             }
-            tracing::info!("task dispatcher stopped (queue closed)");
+            tracing::info!("worker dispatcher stopped (queue closed)");
         })
     }
 }

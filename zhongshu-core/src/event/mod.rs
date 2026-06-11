@@ -1,3 +1,4 @@
+use crate::agent::report::Report;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{broadcast, mpsc};
 
@@ -27,7 +28,7 @@ impl MessageId {
 
 // ── Agent state ─────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AgentState {
     Idle,
     Thinking,
@@ -37,21 +38,49 @@ pub enum AgentState {
 
 // ── Hierarchical Event (broadcast — allowed to drop) ────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Event {
     Agent(AgentEvent),
     Tool(ToolEvent),
     Task(TaskEvent),
     Memory(MemoryEvent),
     Authority(AuthorityEvent),
+    Attention(AttentionEvent),
+    Source(SourceEvent),
 }
 
-#[derive(Debug, Clone)]
+impl Event {
+    /// 人类可读的事件类型名，用于 RuleEngine 规则匹配。
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Event::Agent(e) => match e {
+                AgentEvent::StateChanged { .. } => "state_changed",
+                AgentEvent::WorkerReport(..) => "worker_report",
+            },
+            Event::Tool(..) => "tool",
+            Event::Task(..) => "task",
+            Event::Memory(..) => "memory",
+            Event::Authority(..) => "authority",
+            Event::Attention(e) => match e {
+                AttentionEvent::Interrupt { .. } => "attention_interrupt",
+                AttentionEvent::Notify { .. } => "attention_notify",
+                AttentionEvent::Digest { .. } => "attention_digest",
+            },
+            Event::Source(e) => match e {
+                SourceEvent::Tick { .. } => "tick",
+                SourceEvent::DiskUsage { .. } => "disk_usage",
+                SourceEvent::BatteryLow { .. } => "battery_low",
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum MemoryEvent {
     Compacted,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum AuthorityEvent {
     ApprovalRequired {
         id: u64,
@@ -61,18 +90,47 @@ pub enum AuthorityEvent {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum AgentEvent {
     StateChanged { from: AgentState, to: AgentState },
+    WorkerReport(Report),
 }
 
-#[derive(Debug, Clone)]
+/// AttentionManager 产出的通知路由事件。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum AttentionEvent {
+    /// 需要立即打断用户（P0）
+    Interrupt {
+        report: Report,
+    },
+    /// 桌面通知即可（P1）
+    Notify {
+        report: Report,
+    },
+    /// 归入日/周报（P3）
+    Digest {
+        report: Report,
+    },
+}
+
+/// Source 系统产生的事件。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum SourceEvent {
+    /// 定期心跳事件。
+    Tick { name: String },
+    /// 磁盘使用率告警。
+    DiskUsage { path: String, usage_pct: f64 },
+    /// 电池电量低。
+    BatteryLow { level: u8 },
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ToolEvent {
     Started { name: String },
     Completed { name: String, success: bool },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum TaskEvent {
     Triggered { name: String },
     Completed { name: String },
@@ -80,6 +138,7 @@ pub enum TaskEvent {
 
 // ── EventBus ────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct EventBus {
     tx: broadcast::Sender<Event>,
 }
@@ -91,6 +150,9 @@ impl EventBus {
     }
 
     pub fn publish(&self, event: Event) {
+        if self.tx.receiver_count() == 0 {
+            tracing::warn!("event published with no receivers");
+        }
         let _ = self.tx.send(event);
     }
 
@@ -100,6 +162,77 @@ impl EventBus {
 }
 
 pub type EventRx = broadcast::Receiver<Event>;
+
+// ── Event persistence (append-only JSONL) ───────────────────────────
+
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+/// Append-only event log for debugging and replay.
+pub struct EventLogger {
+    file: Mutex<std::fs::File>,
+    _path: PathBuf,
+}
+
+impl EventLogger {
+    /// Open or create the JSONL log file at `path`.
+    pub fn new(path: PathBuf) -> std::io::Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        Ok(EventLogger { file: Mutex::new(file), _path: path })
+    }
+
+    /// Spawn a background task that writes every EventBus event to the log.
+    pub fn spawn(self, eb: &EventBus) -> tokio::task::JoinHandle<()> {
+        let mut rx = eb.subscribe();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        if let Ok(line) = serde_json::to_string(&event) {
+                            if let Ok(mut f) = self.file.lock() {
+                                let _ = writeln!(f, "{line}");
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("event logger lagged: {n}");
+                    }
+                    Err(_) => break,
+                }
+            }
+        })
+    }
+
+    /// Replay events from a JSONL log file into the EventBus.
+    /// Returns the number of replayed events.
+    pub fn replay(path: &Path, eb: &EventBus) -> usize {
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("cannot replay event log: {e}");
+                return 0;
+            }
+        };
+        let mut count = 0;
+        for line in content.lines() {
+            if let Ok(event) = serde_json::from_str::<Event>(line) {
+                // Skip stale state changes — they refer to past sessions.
+                if matches!(event, Event::Agent(AgentEvent::StateChanged { .. })) {
+                    continue;
+                }
+                eb.publish(event);
+                count += 1;
+            }
+        }
+        tracing::info!(count, "replayed events from log");
+        count
+    }
+}
 
 // ── Response stream (mpsc bounded — backpressure safe) ──────────────
 

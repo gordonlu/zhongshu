@@ -17,7 +17,8 @@ impl Tool for WebSearchTool {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "The search query"},
-                "max_results": {"type": "integer", "description": "Max results (default 5, max 10)", "default": 5}
+                "max_results": {"type": "integer", "description": "Max results (default 5, max 10)", "default": 5},
+                "region": {"type": "string", "description": "Region code, e.g. cn-zh for Chinese, us-en for US, jp-jp for Japan (default cn-zh)", "default": "cn-zh"}
             },
             "required": ["query"]
         })
@@ -29,8 +30,9 @@ impl Tool for WebSearchTool {
             None => return ToolOutput::error("'query' must be a string"),
         };
         let max = arguments["max_results"].as_u64().unwrap_or(5).min(10) as usize;
+        let region = arguments["region"].as_str().unwrap_or("cn-zh");
 
-        info!("web_search: {query}");
+        info!("web_search: {query}  region={region}");
 
         let client = match reqwest::Client::builder()
             .user_agent("zhongshu/0.1")
@@ -40,7 +42,7 @@ impl Tool for WebSearchTool {
             Err(e) => return ToolOutput::error(format!("创建 HTTP 客户端失败: {e}")),
         };
 
-        let url = format!("https://html.duckduckgo.com/html/?q={}", urlencoding(query));
+        let url = format!("https://html.duckduckgo.com/html/?q={}&kl={}", urlencoding(query), urlencoding(region));
 
         let html = match client.get(&url).send().await {
             Ok(r) => match r.text().await {

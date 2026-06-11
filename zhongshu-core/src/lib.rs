@@ -1,7 +1,12 @@
 pub mod agent;
 pub mod authority;
 pub mod desktop;
+pub mod digest;
+pub mod equipment;
 pub mod event;
+pub mod heartbeat;
 pub mod integration;
+pub mod rule;
+pub mod source;
 pub mod task;
 pub mod tool;

@@ -5,3 +5,4 @@ target/
 *.db-shm
 .env
 AGENTS.md
+MULTI_AGENT_ARCH.md

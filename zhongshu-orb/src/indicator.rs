@@ -45,12 +45,23 @@ mod orb {
             #[cfg(target_os = "windows")]
             { attrs = attrs.with_skip_taskbar(true); }
             let w = Arc::new(el.create_window(attrs).unwrap());
-        if let Some(m) = el.primary_monitor() {
-            let p = m.position(); let s = m.size();
-            let x = p.x + s.width as i32 / 2 - size as i32 / 2;
-            let y = p.y + s.height as i32 / 2 - size as i32 / 2;
-            let _ = w.set_outer_position(PhysicalPosition::new(x.max(0), y.max(0)));
-        }
+
+            // Default: bottom-right, 20% inset from edges.
+            if let Some(m) = el.primary_monitor() {
+                let p = m.position(); let s = m.size();
+                let x = p.x + s.width as i32 - size as i32 - (s.width as f64 * 0.2) as i32;
+                let y = p.y + s.height as i32 - size as i32 - (s.height as f64 * 0.2) as i32;
+                let _ = w.set_outer_position(PhysicalPosition::new(x.max(0), y.max(0)));
+            }
+
+            // Override with saved position from last drag.
+            let pos_path = crate::config::config_dir().join("orb_pos.json");
+            if let Ok(data) = std::fs::read_to_string(&pos_path) {
+                if let Ok((x, y)) = serde_json::from_str::<(i32, i32)>(&data) {
+                    let _ = w.set_outer_position(PhysicalPosition::new(x, y));
+                }
+            }
+
             let ctx = softbuffer::Context::new(w.clone()).unwrap();
             let surface = softbuffer::Surface::new(&ctx, w.clone()).unwrap();
             w.request_redraw();
@@ -59,6 +70,15 @@ mod orb {
         pub fn set_state(&mut self, state: AgentState) { self.state = state; self.window.request_redraw(); }
         pub fn window(&self) -> &Arc<Window> { &self.window }
         pub fn window_id(&self) -> WindowId { self.window.id() }
+
+        pub fn save_position(&self) {
+            if let Ok(pos) = self.window.outer_position() {
+                let path = crate::config::config_dir().join("orb_pos.json");
+                if let Ok(data) = serde_json::to_string(&(pos.x, pos.y)) {
+                    let _ = std::fs::write(path, data);
+                }
+            }
+        }
         pub fn render(&mut self) {
             let sz = self.window.inner_size(); let (ww, hh) = (sz.width, sz.height);
             if ww == 0 || hh == 0 { return; }
@@ -273,5 +293,10 @@ impl Indicator {
             #[cfg(not(target_os = "linux"))] Indicator::Orb(o) => o.render(),
             #[cfg(target_os = "linux")] Indicator::Tray(t) => t.render(),
         }
+    }
+
+    pub fn save_position(&self) {
+        #[cfg(not(target_os = "linux"))]
+        if let Indicator::Orb(o) = self { o.save_position(); }
     }
 }

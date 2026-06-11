@@ -269,6 +269,12 @@ impl ZhongshuApp {
         }
     }
 
+    fn save_orb_pos(&self) {
+        if let Some(ind) = self.indicator.as_ref() {
+            ind.save_position();
+        }
+    }
+
     fn try_open_overlay(&mut self, el: &ActiveEventLoop) {
         if self.overlays.is_empty() {
             self.controller.init_engine(&self.config.llm.api_key());
@@ -352,20 +358,25 @@ impl ApplicationHandler for ZhongshuApp {
                 }
             }
             WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
-                if on_orb { self.is_dragging = false; }
+                if on_orb { self.is_dragging = false; self.save_orb_pos(); }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.cursor_pos = (position.x, position.y);
                 if on_orb && self.is_dragging {
-                    let dx = position.x - self.drag_start_cursor.0;
-                    let dy = position.y - self.drag_start_cursor.1;
+                    // Relative delta from last cursor position avoids the
+                    // accumulation of rounding errors from per-frame i32
+                    // truncation that caused jitter / ghosting.
+                    let dx = position.x - self.cursor_pos.0;
+                    let dy = position.y - self.cursor_pos.1;
                     if let Some(w) = self.indicator.as_ref().unwrap().window() {
-                        let _ = w.set_outer_position(winit::dpi::PhysicalPosition::new(
-                            (self.drag_start_win.0 as f64 + dx) as i32,
-                            (self.drag_start_win.1 as f64 + dy) as i32,
-                        ));
+                        if let Ok(p) = w.outer_position() {
+                            let _ = w.set_outer_position(winit::dpi::PhysicalPosition::new(
+                                p.x + dx as i32,
+                                p.y + dy as i32,
+                            ));
+                        }
                     }
                 }
+                self.cursor_pos = (position.x, position.y);
             }
             WindowEvent::ModifiersChanged(m) => {
                 self.ctrl_held = m.state().control_key();
@@ -429,6 +440,7 @@ impl ApplicationHandler for ZhongshuApp {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum MenuAction { NewConversation, Quit, None }
 
 /// Show a right-click context menu on the orb.

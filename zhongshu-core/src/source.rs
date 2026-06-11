@@ -106,23 +106,28 @@ impl DiskUsageSource {
         #[cfg(target_os = "windows")]
         {
             use winapi::um::fileapi::GetDiskFreeSpaceExW;
+            use winapi::shared::ntdef::ULARGE_INTEGER;
             use std::ffi::OsStr;
             use std::os::windows::ffi::OsStrExt;
             let path: Vec<u16> = OsStr::new(self.path.as_os_str())
                 .encode_wide()
                 .chain(std::iter::once(0))
                 .collect();
-            let mut free_bytes: u64 = 0;
-            let mut total_bytes: u64 = 0;
-            let mut _total_free: u64 = 0;
+            // SAFETY: ULARGE_INTEGER is a union; initialising to zero is safe.
+            let mut free_bytes: ULARGE_INTEGER = unsafe { std::mem::zeroed() };
+            let mut total_bytes: ULARGE_INTEGER = unsafe { std::mem::zeroed() };
+            let mut _total_free: ULARGE_INTEGER = unsafe { std::mem::zeroed() };
             if unsafe { GetDiskFreeSpaceExW(path.as_ptr(), &mut free_bytes, &mut total_bytes, &mut _total_free) } == 0 {
                 return None;
             }
-            if total_bytes == 0 {
+            // SAFETY: reading the anonymous QuadPart field of an initialised union.
+            let total = unsafe { *total_bytes.QuadPart() } as u64;
+            if total == 0 {
                 return None;
             }
-            let used = total_bytes - free_bytes;
-            Some(used as f64 / total_bytes as f64)
+            let free = unsafe { *free_bytes.QuadPart() } as u64;
+            let used = total - free;
+            Some(used as f64 / total as f64)
         }
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         None

@@ -688,6 +688,9 @@ fn main() {
     // SourceManager: polls event sources and publishes to EventBus.
     let mut source_mgr = SourceManager::new((*eb).clone());
     source_mgr.register(TimerSource::new("heartbeat", Duration::from_secs(300)));
+    #[cfg(target_os = "windows")]
+    source_mgr.register(DiskUsageSource::new("disk-root", "C:\\", 0.90, Duration::from_secs(3600)));
+    #[cfg(not(target_os = "windows"))]
     source_mgr.register(DiskUsageSource::new("disk-root", "/", 0.90, Duration::from_secs(3600)));
     source_mgr.register(BatterySource::new("battery", 20, Duration::from_secs(3600)));
     let _source_handle = source_mgr.spawn();

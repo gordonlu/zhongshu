@@ -192,13 +192,13 @@ impl Overlay {
                     .stroke(egui::Stroke::new(1.0, Color32::from_rgb(48, 48, 52)))
                     .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
-                        let _resp = ui.add(
+                        let resp = ui.add(
                             egui::TextEdit::singleline(&mut self.input)
                                 .hint_text("给 中书 发消息...")
                                 .desired_width(f32::INFINITY)
                         );
 
-                        if cx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
+                        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             let msg = self.input.trim().to_string();
                             if !msg.is_empty() {
                                 send = Some(msg);
@@ -341,22 +341,21 @@ fn hash_str(s: &str) -> u64 {
 
 pub fn strip_final_answer(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'<' {
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, ch)) = chars.next() {
+        if ch == '<' {
             let rest = &text[i..];
             let lower = rest.to_lowercase();
             if lower.starts_with("<final_answer") || lower.starts_with("</final_answer")
                 || lower.starts_with("<final") || lower.starts_with("</final")
             {
-                while i < bytes.len() && bytes[i] != b'>' { i += 1; }
-                if i < bytes.len() { i += 1; }
+                for (_, c) in chars.by_ref() {
+                    if c == '>' { break; }
+                }
                 continue;
             }
         }
-        result.push(bytes[i] as char);
-        i += 1;
+        result.push(ch);
     }
     result
 }

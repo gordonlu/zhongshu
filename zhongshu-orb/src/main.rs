@@ -418,11 +418,11 @@ impl ApplicationHandler for ZhongshuApp {
             WindowEvent::KeyboardInput { event, is_synthetic: false, .. } if self.ctrl_held && event.state == ElementState::Pressed && event.logical_key == "q" => {
                 el.exit();
             }
-            // Reset IME position when overlay window regains focus.
+            // Ensure IME is enabled when overlay regains focus.
             WindowEvent::Focused(true) if self.overlays.contains_key(&id) => {
                 if let Some(ov) = self.overlays.get_mut(&id) {
-                    ov.window.set_ime_allowed(false);
                     ov.window.set_ime_allowed(true);
+                    ov.window.request_redraw();
                 }
             }
             _ => {}

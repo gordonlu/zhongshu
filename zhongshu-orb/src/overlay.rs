@@ -184,6 +184,14 @@ impl Overlay {
         let raw = self.state.take_egui_input(&self.window);
         let mut send: Option<String> = None;
 
+        // Ensure IME is enabled and cursor area is near the bottom input field.
+        self.window.set_ime_allowed(true);
+        let input_h = 48.0; // approximate input field height
+        self.window.set_ime_cursor_area(
+            winit::dpi::PhysicalPosition::new(0, sz.height.saturating_sub(input_h as u32)),
+            winit::dpi::PhysicalSize::new(sz.width, input_h as u32),
+        );
+
         let out = self.ctx.run(raw, |cx| {
             egui::TopBottomPanel::bottom("input").show(cx, |ui| {
                 egui::Frame::new()

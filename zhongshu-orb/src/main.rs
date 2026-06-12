@@ -36,7 +36,6 @@ use indicator::tray::TrayEvent;
 use zhongshu_core::tool::default_registry;
 use zhongshu_core::agent::llm::OpenAiProvider;
 use zhongshu_core::agent::{AgentBudget, AgentRuntime, AgentProfile, AttentionManager, AttentionDispatcher};
-use zhongshu_core::equipment::EquipmentRegistry;
 use zhongshu_core::rule::{Rule, RuleCondition, RuleTask, RuleEngine};
 use zhongshu_core::heartbeat::Heartbeat;
 use zhongshu_core::digest::DigestBuilder;
@@ -595,7 +594,7 @@ fn main() {
     let _dispatcher_handle = dispatcher.spawn(&eb);
 
     // ── 军器监初始化 ──
-    let mut equipment = {
+    let equipment = {
         let dir = config::config_dir().join("equipment");
         std::fs::create_dir_all(&dir).unwrap_or(());
         let mut reg = zhongshu_core::equipment::EquipmentRegistry::new(dir);

@@ -109,6 +109,7 @@ pub struct Overlay {
     pub pending_personality: Option<String>,
     pub request_stop: bool,
     show_settings: bool,
+    enlarged: bool,
     normal_size: (f32, f32),
     settings_pending_save: bool,
     settings_api_key: String,
@@ -192,6 +193,7 @@ impl Overlay {
             pending_personality: None,
             request_stop: false,
             show_settings: false,
+            enlarged: false,
             normal_size: (width, height),
             settings_pending_save: false,
             settings_api_key: if key_masked { "********".into() } else { api_key },
@@ -239,6 +241,21 @@ impl Overlay {
                         if ui.button("🗑 清空").clicked() {
                             self.entries.clear();
                             self.streaming = None;
+                        }
+                        ui.add_space(8.0);
+                        let enlarge_label = if self.enlarged { "⊟ 还原" } else { "⊞ 放大" };
+                        if ui.button(enlarge_label).clicked() {
+                            self.enlarged = !self.enlarged;
+                            let (w, h) = self.normal_size;
+                            if self.enlarged {
+                                let _ = self.window.request_inner_size(
+                                    winit::dpi::LogicalSize::new(w * 2.0, (h * 1.5).min(1600.0))
+                                );
+                            } else {
+                                let _ = self.window.request_inner_size(
+                                    winit::dpi::LogicalSize::new(w, h)
+                                );
+                            }
                         }
                         ui.add_space(8.0);
                         let label = if self.show_settings { "✕ 关闭" } else { "⚙ 设置" };
@@ -604,27 +621,43 @@ pub fn render_chat(
 }
 
 fn render_entry(ui: &mut egui::Ui, entry: &mut ChatEntry) {
-    let (role_color, role_label) = role_header(entry.role);
+    let (role_color, role_label, accent_color) = match entry.role {
+        EntryRole::User => (Color32::from_rgb(208, 96, 50), "你", Color32::from_rgb(208, 74, 26)),
+        EntryRole::Assistant => (Color32::from_rgb(190, 186, 180), "中书", Color32::from_rgb(70, 130, 200)),
+        EntryRole::System => (Color32::from_rgb(140, 136, 130), "系统", Color32::from_rgb(100, 100, 100)),
+    };
     let card_bg = match entry.role {
-        EntryRole::User => Color32::from_rgba_premultiplied(208, 74, 26, 55),
+        EntryRole::User => Color32::from_rgba_premultiplied(208, 74, 26, 40),
         EntryRole::Assistant => Color32::from_rgba_premultiplied(44, 44, 50, 200),
         EntryRole::System => Color32::from_rgba_premultiplied(50, 50, 55, 180),
     };
 
     let is_user = matches!(entry.role, EntryRole::User);
     let mut render_card = |ui: &mut egui::Ui| {
+        // Left accent border
+        egui::Frame::new()
+            .fill(accent_color)
+            .corner_radius(4)
+            .inner_margin(egui::Margin::symmetric(3, 16))
+.show(ui, |_| {});
+            ui.add_space(6.0);
         egui::Frame::new()
             .fill(card_bg)
             .corner_radius(8)
-            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(48, 48, 52)))
+            .stroke(egui::Stroke::new(1.0, Color32::from_rgba_premultiplied(255, 255, 255, 12)))
             .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.colored_label(role_color, role_label);
+                    ui.colored_label(role_color, egui::RichText::new(role_label).strong());
+                    ui.add_space(6.0);
+                    ui.colored_label(Color32::from_rgb(80, 76, 70), "·");
+                    ui.colored_label(Color32::from_rgb(80, 76, 70), "刚刚");
                 });
                 if !entry.tool_calls.is_empty() {
+                    ui.add_space(4.0);
                     render_tool_timeline(ui, &entry.tool_calls);
                 }
+                ui.add_space(4.0);
                 render_markdown_cached(ui, &entry.content, &mut entry.cached_job);
             });
     };
@@ -636,44 +669,60 @@ fn render_entry(ui: &mut egui::Ui, entry: &mut ChatEntry) {
             });
         });
     } else {
-        render_card(ui);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            render_card(ui);
+        });
     }
-    ui.add_space(6.0);
+    ui.add_space(8.0);
 }
 
 fn render_streaming(ui: &mut egui::Ui, stream: &mut StreamingState) {
-    let (role_color, role_label) = role_header(stream.role);
+    let (role_color, role_label, accent_color) = match stream.role {
+        EntryRole::User => (Color32::from_rgb(208, 96, 50), "你", Color32::from_rgb(208, 74, 26)),
+        EntryRole::Assistant => (Color32::from_rgb(190, 186, 180), "中书", Color32::from_rgb(70, 130, 200)),
+        EntryRole::System => (Color32::from_rgb(140, 136, 130), "系统", Color32::from_rgb(100, 100, 100)),
+    };
 
-    egui::Frame::new()
-        .fill(Color32::from_rgba_premultiplied(44, 44, 50, 200))
-        .corner_radius(8)
-        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(48, 48, 52)))
-        .inner_margin(egui::Margin::symmetric(12, 8))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.colored_label(role_color, role_label);
-            });
-            if !stream.tool_calls.is_empty() {
-                render_tool_timeline(ui, &stream.tool_calls);
-            }
-            if stream.content.is_empty() {
-                ui.horizontal(|ui| {
-                    ui.add(egui::Spinner::new().size(14.0));
-                    ui.colored_label(Color32::from_rgb(128, 124, 118), "思考中...");
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            // Left accent border
+            egui::Frame::new()
+                .fill(accent_color)
+                .corner_radius(4)
+                .inner_margin(egui::Margin::symmetric(3, 16))
+                .show(ui, |_| {});
+            ui.add_space(6.0);
+            egui::Frame::new()
+                .fill(Color32::from_rgba_premultiplied(44, 44, 50, 200))
+                .corner_radius(8)
+                .stroke(egui::Stroke::new(1.0, Color32::from_rgba_premultiplied(255, 255, 255, 12)))
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(role_color, egui::RichText::new(role_label).strong());
+                        ui.add_space(6.0);
+                        ui.colored_label(Color32::from_rgb(80, 76, 70), "·");
+                        ui.colored_label(Color32::from_rgb(80, 76, 70), "思考中...");
+                    });
+                    if !stream.tool_calls.is_empty() {
+                        ui.add_space(4.0);
+                        render_tool_timeline(ui, &stream.tool_calls);
+                    }
+                    if stream.content.is_empty() {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Spinner::new().size(14.0));
+                            ui.colored_label(Color32::from_rgb(128, 124, 118), "等待回复...");
+                        });
+                    } else {
+                        ui.add_space(4.0);
+                        render_markdown_cached(ui, &stream.content, &mut stream.cached_job);
+                    }
                 });
-            } else {
-                render_markdown_cached(ui, &stream.content, &mut stream.cached_job);
-            }
         });
-    ui.add_space(6.0);
-}
-
-fn role_header(role: EntryRole) -> (Color32, &'static str) {
-    match role {
-        EntryRole::User => (Color32::from_rgb(208, 96, 50), "你"),
-        EntryRole::Assistant => (Color32::from_rgb(190, 186, 180), "中书"),
-        EntryRole::System => (Color32::from_rgb(140, 136, 130), "系统"),
-    }
+    });
+    ui.add_space(8.0);
 }
 
 fn render_markdown_cached(
@@ -710,7 +759,6 @@ fn build_markdown_job(ui: &egui::Ui, text: &str) -> egui::text::LayoutJob {
 
     let mut fmt_stack = vec![base.clone()];
     let mut code_depth = 0u32;
-    let list_depth = 0u32;
 
     for event in parser {
         let top = fmt_stack.last().unwrap().clone();
@@ -722,10 +770,7 @@ fn build_markdown_job(ui: &egui::Ui, text: &str) -> egui::text::LayoutJob {
                     fmt_stack.push(code.clone());
                 }
                 Tag::Item => {
-                    if list_depth > 0 {
-                        job.append("\n", 0.0, top.clone());
-                    }
-                    job.append("• ", 0.0, top.clone());
+                    job.append("\n  • ", 0.0, top);
                 }
                 _ => {}
             },
@@ -800,14 +845,23 @@ fn render_tool_timeline(ui: &mut egui::Ui, tools: &[ToolCallEntry]) {
 }
 
 pub fn configure_fonts(ctx: &egui::Context, search_paths: &[String]) {
-    let data = search_paths.iter().find_map(|p| {
-        let result = std::fs::read(p);
-        match &result {
-            Ok(bytes) => tracing::info!("loaded font: {} ({} bytes)", p, bytes.len()),
-            Err(e) => tracing::debug!("font unreadable: {} ({})", p, e),
+    // Try fontconfig on Linux to find the system's preferred CJK font.
+    let fc_font = find_cjk_font_fc();
+
+    let data = {
+        if let Some(fc) = fc_font {
+            Some(fc)
+        } else {
+            search_paths.iter().find_map(|p| {
+                let result = std::fs::read(p);
+                match &result {
+                    Ok(bytes) => tracing::info!("loaded font: {} ({} bytes)", p, bytes.len()),
+                    Err(e) => tracing::debug!("font unreadable: {} ({})", p, e),
+                }
+                result.ok()
+            })
         }
-        result.ok()
-    });
+    };
 
     match data {
         Some(data) => {
@@ -826,45 +880,78 @@ pub fn configure_fonts(ctx: &egui::Context, search_paths: &[String]) {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn find_cjk_font_fc() -> Option<Vec<u8>> {
+    use std::process::Command;
+    let output = Command::new("fc-match")
+        .args(["-f", "%{file[0]}", "sans-serif:lang=zh"])
+        .output().ok()?;
+    let path = String::from_utf8(output.stdout).ok()?;
+    let path = path.trim().to_string();
+    if path.is_empty() { return None; }
+    let data = std::fs::read(&path).ok()?;
+    tracing::info!("fontconfig: loaded {}", path);
+    Some(data)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn find_cjk_font_fc() -> Option<Vec<u8>> {
+    None
+}
+
 fn apply_theme(ctx: &egui::Context) {
     let mut v = egui::Visuals::dark();
     let accent = Color32::from_rgb(208, 74, 26);
-    let bg = Color32::from_rgb(24, 24, 26);
-    let surface = Color32::from_rgb(34, 34, 38);
+    let accent_dim = Color32::from_rgb(160, 56, 20);
+    let bg = Color32::from_rgb(20, 20, 22);
+    let surface = Color32::from_rgb(30, 30, 33);
+    let surface_raised = Color32::from_rgb(38, 38, 42);
+    let border = Color32::from_rgb(48, 48, 52);
     let text = Color32::from_rgb(228, 224, 218);
+    let text_muted = Color32::from_rgb(128, 124, 118);
 
-    v.window_corner_radius = egui::CornerRadius::same(10);
+    v.window_corner_radius = egui::CornerRadius::same(12);
     v.panel_fill = bg;
     v.window_fill = bg;
-    v.extreme_bg_color = Color32::from_rgb(18, 18, 20);
+    v.extreme_bg_color = Color32::from_rgb(14, 14, 16);
     v.faint_bg_color = surface;
 
     v.widgets.noninteractive.bg_fill = surface;
-    v.widgets.noninteractive.bg_stroke =
-        egui::Stroke::new(1.0, Color32::from_rgb(48, 48, 52));
-    v.widgets.noninteractive.corner_radius = egui::CornerRadius::same(6);
-    v.widgets.noninteractive.fg_stroke =
-        egui::Stroke::new(1.0, Color32::from_rgb(160, 156, 150));
+    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, border);
+    v.widgets.noninteractive.corner_radius = egui::CornerRadius::same(8);
+    v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, text_muted);
 
-    v.widgets.inactive.bg_fill = surface;
-    v.widgets.inactive.corner_radius = egui::CornerRadius::same(6);
-    v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, text);
+    v.widgets.inactive.bg_fill = surface_raised;
+    v.widgets.inactive.corner_radius = egui::CornerRadius::same(8);
+    v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, text_muted);
+    v.widgets.inactive.expansion = 0.0;
 
-    v.widgets.active.bg_fill = Color32::from_rgb(176, 58, 16);
-    v.widgets.active.corner_radius = egui::CornerRadius::same(6);
+    v.widgets.active.bg_fill = accent_dim;
+    v.widgets.active.corner_radius = egui::CornerRadius::same(8);
     v.widgets.active.fg_stroke = egui::Stroke::new(1.5, accent);
+    v.widgets.active.expansion = 0.0;
 
-    v.widgets.hovered.bg_fill = Color32::from_rgb(48, 48, 52);
-    v.widgets.hovered.corner_radius = egui::CornerRadius::same(6);
+    v.widgets.hovered.bg_fill = Color32::from_rgb(50, 50, 54);
+    v.widgets.hovered.corner_radius = egui::CornerRadius::same(8);
     v.widgets.hovered.fg_stroke = egui::Stroke::new(1.5, accent);
+    v.widgets.hovered.expansion = 0.0;
 
     v.selection.bg_fill = Color32::from_rgba_premultiplied(208, 74, 26, 80);
     v.selection.stroke = egui::Stroke::NONE;
+
+    v.button_frame = true;
+    v.collapsing_header_frame = false;
+
     v.override_text_color = Some(text);
 
     ctx.set_visuals(v);
 
     let mut style = (*ctx.style()).clone();
     style.spacing.item_spacing = egui::vec2(12.0, 8.0);
+    style.spacing.button_padding = egui::vec2(10.0, 4.0);
+    style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, border);
+    style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, border);
+    style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, accent);
+    style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, accent);
     ctx.set_style(style);
 }

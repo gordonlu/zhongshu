@@ -124,13 +124,15 @@ impl Default for UiConfig {
             overlay_height: default_overlay_height(),
             max_chat_entries: default_max_chat_entries(),
             font_search_paths: vec![
-                // Linux common paths
+                // Linux: TTF preferred over TTC for reliable CJK rendering.
+                // TTC font_index=0 picks JP variant, causing Chinese half-width.
+                // DroidSansFallbackFull is a single TTF, works correctly.
+                "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf".into(),
                 "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc".into(),
                 "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc".into(),
                 "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc".into(),
                 "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc".into(),
                 "/usr/share/fonts/wqy-microhei/wqy-microhei.ttc".into(),
-                "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf".into(),
                 // Windows
                 "C:\\Windows\\Fonts\\msyh.ttc".into(),
                 "C:\\Windows\\Fonts\\msyhbd.ttc".into(),

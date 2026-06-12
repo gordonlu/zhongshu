@@ -27,6 +27,7 @@ use crate::config;
 
 #[derive(Clone)]
 pub struct SessionState {
+    #[allow(dead_code)]
     pub conv_id: Arc<tokio::sync::Mutex<i64>>,
 }
 
@@ -46,6 +47,7 @@ pub struct AgentController {
     provider: OpenAiProvider,
     tools: ToolRegistry,
     model: String,
+    #[allow(dead_code)]
     session: SessionState,
     system_prompt: Mutex<String>,
     state: Arc<RwLock<AgentState>>,
@@ -60,7 +62,8 @@ impl AgentController {
         provider: OpenAiProvider,
         tools: ToolRegistry,
         model: String,
-        session: SessionState,
+    #[allow(dead_code)]
+    session: SessionState,
         system_prompt: String,
         profile_path: PathBuf,
     ) -> Self {
@@ -75,6 +78,7 @@ impl AgentController {
     }
 
     /// Shared state for external consumers (UI, background runner).
+    #[allow(dead_code)]
     pub fn state(&self) -> Arc<RwLock<AgentState>> {
         self.state.clone()
     }

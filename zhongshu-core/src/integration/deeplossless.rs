@@ -181,7 +181,7 @@ async fn bind_socket(start_port: u16) -> anyhow::Result<(tokio::net::TcpListener
                 let actual = listener.local_addr()?.port();
                 return Ok((listener, actual));
             }
-            Err(e) if offset + 1 < attempts => {
+            Err(_e) if offset + 1 < attempts => {
                 tracing::warn!("port {port} in use, trying next");
                 continue;
             }

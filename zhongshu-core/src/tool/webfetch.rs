@@ -71,7 +71,6 @@ impl Tool for WebFetchTool {
 /// Simple HTML-to-text extraction: strip tags, extract meaningful content.
 fn extract_text(html: &str) -> String {
     let mut result = String::new();
-    let mut in_tag = false;
     let mut in_script = false;
     let mut in_style = false;
 
@@ -84,13 +83,11 @@ fn extract_text(html: &str) -> String {
             let lower = html[i..].to_lowercase();
             if lower.starts_with("<script") { in_script = true; }
             if lower.starts_with("<style") { in_style = true; }
-            in_tag = true;
             // Find end of tag
             while i < bytes.len() && bytes[i] != b'>' { i += 1; }
             if i < bytes.len() { i += 1; } // skip '>'
             if lower.starts_with("</script") { in_script = false; }
             if lower.starts_with("</style") { in_style = false; }
-            in_tag = false;
             continue;
         }
 

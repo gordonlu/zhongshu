@@ -5,7 +5,6 @@ use std::sync::Arc;
 use crate::tool::Tool;
 
 use super::manifest::{EquipmentId, EquipmentStatus, Manifest};
-use super::permission::PermissionGuard;
 
 /// An installed equipment package.
 #[derive(Debug, Clone)]
@@ -110,7 +109,7 @@ impl EquipmentRegistry {
 
     /// Collect tools from active equipment, wrapped with PermissionGuard.
     pub fn equipment_tools(&self) -> Vec<(EquipmentId, Arc<dyn Tool>)> {
-        let mut result = Vec::new();
+        let result = Vec::new();
         for eq in self.loaded.values() {
             if eq.status != EquipmentStatus::Active {
                 continue;

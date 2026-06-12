@@ -190,6 +190,7 @@ impl AgentMemory {
     }
 
     /// Store a structured memory observation (fact, preference, etc.).
+    #[allow(dead_code)]
     pub fn add_memory_entry(&self, text: &str, source: &str) {
         if let Ok(mut p) = self.profile.try_write() {
             let ts = timestamp().to_string();

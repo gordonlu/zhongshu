@@ -845,33 +845,39 @@ fn render_tool_timeline(ui: &mut egui::Ui, tools: &[ToolCallEntry]) {
 }
 
 pub fn configure_fonts(ctx: &egui::Context, search_paths: &[String]) {
-    // Try fontconfig on Linux to find the system's preferred CJK font.
-    let fc_font = find_cjk_font_fc();
-
-    let data = {
-        if let Some(fc) = fc_font {
-            Some(fc)
-        } else {
-            search_paths.iter().find_map(|p| {
-                let result = std::fs::read(p);
-                match &result {
-                    Ok(bytes) => tracing::info!("loaded font: {} ({} bytes)", p, bytes.len()),
-                    Err(e) => tracing::debug!("font unreadable: {} ({})", p, e),
-                }
-                result.ok()
-            })
+    let (data, index) = match find_noto_mono_sc() {
+        Some((d, idx)) => (Some(d), idx),
+        None => {
+            // Direct fallback: known path + TTC index 7 for Noto Sans Mono CJK SC
+            let direct = std::fs::read("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc").ok();
+            if let Some(data) = direct {
+                tracing::info!("loaded NotoSansCJK-Regular.ttc directly (index 7)");
+                (Some(data), 7u32)
+            } else {
+                let d = search_paths.iter().find_map(|p| {
+                    let result = std::fs::read(p);
+                    match &result {
+                        Ok(bytes) => tracing::info!("loaded font: {} ({} bytes)", p, bytes.len()),
+                        Err(e) => tracing::debug!("font unreadable: {} ({})", p, e),
+                    }
+                    result.ok()
+                });
+                (d, 0u32)
+            }
         }
     };
 
     match data {
         Some(data) => {
             let mut fonts = egui::FontDefinitions::default();
-            fonts.font_data.insert("cjk".into(), Arc::new(egui::FontData::from_owned(data)));
+            let mut font_data = egui::FontData::from_owned(data);
+            font_data.index = index;
+            fonts.font_data.insert("cjk".into(), Arc::new(font_data));
             for (_, family_fonts) in fonts.families.iter_mut() {
                 family_fonts.insert(0, "cjk".into());
             }
             ctx.set_fonts(fonts);
-            tracing::info!("CJK font applied to all families");
+            tracing::info!("CJK font applied (index {})", index);
         }
         None => {
             tracing::warn!("no CJK font found; Chinese text will show as squares");
@@ -880,22 +886,26 @@ pub fn configure_fonts(ctx: &egui::Context, search_paths: &[String]) {
     }
 }
 
+/// Try `fc-match` to find "Noto Sans Mono CJK SC" with correct TTC index.
 #[cfg(target_os = "linux")]
-fn find_cjk_font_fc() -> Option<Vec<u8>> {
+fn find_noto_mono_sc() -> Option<(Vec<u8>, u32)> {
     use std::process::Command;
     let output = Command::new("fc-match")
-        .args(["-f", "%{file[0]}", "sans-serif:lang=zh"])
+        .args(["-f", "%{file[0]}:%{index}", "Noto Sans Mono CJK SC"])
         .output().ok()?;
-    let path = String::from_utf8(output.stdout).ok()?;
-    let path = path.trim().to_string();
-    if path.is_empty() { return None; }
-    let data = std::fs::read(&path).ok()?;
-    tracing::info!("fontconfig: loaded {}", path);
-    Some(data)
+    let s = String::from_utf8(output.stdout).ok()?;
+    let s = s.trim().to_string();
+    if s.is_empty() || s == ":" { return None; }
+    let parts: Vec<&str> = s.split(':').collect();
+    let path = parts[0];
+    let index: u32 = parts.get(1).and_then(|i| i.parse().ok()).unwrap_or(0);
+    let data = std::fs::read(path).ok()?;
+    tracing::info!("fontconfig: {} (index {})", path, index);
+    Some((data, index))
 }
 
 #[cfg(not(target_os = "linux"))]
-fn find_cjk_font_fc() -> Option<Vec<u8>> {
+fn find_noto_mono_sc() -> Option<(Vec<u8>, u32)> {
     None
 }
 

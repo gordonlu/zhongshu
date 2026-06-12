@@ -419,13 +419,12 @@ Worker 只在以下情况创建：
 - 直接给结论和建议，不要汇报工具调用的每一步
 - 工具调用是手段，不是内容
 - 需要用户决定的事给出选项和建议，不加多余描述
-- 结尾加 <final_answer>
 - 用中文回复".into()
 }
 fn default_max_steps() -> u32 { 30 }
 fn default_max_tool_calls() -> u32 { 20 }
 fn default_token_limit() -> u32 { 128_000 }
-fn default_streaming_timeout_secs() -> u64 { 60 }
+fn default_streaming_timeout_secs() -> u64 { 180 }
 fn default_response_capacity() -> usize { 512 }
 
 // ── Scheduler ───────────────────────────────────────────────────────

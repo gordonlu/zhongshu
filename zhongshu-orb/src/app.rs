@@ -50,6 +50,7 @@ pub struct AgentController {
     #[allow(dead_code)]
     session: SessionState,
     system_prompt: Mutex<String>,
+    history: Arc<Mutex<Vec<(String, String)>>>,
     state: Arc<RwLock<AgentState>>,
     memory: AgentMemory,
     current_task: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
@@ -71,6 +72,7 @@ impl AgentController {
         AgentController {
             event_bus, response_tx, provider, tools, model, session,
             system_prompt: Mutex::new(system_prompt),
+            history: Arc::new(Mutex::new(Vec::new())),
             state: Arc::new(RwLock::new(AgentState::Idle)),
             memory,
             current_task: Arc::new(tokio::sync::Mutex::new(None)),
@@ -85,6 +87,10 @@ impl AgentController {
 
     pub fn set_system_prompt(&self, prompt: String) {
         *self.system_prompt.lock().unwrap() = prompt;
+    }
+
+    pub fn set_chat_history(&self, history: Vec<(String, String)>) {
+        *self.history.lock().unwrap() = history;
     }
 
     /// Cancel the currently running agent task.
@@ -156,6 +162,7 @@ impl AgentController {
         let t = self.tools.clone();
         let m = self.model.clone();
         let sys = self.system_prompt.lock().unwrap().clone();
+        let history_arc = self.history.clone();
         let memory = self.memory.clone();
         let state_arc = self.state.clone();
 
@@ -170,6 +177,16 @@ impl AgentController {
             if !profile_ctx.is_empty() {
                 msgs.push(Message::system(&profile_ctx));
             }
+            {
+                let history = history_arc.lock().unwrap();
+                for (role, content) in history.iter() {
+                    match role.as_str() {
+                        "User" => msgs.push(Message::user(content)),
+                        "Assistant" => msgs.push(Message::assistant(content)),
+                        _ => {}
+                    }
+                }
+            }
             msgs.push(Message::user(input.clone()));
             let runtime = AgentRuntime::new(p, t, m, AgentBudget::default());
 
@@ -177,9 +194,11 @@ impl AgentController {
                 on_text: {
                     let tx = tx.clone();
                     Box::new(move |x: &str| {
-                        let delta = super::overlay::strip_final_answer(x).trim().to_string();
-                        if !delta.is_empty() {
-                            let _ = tx.try_send(ResponseEvent::MessageDelta { id: aid, delta });
+                        if !x.is_empty() {
+                            tracing::info!(len = x.len(), preview = %x.chars().take(40).collect::<String>(), "on_text fired");
+                            let _ = tx.try_send(ResponseEvent::MessageDelta { id: aid, delta: x.to_string() });
+                        } else {
+                            tracing::info!("on_text fired with EMPTY content");
                         }
                     })
                 },
@@ -202,6 +221,11 @@ impl AgentController {
             match r {
                 Ok(Ok(rr)) => {
                     let last = rr.messages.last().map(|x| x.content.as_str()).unwrap_or("");
+                    // Append to conversation history for next turn.
+                    history_arc.lock().unwrap().push(("User".to_string(), input.clone()));
+                    if !last.is_empty() {
+                        history_arc.lock().unwrap().push(("Assistant".to_string(), last.to_string()));
+                    }
                     // Extract todos and goal completions.
                     memory.extract_todos(last);
                     memory.extract_goal_completions(last);

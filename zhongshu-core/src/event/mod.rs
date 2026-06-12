@@ -221,8 +221,11 @@ impl EventLogger {
         let mut count = 0;
         for line in content.lines() {
             if let Ok(event) = serde_json::from_str::<Event>(line) {
-                // Skip stale state changes — they refer to past sessions.
+                // Skip stale state changes and ticks — they refer to past sessions.
                 if matches!(event, Event::Agent(AgentEvent::StateChanged { .. })) {
+                    continue;
+                }
+                if matches!(event, Event::Source(SourceEvent::Tick { .. })) {
                     continue;
                 }
                 eb.publish(event);

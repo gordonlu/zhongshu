@@ -156,16 +156,18 @@ impl LlmProvider for OpenAiProvider {
                 };
 
                 for choice in &delta.choices {
-                    if let Some(ref fr) = choice.finish_reason {
-                        finish_reason = fr.clone();
-                        if fr != "tool_calls" && fr != "length" {
-                            continue;
-                        }
-                    }
-
                     if let Some(ref content) = choice.delta.content {
                         content_buf.push_str(content);
                         on_event(StreamEvent::TextDelta(content.clone()));
+                    }
+
+                    if let Some(ref fr) = choice.finish_reason {
+                        finish_reason = fr.clone();
+                        if fr == "tool_calls" || fr == "stop" || fr == "length" {
+                            // Normal finish or tool call — text delta already emitted above
+                        } else {
+                            continue;
+                        }
                     }
 
                     if let Some(ref tc_deltas) = choice.delta.tool_calls {

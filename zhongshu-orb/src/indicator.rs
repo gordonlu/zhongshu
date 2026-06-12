@@ -258,6 +258,7 @@ pub mod tray {
             vec![
                 StandardItem {
                     label: "打开".into(),
+                    icon_name: "window-new".into(),
                     activate: Box::new(|this: &mut Self| {
                         let _ = this.tx.send(TrayEvent::OpenOverlay);
                     }),
@@ -265,7 +266,7 @@ pub mod tray {
                 }
                 .into(),
                 StandardItem {
-                    label: "新对话".into(),
+                    label: "清空对话".into(),
                     activate: Box::new(|this: &mut Self| {
                         let _ = this.tx.send(TrayEvent::NewConversation);
                     }),
@@ -275,6 +276,7 @@ pub mod tray {
                 MenuItem::Separator,
                 StandardItem {
                     label: "退出".into(),
+                    icon_name: "application-exit".into(),
                     activate: Box::new(|this: &mut Self| {
                         let _ = this.tx.send(TrayEvent::Quit);
                     }),

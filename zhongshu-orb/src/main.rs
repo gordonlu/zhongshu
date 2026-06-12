@@ -1,15 +1,12 @@
 mod app;
-mod render;
 mod indicator;
 mod overlay;
 mod hotkey;
 mod config;
-mod gpu;
 mod agent;
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -24,13 +21,9 @@ use zhongshu_core::event::{
 };
 use indicator::Indicator;
 use app::{SessionState, AgentController, AgentInbox, TaskWorkerDispatcher};
-use overlay::{ToolCallEntry, ToolStatus};
-use overlay::EntryRole;
-use overlay::Overlay;
-use overlay::StreamingState;
+use overlay::{OverlayHandle, AuthRequest};
 use hotkey::HotkeyManager;
 use config::AppConfig;
-use gpu::GpuContext;
 #[cfg(target_os = "linux")]
 use indicator::tray::TrayEvent;
 use zhongshu_core::tool::default_registry;
@@ -42,28 +35,19 @@ use zhongshu_core::digest::DigestBuilder;
 use zhongshu_core::task::{TaskScheduler, ReminderTrigger, FileWatchTrigger};
 use zhongshu_core::authority::{self, AuthorityGate};
 use zhongshu_core::source::{DiskUsageSource, BatterySource, SourceManager, TimerSource};
-use std::time::Duration;
 use tokio::sync::mpsc;
 
 fn preflight_checks() {
-    // Event bus: subscribe first, then publish & receive must work.
     let bus = Arc::new(EventBus::new(4));
     let mut rx = bus.subscribe();
     bus.publish(Event::Agent(AgentEvent::StateChanged {
         from: AgentState::Idle, to: AgentState::Thinking,
     }));
     assert!(rx.try_recv().is_ok(), "preflight: event bus failed");
-
-    // Response channel: send & receive must work.
     let (tx, mut response_rx) = mpsc::channel::<ResponseEvent>(4);
     let id = MessageId::new();
     assert!(tx.try_send(ResponseEvent::MessageStarted { id, role: ResponseRole::System }).is_ok(), "preflight: response tx failed");
     assert!(response_rx.try_recv().is_ok(), "preflight: response rx failed");
-
-    // egui context: must be constructable and renderable.
-    let ctx = egui::Context::default();
-    let _out = ctx.run(Default::default(), |_cx| {});
-
     tracing::info!("preflight checks passed");
 }
 
@@ -75,22 +59,18 @@ struct ZhongshuApp {
     inbox: Arc<AgentInbox>,
     indicator: Option<Indicator>,
     indicator_state: AgentState,
-    overlays: HashMap<WindowId, Overlay>,
+    overlay: Option<OverlayHandle>,
     event_bus: Arc<EventBus>,
     event_rx: EventRx,
     response_tx: ResponseTx,
     response_rx: ResponseRx,
     hotkey: HotkeyManager,
-    gpu: Arc<GpuContext>,
     last_activity: Instant,
-
     is_dragging: bool,
     cursor_pos: (f64, f64),
     drag_start_cursor: (f64, f64),
     drag_start_win: (i32, i32),
     ctrl_held: bool,
-
-    /// Track whether we've already notified for the current pending auth.
     pending_auth_notified: bool,
 }
 
@@ -103,7 +83,6 @@ impl ZhongshuApp {
         event_rx: EventRx,
         response_tx: ResponseTx,
         response_rx: ResponseRx,
-        gpu: Arc<GpuContext>,
         proxy: zhongshu_core::integration::DeeplosslessProxy,
         runtime: tokio::runtime::Runtime,
     ) -> anyhow::Result<Self> {
@@ -114,8 +93,8 @@ impl ZhongshuApp {
             config, controller, inbox, indicator: None, indicator_state: AgentState::Idle,
             proxy: Arc::new(tokio::sync::Mutex::new(proxy)),
             runtime,
-            overlays: HashMap::new(), event_bus, event_rx, response_tx, response_rx,
-            hotkey, gpu, last_activity: Instant::now(),
+            overlay: None, event_bus, event_rx, response_tx, response_rx,
+            hotkey, last_activity: Instant::now(),
             is_dragging: false, cursor_pos: (0.0, 0.0), drag_start_cursor: (0.0, 0.0), drag_start_win: (0, 0), ctrl_held: false,
             pending_auth_notified: false,
         })
@@ -126,7 +105,73 @@ impl ZhongshuApp {
     fn drain(&mut self) {
         let activity = self.reduce_events() | self.reduce_responses();
         self.poll_pending_auth();
-        if activity { self.last_activity = Instant::now(); }
+        self.poll_overlay_actions();
+        if activity { 
+            self.last_activity = Instant::now();
+        }
+    }
+
+    /// Poll pending actions from overlay IPC.
+    fn poll_overlay_actions(&mut self) {
+        let ov = match self.overlay.as_ref() {
+            Some(ov) => ov,
+            None => return,
+        };
+
+        if let Some(text) = ov.take_input() {
+            self.inbox.submit(text);
+        }
+        if ov.take_approve() {
+            authority::approve_pending();
+        }
+        if ov.take_deny() {
+            authority::deny_pending();
+        }
+        if let Some(p) = ov.take_personality() {
+            let mut cfg = config::load();
+            cfg.agent.personality = p.clone();
+            cfg.agent.personality_selected = true;
+            config::save(&cfg);
+            self.controller.set_system_prompt(cfg.agent.effective_system_prompt());
+        }
+        if let Some(settings) = ov.take_settings() {
+            let mut cfg = config::load();
+            if !settings.api_key.is_empty() { cfg.llm.api_key_env = settings.api_key; }
+            if !settings.api_base.is_empty() { cfg.llm.api_base = settings.api_base; }
+            if !settings.model.is_empty() { cfg.llm.model = settings.model; }
+            if let Some(port) = settings.proxy_port { if !port.is_empty() { cfg.deeplossless.proxy_port = port.parse().unwrap_or(8081); } }
+            if let Some(enabled) = settings.bg_enabled { cfg.agent.background.enabled = enabled; }
+            if let Some(interval) = settings.bg_interval { if !interval.is_empty() { cfg.agent.background.interval_secs = interval.parse().unwrap_or(600); } }
+            if let Some(prompt) = settings.bg_prompt { cfg.agent.background.prompt = prompt; }
+            if let Some(evolve) = settings.auto_evolve { cfg.agent.auto_evolve = evolve; }
+            if settings.personality != "默认" && !settings.personality.is_empty() {
+                cfg.agent.personality = settings.personality;
+                cfg.agent.personality_selected = true;
+                self.controller.set_system_prompt(cfg.agent.effective_system_prompt());
+            }
+            config::save(&cfg);
+        }
+        if ov.take_new_conversation() {
+            self.controller.set_chat_history(Vec::new());
+            ov.clear_chat();
+        }
+        if ov.take_stop() {
+            self.controller.cancel();
+        }
+        if ov.take_open_settings() {
+            let cfg = config::load();
+            ov.show_settings(&overlay::SettingsConfig {
+                api_key: cfg.llm.api_key(),
+                api_base: cfg.llm.api_base.clone(),
+                model: cfg.llm.model.clone(),
+                personality: cfg.agent.personality.clone(),
+                proxy_port: Some(cfg.deeplossless.proxy_port.to_string()),
+                bg_enabled: Some(cfg.agent.background.enabled),
+                bg_interval: Some(cfg.agent.background.interval_secs.to_string()),
+                bg_prompt: Some(cfg.agent.background.prompt.clone()),
+                auto_evolve: Some(cfg.agent.auto_evolve),
+            });
+        }
     }
 
     /// Poll for pending authority requests and show in overlay.
@@ -137,15 +182,13 @@ impl ZhongshuApp {
                 let title = if req.source.is_empty() { "需要授权".into() } else { format!("需要授权 · {}", req.source) };
                 let _ = zhongshu_core::desktop::notification::show_urgent(&title, &format!("{} - {}", req.tool, req.command));
             }
-            let request = overlay::ApprovalRequest {
-                tool: req.tool,
-                source: req.source,
-                program: req.program,
-                command: req.command,
+            let request = AuthRequest {
+                tool: req.tool.clone(),
+                source: req.source.clone(),
+                command: req.command.clone(),
             };
-            for ov in self.overlays.values_mut() {
-                ov.approval_request = Some(request.clone());
-                ov.window.request_redraw();
+            if let Some(ref ov) = self.overlay {
+                ov.show_auth(&request);
             }
         } else {
             self.pending_auth_notified = false;
@@ -160,11 +203,6 @@ impl ZhongshuApp {
                     active = true;
                     match ev {
                         Event::Agent(AgentEvent::StateChanged { from: _, to }) => {
-                            if matches!(to, AgentState::Done { .. }) || matches!(to, AgentState::Idle) {
-                                for ov in self.overlays.values_mut() {
-                                    ov.flush_streaming(self.config.ui.max_chat_entries);
-                                }
-                            }
                             if self.config.agent.desktop_notification {
                                 if let AgentState::Done { success } = to {
                                     if success {
@@ -180,29 +218,13 @@ impl ZhongshuApp {
                         Event::Tool(ToolEvent::Started { name }) => {
                             self.indicator_state = AgentState::Executing;
                             if let Some(ind) = self.indicator.as_mut() { ind.set_state(AgentState::Executing); }
-                            for ov in self.overlays.values_mut() {
-                                if let Some(ref mut s) = ov.streaming {
-                                    s.tool_calls.push(ToolCallEntry::new(name.clone()));
-                                } else {
-                                    ov.streaming = Some(StreamingState::new(EntryRole::Assistant));
-                                    ov.streaming.as_mut().unwrap().tool_calls.push(ToolCallEntry::new(name.clone()));
-                                }
-                                ov.window.request_redraw();
+                            if let Some(ref ov) = self.overlay {
+                                ov.toast(&format!("工具调用: {name}"));
                             }
                         }
                         Event::Tool(ToolEvent::Completed { name, success }) => {
-                            for ov in self.overlays.values_mut() {
-                                if let Some(ref mut s) = ov.streaming {
-                                    if let Some(last) = s.tool_calls.iter_mut().rev().find(|t| matches!(t.status, ToolStatus::Running)) {
-                                        let elapsed = last.started_at.elapsed().as_millis() as u64;
-                                        last.status = ToolStatus::Done { success, duration_ms: elapsed };
-                                    } else {
-                                        let mut tc = ToolCallEntry::new(name.clone());
-                                        tc.status = ToolStatus::Done { success, duration_ms: 0 };
-                                        s.tool_calls.push(tc);
-                                    }
-                                }
-                                ov.window.request_redraw();
+                            if let Some(ref ov) = self.overlay {
+                                ov.toast(&format!("工具完成: {name} {}", if success {"✓"} else {"✗"}));
                             }
                         }
                         Event::Task(TaskEvent::Triggered { name }) => {
@@ -230,37 +252,38 @@ impl ZhongshuApp {
 
     fn reduce_responses(&mut self) -> bool {
         let mut active = false;
+        let mut assistant_id: Option<MessageId> = None;
+        let mut filter = zhongshu_message_core::streaming::ControlTokenFilter::new();
         while let Ok(ev) = self.response_rx.try_recv() {
             active = true;
             match ev {
-                ResponseEvent::MessageStarted { role, .. } => {
-                    let erole = match role {
-                        ResponseRole::User => EntryRole::User,
-                        ResponseRole::Assistant => EntryRole::Assistant,
-                        ResponseRole::System => EntryRole::System,
-                    };
-                    for ov in self.overlays.values_mut() {
-                        ov.flush_streaming(self.config.ui.max_chat_entries);
-                        ov.streaming = Some(StreamingState::new(erole));
-                        ov.window.request_redraw();
-                    }
-                }
-                ResponseEvent::MessageDelta { delta, .. } => {
-                    for ov in self.overlays.values_mut() {
-                        if let Some(ref mut s) = ov.streaming {
-                            s.content.push_str(&delta);
-                        } else {
-                            let mut s = StreamingState::new(EntryRole::Assistant);
-                            s.content.push_str(&delta);
-                            ov.streaming = Some(s);
+                ResponseEvent::MessageStarted { id, role } => {
+                    if matches!(role, ResponseRole::Assistant) {
+                        assistant_id = Some(id);
+                        if let Some(ref ov) = self.overlay {
+                            ov.set_state("thinking");
                         }
-                        ov.window.request_redraw();
+                    } else {
+                        assistant_id = None;
                     }
                 }
-                ResponseEvent::MessageCompleted { .. } => {
-                    for ov in self.overlays.values_mut() {
-                        ov.flush_streaming(self.config.ui.max_chat_entries);
-                        ov.window.request_redraw();
+                ResponseEvent::MessageDelta { id, delta } => {
+                    if assistant_id.map(|aid| aid == id).unwrap_or(false) {
+                        let cleaned = filter.feed(&delta);
+                        if !cleaned.is_empty() {
+                            if let Some(ref ov) = self.overlay {
+                                ov.push_delta(&cleaned);
+                            }
+                        }
+                    }
+                }
+                ResponseEvent::MessageCompleted { id } => {
+                    if assistant_id.map(|aid| aid == id).unwrap_or(false) {
+                        if let Some(ref ov) = self.overlay {
+                            ov.complete_message();
+                        }
+                        filter.flush();
+                        assistant_id = None;
                     }
                 }
             }
@@ -270,54 +293,39 @@ impl ZhongshuApp {
 
     // ── Overlay management ──────────────────────────────────────────
 
-    fn load_saved_overlay_pos() -> Option<(i32, i32)> {
-        let path = crate::config::config_dir().join("overlay_pos.json");
-        std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok())
-    }
-
-    fn save_overlay_pos(&self, id: WindowId) {
-        if let Some(ov) = self.overlays.get(&id) {
-            if let Ok(pos) = ov.window.outer_position() {
-                let path = crate::config::config_dir().join("overlay_pos.json");
-                let _ = std::fs::write(path, serde_json::to_string_pretty(&(pos.x, pos.y)).unwrap());
-            }
+    fn try_open_overlay(&mut self, _el: &ActiveEventLoop) {
+        if let Some(ref ov) = self.overlay {
+            ov.show_window(self.config.ui.overlay_width, self.config.ui.overlay_height);
+            return;
         }
-    }
-
-    fn save_orb_pos(&self) {
-        if let Some(ind) = self.indicator.as_ref() {
-            ind.save_position();
-        }
-    }
-
-    fn try_open_overlay(&mut self, el: &ActiveEventLoop) {
-        if self.overlays.is_empty() {
-            let mut ov = Overlay::new(
-                el, self.gpu.clone(),
-                self.config.ui.overlay_width, self.config.ui.overlay_height,
-                &self.config.ui.font_search_paths,
-            );
-            // Load previous conversation from lcm.db
-            let proxy = self.proxy.clone();
-            let history = self.runtime.block_on(async { proxy.lock().await.load_chat_history().await });
-            ov.entries = history.into_iter().map(|(role, content)| overlay::ChatEntry {
+        let ov = overlay::show(
+            self.config.ui.overlay_width, self.config.ui.overlay_height,
+        );
+        // Load previous conversation from lcm.db and send to JS
+        let proxy = self.proxy.clone();
+        let history = self.runtime.block_on(async { proxy.lock().await.load_chat_history().await });
+        let cleaned_history: Vec<(String, String)> = history.into_iter()
+            .map(|(role, content)| (role, zhongshu_message_core::strip_control_tokens(&content)))
+            .collect();
+        let entries: Vec<overlay::ChatEntry> = cleaned_history.iter().map(|(role, content)| {
+            overlay::ChatEntry {
                 role: if role == "User" { overlay::EntryRole::User } else { overlay::EntryRole::Assistant },
-                content,
+                content: content.clone(),
                 tool_calls: Vec::new(),
-                cached_job: None,
-            }).collect();
-            if let Some((x, y)) = Self::load_saved_overlay_pos() {
-                let _ = ov.window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
             }
-            let id = ov.window.id();
-            self.overlays.insert(id, ov);
+        }).collect();
+        self.controller.set_chat_history(cleaned_history);
+        if !entries.is_empty() {
+            ov.set_history(&entries);
         }
+        self.overlay = Some(ov);
     }
 
-    fn new_conversation(&mut self, el: &ActiveEventLoop) {
-        let ids: Vec<WindowId> = self.overlays.keys().copied().collect();
-        for id in ids { self.overlays.remove(&id); }
-        self.try_open_overlay(el);
+    fn new_conversation(&mut self, _el: &ActiveEventLoop) {
+        self.controller.set_chat_history(Vec::new());
+        if let Some(ref ov) = self.overlay {
+            ov.clear_chat();
+        }
     }
 }
 
@@ -327,49 +335,18 @@ impl ApplicationHandler for ZhongshuApp {
     }
     fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         self.drain();
-        let is_ol = self.overlays.contains_key(&id);
-        if is_ol {
-            if let Some(ov) = self.overlays.get_mut(&id) {
-                let _ = ov.state.on_window_event(&ov.window, &event);
-                ov.window.request_redraw();
-            }
-        }
         let orb_id = self.indicator.as_ref().and_then(|i| i.window_id());
         #[allow(unused)]
         let on_orb = orb_id == Some(id);
         match event {
             WindowEvent::CloseRequested => {
                 if orb_id == Some(id) { el.exit(); } else {
-                    self.save_overlay_pos(id);
-                    self.overlays.remove(&id);
+                    // GTK overlay handles its own close
                 }
             }
             WindowEvent::RedrawRequested => {
                 if orb_id == Some(id) {
                     self.indicator.as_mut().unwrap().render();
-                } else if let Some(ov) = self.overlays.get_mut(&id) {
-                    let _ = ov.state.on_window_event(&ov.window, &event);
-                    if let Some(input) = ov.render() {
-                        self.inbox.submit(input);
-                    }
-                    if let Some(ref p) = ov.pending_personality.take() {
-                        let mut cfg = config::load();
-                        cfg.agent.personality = p.clone();
-                        cfg.agent.personality_selected = true;
-                        config::save(&cfg);
-                        self.controller.set_system_prompt(cfg.agent.effective_system_prompt());
-                    }
-                    if ov.request_quit { el.exit(); }
-                    if ov.request_stop {
-                        ov.request_stop = false;
-                        self.controller.cancel();
-                    }
-                    if ov.request_new_conversation {
-                        ov.entries.clear();
-                        ov.streaming = None;
-                        ov.input.clear();
-                        ov.request_new_conversation = false;
-                    }
                 }
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } => {
@@ -391,13 +368,10 @@ impl ApplicationHandler for ZhongshuApp {
                 }
             }
             WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
-                if on_orb { self.is_dragging = false; self.save_orb_pos(); }
+                if on_orb { self.is_dragging = false; if let Some(ind) = self.indicator.as_ref() { ind.save_position(); } }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 if on_orb && self.is_dragging {
-                    // Relative delta from last cursor position avoids the
-                    // accumulation of rounding errors from per-frame i32
-                    // truncation that caused jitter / ghosting.
                     let dx = position.x - self.cursor_pos.0;
                     let dy = position.y - self.cursor_pos.1;
                     if let Some(w) = self.indicator.as_ref().unwrap().window() {
@@ -417,12 +391,8 @@ impl ApplicationHandler for ZhongshuApp {
             WindowEvent::KeyboardInput { event, is_synthetic: false, .. } if self.ctrl_held && event.state == ElementState::Pressed && event.logical_key == "q" => {
                 el.exit();
             }
-            // Ensure IME is enabled when overlay regains focus.
-            WindowEvent::Focused(true) if self.overlays.contains_key(&id) => {
-                if let Some(ov) = self.overlays.get_mut(&id) {
-                    ov.window.set_ime_allowed(true);
-                    ov.window.request_redraw();
-                }
+            WindowEvent::Focused(true) => {
+                // GTK overlay handles its own focus/IME
             }
             _ => {}
         }
@@ -455,25 +425,18 @@ impl ApplicationHandler for ZhongshuApp {
             self.try_open_overlay(el);
         }
 
-        // Streaming timeout
+        // Streaming timeout — warn only, don't kill the message
         let elapsed = self.last_activity.elapsed().as_secs();
         let timeout = self.config.agent.streaming_timeout_secs;
         if !matches!(self.indicator_state, AgentState::Idle) && elapsed > timeout {
-            tracing::warn!("streaming timeout after {elapsed}s (limit {timeout}s)");
-            self.event_bus.publish(Event::Agent(AgentEvent::StateChanged {
-                from: self.indicator_state, to: AgentState::Done { success: false },
-            }));
-            let mid = MessageId::new();
-            let _ = self.response_tx.try_send(ResponseEvent::MessageStarted { id: mid, role: ResponseRole::System });
-            let _ = self.response_tx.try_send(ResponseEvent::MessageDelta { id: mid, delta: format!("[连接超时: {elapsed}s 无响应]") });
-            let _ = self.response_tx.try_send(ResponseEvent::MessageCompleted { id: mid });
-            self.last_activity = Instant::now(); self.drain();
+            tracing::warn!("streaming timeout after {elapsed}s (limit {timeout}s), agent still running");
+            self.last_activity = Instant::now();
         }
 
         let idle = matches!(self.indicator_state, AgentState::Idle);
         let tray_active = cfg!(target_os = "linux");
         el.set_control_flow(
-            if !self.overlays.is_empty() || !idle {
+            if self.overlay.is_some() || !idle {
                 ControlFlow::Poll
             } else if tray_active {
                 ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(200))
@@ -746,8 +709,7 @@ fn main() {
     EventLogger::replay(&event_log_path, &eb);
     let _event_logger = EventLogger::new(event_log_path).unwrap().spawn(&eb);
 
-    let gpu = match GpuContext::new() { Ok(g) => Arc::new(g), Err(e) => { tracing::error!("GPU: {e:#}"); return; } };
-    let mut app = match ZhongshuApp::new(cfg, controller, inbox.clone(), eb, event_rx, response_tx, response_rx, gpu, proxy, r) {
+    let mut app = match ZhongshuApp::new(cfg, controller, inbox.clone(), eb, event_rx, response_tx, response_rx, proxy, r) {
         Ok(app) => app, Err(e) => { tracing::error!("init: {e:#}"); return; }
     };
 

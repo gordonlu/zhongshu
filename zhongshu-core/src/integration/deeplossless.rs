@@ -139,30 +139,48 @@ impl DeeplosslessProxy {
         nodes.sort_by_key(|n| n.id);
 
         // DAG level 0 nodes store raw content text (with JSON quotes around).
-        // Alternate: odd → User, even → Assistant. Skip tool/system noise.
+        // Alternate: odd → User, even → Assistant.
         let mut turns = Vec::new();
         let mut user_turn = true;
         for node in &nodes {
             if node.level > 0 {
                 continue;
             }
-            let mut summary = node.summary.trim().to_string();
+            let summary = node.summary.trim().to_string();
             if summary.is_empty() || summary.len() < 3 {
                 continue;
             }
             // DAG summary is a JSON-encoded string (with surrounding quotes
             // and JSON escaping). Parse it properly.
             let raw = summary.clone();
-            if let Ok(decoded) = serde_json::from_str::<String>(&summary) {
-                summary = decoded;
-            }
-            tracing::debug!(node_id = node.id, raw = %raw, decoded = %summary, "dag node content");
-            // Skip tool call results (XML-like, JSON, or empty)
-            if summary.is_empty() || summary.starts_with('<') || summary.starts_with('{') || summary.starts_with('[') {
+            let content = if let Ok(decoded) = serde_json::from_str::<String>(&summary) {
+                decoded
+            } else {
+                summary.clone()
+            };
+            tracing::debug!(node_id = node.id, raw = %raw, decoded = %content, "dag node content");
+
+            // Skip tool output and system artifacts (JSON, XML).
+            // These are internal DAG nodes, not user/assistant turns.
+            let trimmed = content.trim_start();
+            if trimmed.is_empty()
+                || trimmed.starts_with('{')
+                || trimmed.starts_with('[')
+                || trimmed.starts_with("<observation")
+                || trimmed.starts_with("<tool")
+            {
                 continue;
             }
+
+            // Deduplicate: skip if identical to the last entry
+            if let Some((_, last)) = turns.last() {
+                if *last == content {
+                    continue;
+                }
+            }
+
             let role = if user_turn { "User" } else { "Assistant" };
-            turns.push((role.into(), summary));
+            turns.push((role.into(), content));
             user_turn = !user_turn;
         }
 

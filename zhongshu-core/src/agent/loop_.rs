@@ -28,7 +28,6 @@ impl Default for AgentBudget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
     Finished,
-    FinalAnswer,
     BudgetExhausted { tokens: usize, limit: usize },
     MaxStepsReached,
     MaxToolCallsReached,
@@ -85,16 +84,6 @@ pub async fn run_agent(
         } else {
             sync_step(runtime, &messages).await?
         };
-
-        if is_final_answer(&content) && tool_calls.is_empty() {
-            info!("<final_answer>");
-            messages.push(Message::assistant(strip_final_answer(&content)));
-            let tokens = estimate_total_tokens(&messages);
-            return Ok(LoopResult {
-                messages: std::mem::take(&mut messages),
-                stop_reason: StopReason::FinalAnswer, tool_calls_made, estimated_tokens: tokens,
-            });
-        }
 
         if tool_calls.is_empty() {
             messages.push(Message::assistant(content));
@@ -248,15 +237,6 @@ fn build_request(runtime: &AgentRuntime, messages: &[Message]) -> crate::agent::
         temperature: None,
         max_tokens: None,
     }
-}
-
-fn is_final_answer(content: &str) -> bool {
-    content.contains("<final_answer>") || content.contains("<final-answer>")
-}
-
-fn strip_final_answer(content: &str) -> String {
-    content.replace("<final_answer>", "").replace("</final_answer>", "")
-        .replace("<final-answer>", "").replace("</final-answer>", "").trim().to_string()
 }
 
 fn estimate_total_tokens(messages: &[Message]) -> usize {

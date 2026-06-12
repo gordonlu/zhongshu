@@ -113,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
         match result {
             Ok(r) => {
                 println!();
-                if r.stop_reason != StopReason::Finished && r.stop_reason != StopReason::FinalAnswer {
+                if r.stop_reason != StopReason::Finished {
                     println!("[停止: {:?}]", r.stop_reason);
                 }
                 println!("── {} 次工具 · {} tokens ──", r.tool_calls_made, r.estimated_tokens);

@@ -1,7 +1,5 @@
 use std::sync::{Arc, Mutex};
 
-use tracing::info;
-
 use crate::agent::attention::AttentionLevel;
 use crate::agent::report::Report;
 use crate::event::{AttentionEvent, Event, EventBus};
@@ -54,7 +52,7 @@ impl AttentionManager {
 
     /// 处理单个 Report，根据 AttentionLevel 路由。
     pub fn process(&mut self, report: Report) {
-        info!(worker = %report.worker, level = ?report.attention, "attention manager processing report");
+        tracing::trace!(worker = %report.worker, level = ?report.attention, "attention manager processing report");
         match report.attention {
             AttentionLevel::Immediate => {
                 self.eb.publish(Event::Attention(AttentionEvent::Interrupt { report }));
@@ -93,7 +91,7 @@ impl AttentionManager {
             loop {
                 match rx.recv().await {
                     Ok(Event::Agent(crate::event::AgentEvent::WorkerReport(report))) => {
-                        info!(worker = %report.worker, level = ?report.attention, "attention manager processing report");
+                        tracing::trace!(worker = %report.worker, level = ?report.attention, "attention manager processing report");
                         match report.attention {
                             AttentionLevel::Immediate => {
                                 eb.publish(Event::Attention(AttentionEvent::Interrupt { report }));

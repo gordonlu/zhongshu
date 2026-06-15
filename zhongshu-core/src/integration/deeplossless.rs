@@ -32,6 +32,7 @@ pub struct DeeplosslessProxy {
     coordinator: Arc<Mutex<Option<RuntimeCoordinator>>>,
     actual_port: u16,
     base_url: String,
+    db_path: String,
 }
 
 impl DeeplosslessProxy {
@@ -68,6 +69,7 @@ impl DeeplosslessProxy {
             coordinator: Arc::new(Mutex::new(Some(coordinator))),
             actual_port: 0,
             base_url: String::new(),
+            db_path: config.db_path.clone(),
         })
     }
 
@@ -110,81 +112,61 @@ impl DeeplosslessProxy {
         }
     }
 
-    /// Load recent chat history from lcm.db.
+    /// Load recent chat history with correct roles from the messages table.
+    /// Opens a direct read-only SQLite connection to lcm.db.
     /// Returns a list of (role, content) pairs from the most recent conversation.
     pub async fn load_chat_history(&self) -> Vec<(String, String)> {
-        let guard = self.coordinator.lock().await;
-        let coordinator = match guard.as_ref() {
-            Some(c) => c,
-            None => return Vec::new(),
-        };
-        let db = &coordinator.state.storage.db;
-
-        // Get the most recent conversation
-        let conv_id = match db.last_conversation_id() {
-            Ok(Some(id)) => id,
-            _ => return Vec::new(),
-        };
-
-        // Get all leaf nodes (most recent turns in order)
-        let mut nodes = match db.get_all_dag_nodes(conv_id) {
-            Ok(n) => n,
+        let expanded = self.db_path.replacen("~", &std::env::var("HOME").unwrap_or_else(|_| ".".into()), 1);
+        let conn = match rusqlite::Connection::open(&expanded) {
+            Ok(c) => c,
             Err(e) => {
-                tracing::warn!("failed to load dag nodes: {e}");
+                tracing::warn!("failed to open lcm.db for history: {e}");
                 return Vec::new();
             }
         };
 
-        // Sort by node ID to get chronological order
-        nodes.sort_by_key(|n| n.id);
+        let conv_id: Option<i64> = conn.query_row(
+            "SELECT id FROM conversations ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        ).ok();
+        let conv_id = match conv_id {
+            Some(id) => id,
+            None => return Vec::new(),
+        };
 
-        // DAG level 0 nodes store raw content text (with JSON quotes around).
-        // Alternate User/Assistant on kept nodes (the first level-0 node
-        // that passes content checks is always the first user message).
+        let mut stmt = match conn.prepare(
+            "SELECT role, content FROM messages WHERE conversation_id = ?1 ORDER BY id ASC"
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("failed to prepare messages query: {e}");
+                return Vec::new();
+            }
+        };
+
+        let rows = match stmt.query_map(rusqlite::params![conv_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("failed to query messages: {e}");
+                return Vec::new();
+            }
+        };
+
         let mut turns = Vec::new();
-        let mut user_turn = true;
-        for node in &nodes {
-            if node.level > 0 {
-                continue;
-            }
-            let summary = node.summary.trim().to_string();
-            if summary.is_empty() || summary.len() < 3 {
-                continue;
-            }
-            // DAG summary is a JSON-encoded string (with surrounding quotes
-            // and JSON escaping). Parse it properly.
-            let raw = summary.clone();
-            let content = if let Ok(decoded) = serde_json::from_str::<String>(&summary) {
-                decoded
-            } else {
-                summary.clone()
-            };
-            tracing::debug!(node_id = node.id, raw = %raw, decoded = %content, "dag node content");
-
-            // Skip tool output and system artifacts (JSON, XML).
-            // These are internal DAG nodes, not user/assistant turns.
-            let trimmed = content.trim_start();
-            if trimmed.is_empty()
-                || trimmed.starts_with('{')
-                || trimmed.starts_with('[')
-                || trimmed.starts_with("<observation")
-                || trimmed.starts_with("<tool")
-            {
-                continue;
-            }
-
-            // Deduplicate: skip if identical to the last entry
-            if let Some((_, last)) = turns.last() {
-                if *last == content {
-                    continue;
+        for row in rows {
+            match row {
+                Ok((role, content)) => {
+                    // Only include user and assistant roles
+                    if role == "user" || role == "assistant" {
+                        turns.push((role, content));
+                    }
                 }
+                Err(e) => tracing::warn!("error reading message row: {e}"),
             }
-
-            let role = if user_turn { "User" } else { "Assistant" };
-            turns.push((role.into(), content));
-            user_turn = !user_turn;
         }
-
         turns
     }
 

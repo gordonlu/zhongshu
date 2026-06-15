@@ -176,7 +176,7 @@ impl ZhongshuApp {
             });
         }
         if ov.take_load_more() {
-            const BATCH_SIZE: usize = 40; // 20 pairs
+            const BATCH_SIZE: usize = 40;
             let cache_len = self.history_cache.len();
             if cache_len > 0 {
                 let take = BATCH_SIZE.min(cache_len);
@@ -185,12 +185,14 @@ impl ZhongshuApp {
                 let has_more = self.history_cache.len() > 0;
                 let entries: Vec<overlay::ChatEntry> = batch.iter().map(|(role, content)| {
                     overlay::ChatEntry {
-                        role: if role == "User" { overlay::EntryRole::User } else { overlay::EntryRole::Assistant },
+                        role: if role == "user" { overlay::EntryRole::User } else { overlay::EntryRole::Assistant },
                         content: content.clone(),
                         tool_calls: Vec::new(),
                     }
                 }).collect();
-                ov.prepend_history(&entries, has_more);
+                if !entries.is_empty() {
+                    ov.prepend_history(&entries, has_more);
+                }
             }
         }
     }
@@ -358,7 +360,7 @@ impl ZhongshuApp {
 
         let entries: Vec<overlay::ChatEntry> = initial.iter().map(|(role, content)| {
             overlay::ChatEntry {
-                role: if role == "User" { overlay::EntryRole::User } else { overlay::EntryRole::Assistant },
+                role: if role == "user" { overlay::EntryRole::User } else { overlay::EntryRole::Assistant },
                 content: content.clone(),
                 tool_calls: Vec::new(),
             }

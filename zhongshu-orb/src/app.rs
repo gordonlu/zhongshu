@@ -181,8 +181,8 @@ impl AgentController {
                 let history = history_arc.lock().unwrap();
                 for (role, content) in history.iter() {
                     match role.as_str() {
-                        "User" => msgs.push(Message::user(content)),
-                        "Assistant" => msgs.push(Message::assistant(content)),
+                        "user" => msgs.push(Message::user(content)),
+                        "assistant" => msgs.push(Message::assistant(content)),
                         _ => {}
                     }
                 }
@@ -222,9 +222,9 @@ impl AgentController {
                 Ok(Ok(rr)) => {
                     let last = rr.messages.last().map(|x| x.content.as_str()).unwrap_or("");
                     // Append to conversation history for next turn.
-                    history_arc.lock().unwrap().push(("User".to_string(), input.clone()));
+                    history_arc.lock().unwrap().push(("user".to_string(), input.clone()));
                     if !last.is_empty() {
-                        history_arc.lock().unwrap().push(("Assistant".to_string(), last.to_string()));
+                        history_arc.lock().unwrap().push(("assistant".to_string(), last.to_string()));
                     }
                     // Extract todos and goal completions.
                     memory.extract_todos(last);

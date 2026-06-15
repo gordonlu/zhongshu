@@ -6826,6 +6826,7 @@ dependencies = [
  "notify-rust",
  "open",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

@@ -1,7 +1,9 @@
 pub mod automation;
 pub mod browser;
 pub mod fs;
+pub mod memory;
 pub mod screenshot;
+pub mod search_files;
 pub mod search;
 pub mod shell;
 pub mod system_info;

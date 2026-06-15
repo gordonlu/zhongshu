@@ -2,13 +2,23 @@ use crate::authority::{self, CheckResult};
 use crate::tool::{Tool, ToolOutput};
 use async_trait::async_trait;
 use serde_json::json;
+use std::path::PathBuf;
 
 pub struct ScreenshotTool;
+
+fn screenshots_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".config/zhongshu/screenshots")
+}
+
+fn ensure_dir(path: &PathBuf) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)
+}
 
 #[async_trait]
 impl Tool for ScreenshotTool {
     fn name(&self) -> &str { "screenshot" }
-    fn description(&self) -> &str { "Capture a screenshot of the primary monitor as base64 PNG." }
+    fn description(&self) -> &str { "Capture a screenshot of the primary monitor, save as PNG, and return the file path." }
 
     fn parameters(&self) -> serde_json::Value {
         json!({ "type": "object", "properties": {} })
@@ -43,30 +53,29 @@ impl Tool for ScreenshotTool {
         if let Err(e) = image.write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png) {
             return ToolOutput::error(format!("PNG 编码失败: {e}"));
         }
+        let file_size = png_bytes.len();
 
-        let b64 = base64(&png_bytes);
+        let dir = screenshots_dir();
+        if let Err(e) = ensure_dir(&dir) {
+            return ToolOutput::error(format!("创建截图目录失败: {e}"));
+        }
+
+        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        let filename = format!("screenshot_{timestamp}.png");
+        let path = dir.join(&filename);
+
+        if let Err(e) = std::fs::write(&path, &png_bytes) {
+            return ToolOutput::error(format!("保存截图失败: {e}"));
+        }
+
+        let path_str = path.to_string_lossy().into_owned();
 
         ToolOutput::success(json!({
+            "path": path_str,
             "format": "png",
             "width": image.width(),
             "height": image.height(),
-            "data": b64,
+            "file_size_bytes": file_size,
         }))
     }
-}
-
-fn base64(data: &[u8]) -> String {
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        out.push(CHARS[((triple >> 18) & 0x3f) as usize] as char);
-        out.push(CHARS[((triple >> 12) & 0x3f) as usize] as char);
-        out.push(if chunk.len() > 1 { CHARS[((triple >> 6) & 0x3f) as usize] } else { b'=' } as char);
-        out.push(if chunk.len() > 2 { CHARS[(triple & 0x3f) as usize] } else { b'=' } as char);
-    }
-    out
 }

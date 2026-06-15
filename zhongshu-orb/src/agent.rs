@@ -69,7 +69,7 @@ impl AgentProfile {
     pub fn to_prompt_context(&self) -> String {
         let active_goals: Vec<_> = self.goals.iter().filter(|g| g.status == GoalStatus::Active).collect();
         let pending_todos: Vec<_> = self.todos.iter().filter(|t| !t.done).collect();
-        if active_goals.is_empty() && pending_todos.is_empty() {
+        if active_goals.is_empty() && pending_todos.is_empty() && self.long_term_memory.is_empty() {
             return String::new();
         }
         let mut ctx = String::from("## 当前状态\n");
@@ -83,6 +83,13 @@ impl AgentProfile {
             ctx.push_str("待办:\n");
             for t in &pending_todos {
                 ctx.push_str(&format!("- [ ] {}\n", t.text));
+            }
+        }
+        if !self.long_term_memory.is_empty() {
+            let total_chars: usize = self.long_term_memory.iter().map(|m| m.text.chars().count()).sum();
+            ctx.push_str(&format!("长期记忆（{} 字符 / 上限 2000）:\n", total_chars));
+            for m in &self.long_term_memory {
+                ctx.push_str(&format!("- {}\n", m.text));
             }
         }
         ctx

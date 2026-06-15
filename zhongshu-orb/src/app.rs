@@ -195,10 +195,10 @@ impl AgentController {
                     let tx = tx.clone();
                     Box::new(move |x: &str| {
                         if !x.is_empty() {
-                            tracing::info!(len = x.len(), preview = %x.chars().take(40).collect::<String>(), "on_text fired");
+                            tracing::debug!(len = x.len(), "on_text");
                             let _ = tx.try_send(ResponseEvent::MessageDelta { id: aid, delta: x.to_string() });
                         } else {
-                            tracing::info!("on_text fired with EMPTY content");
+                            tracing::debug!("on_text empty");
                         }
                     })
                 },

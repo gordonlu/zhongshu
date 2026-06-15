@@ -1041,9 +1041,9 @@ dependencies = [
 
 [[package]]
 name = "deeplossless"
-version = "0.6.7"
+version = "0.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09d346931937f8fe085f6056816f10947eeae5ce856bd99e7b76a1b81d6bce7b"
+checksum = "88351707fac5e9aba4aa50615b3ec68bee83a21ef49e3a2ac62fc3067de26f8c"
 dependencies = [
  "anyhow",
  "axum",
@@ -1060,6 +1060,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2",
  "shellexpand",
  "thiserror 2.0.18",
@@ -4032,6 +4033,7 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "http",
@@ -4341,6 +4343,19 @@ dependencies = [
  "itoa",
  "ryu",
  "serde",
+]
+
+[[package]]
+name = "serde_yaml"
+version = "0.9.34+deprecated"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
 ]
 
 [[package]]
@@ -5257,6 +5272,12 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
+
+[[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"
@@ -6800,7 +6821,7 @@ dependencies = [
 
 [[package]]
 name = "zhongshu-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "tokio",
@@ -6811,7 +6832,7 @@ dependencies = [
 
 [[package]]
 name = "zhongshu-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6842,7 +6863,7 @@ dependencies = [
 
 [[package]]
 name = "zhongshu-message-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pulldown-cmark",
  "serde",
@@ -6852,7 +6873,7 @@ dependencies = [
 
 [[package]]
 name = "zhongshu-orb"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "crossbeam-channel",

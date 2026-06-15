@@ -44,6 +44,8 @@ pub enum Event {
     Tool(ToolEvent),
     Task(TaskEvent),
     Memory(MemoryEvent),
+    Goal(GoalEvent),
+    Suggestion(SuggestionEvent),
     Authority(AuthorityEvent),
     Attention(AttentionEvent),
     Source(SourceEvent),
@@ -58,8 +60,19 @@ impl Event {
                 AgentEvent::WorkerReport(..) => "worker_report",
             },
             Event::Tool(..) => "tool",
-            Event::Task(..) => "task",
+            Event::Task(e) => match e {
+                TaskEvent::Triggered { .. } => "task_triggered",
+                TaskEvent::Completed { .. } => "task_completed",
+            },
             Event::Memory(..) => "memory",
+            Event::Goal(e) => match e {
+                GoalEvent::Created { .. } => "goal_created",
+                GoalEvent::Completed { .. } => "goal_completed",
+            },
+            Event::Suggestion(e) => match e {
+                SuggestionEvent::Accepted { .. } => "suggestion_accepted",
+                SuggestionEvent::Rejected { .. } => "suggestion_rejected",
+            },
             Event::Authority(..) => "authority",
             Event::Attention(e) => match e {
                 AttentionEvent::Interrupt { .. } => "attention_interrupt",
@@ -78,6 +91,18 @@ impl Event {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum MemoryEvent {
     Compacted,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum GoalEvent {
+    Created { goal_id: String, title: String },
+    Completed { goal_id: String },
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum SuggestionEvent {
+    Accepted { suggestion_id: String, content: String },
+    Rejected { suggestion_id: String },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -132,8 +157,8 @@ pub enum ToolEvent {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum TaskEvent {
-    Triggered { name: String },
-    Completed { name: String },
+    Triggered { task_id: String, title: String },
+    Completed { task_id: String, title: String, output: String },
 }
 
 // ── EventBus ────────────────────────────────────────────────────────
@@ -221,11 +246,14 @@ impl EventLogger {
         let mut count = 0;
         for line in content.lines() {
             if let Ok(event) = serde_json::from_str::<Event>(line) {
-                // Skip stale state changes and ticks — they refer to past sessions.
+                // Skip stale state-affecting events from past sessions.
                 if matches!(event, Event::Agent(AgentEvent::StateChanged { .. })) {
                     continue;
                 }
                 if matches!(event, Event::Source(SourceEvent::Tick { .. })) {
+                    continue;
+                }
+                if matches!(event, Event::Tool(_)) {
                     continue;
                 }
                 eb.publish(event);

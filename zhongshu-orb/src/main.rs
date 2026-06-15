@@ -19,6 +19,7 @@ use zhongshu_core::event::{
     ResponseEvent, ResponseRole, MessageId,
     EventBus, EventLogger, EventRx, ResponseTx, ResponseRx,
 };
+use zhongshu_message_core::streaming::ControlTokenFilter;
 use indicator::Indicator;
 use app::{SessionState, AgentController, AgentInbox, TaskWorkerDispatcher};
 use overlay::{OverlayHandle, AuthRequest};
@@ -75,6 +76,9 @@ struct ZhongshuApp {
     ctrl_held: bool,
     pending_auth_notified: bool,
     history_cache: Vec<(String, String)>,
+    assistant_id: Option<MessageId>,
+    filter: ControlTokenFilter,
+    task_repo: zhongshu_core::core::TaskRepository,
 }
 
 impl ZhongshuApp {
@@ -88,6 +92,7 @@ impl ZhongshuApp {
         response_rx: ResponseRx,
         proxy: zhongshu_core::integration::DeeplosslessProxy,
         runtime: tokio::runtime::Runtime,
+        task_repo: zhongshu_core::core::TaskRepository,
     ) -> anyhow::Result<Self> {
         let hotkey = HotkeyManager::new(&config.hotkey).unwrap_or_else(|e| {
             tracing::warn!("Global hotkey unavailable: {e:#}"); HotkeyManager::passive()
@@ -101,6 +106,9 @@ impl ZhongshuApp {
             is_dragging: false, cursor_pos: (0.0, 0.0), drag_start_cursor: (0.0, 0.0), drag_start_win: (0, 0), ctrl_held: false,
             pending_auth_notified: false,
             history_cache: Vec::new(),
+            assistant_id: None,
+            filter: ControlTokenFilter::new(),
+            task_repo,
         })
     }
 
@@ -140,7 +148,7 @@ impl ZhongshuApp {
         }
         if let Some(settings) = ov.take_settings() {
             let mut cfg = config::load();
-            if !settings.api_key.is_empty() { cfg.llm.api_key_env = settings.api_key; }
+            if !settings.api_key.is_empty() { std::env::set_var(&cfg.llm.api_key_env, &settings.api_key); }
             if !settings.api_base.is_empty() { cfg.llm.api_base = settings.api_base; }
             if !settings.model.is_empty() { cfg.llm.model = settings.model; }
             if let Some(port) = settings.proxy_port { if !port.is_empty() { cfg.deeplossless.proxy_port = port.parse().unwrap_or(8081); } }
@@ -194,6 +202,42 @@ impl ZhongshuApp {
                     ov.prepend_history(&entries, has_more);
                 }
             }
+        }
+        let mut refresh = ov.take_list_tasks();
+        if let Some(task_id) = ov.take_cancel_task() {
+            if let Err(e) = self.task_repo.update_status(&task_id, zhongshu_core::core::TaskStatus::Cancelled) {
+                tracing::warn!("cancel task failed: {e}");
+            }
+            refresh = true;
+        }
+        if let Some(task_id) = ov.take_complete_task() {
+            if let Err(e) = self.task_repo.update_status(&task_id, zhongshu_core::core::TaskStatus::Completed) {
+                tracing::warn!("complete task failed: {e}");
+            }
+            refresh = true;
+        }
+        if refresh {
+            let tasks = match self.task_repo.list_pending() {
+                Ok(t) => t,
+                Err(e) => { tracing::warn!("list tasks failed: {e}"); vec![] }
+            };
+            let items: Vec<serde_json::Value> = tasks.iter().map(|t| serde_json::json!({
+                "id": t.id, "title": t.title, "status": t.status.as_str(), "created_at": t.created_at,
+            })).collect();
+            ov.show_tasks(&items);
+        }
+        if ov.take_list_tasks() {
+            let tasks = match self.task_repo.list_pending() {
+                Ok(t) => t,
+                Err(e) => { tracing::warn!("list tasks failed: {e}"); vec![] }
+            };
+            let items: Vec<serde_json::Value> = tasks.iter().map(|t| serde_json::json!({
+                "id": t.id,
+                "title": t.title,
+                "status": t.status.as_str(),
+                "created_at": t.created_at,
+            })).collect();
+            ov.show_tasks(&items);
         }
     }
 
@@ -250,14 +294,14 @@ impl ZhongshuApp {
                                 ov.toast(&format!("工具完成: {name} {}", if success {"✓"} else {"✗"}));
                             }
                         }
-                        Event::Task(TaskEvent::Triggered { name }) => {
+                        Event::Task(TaskEvent::Triggered { title, .. }) => {
                             if self.config.agent.desktop_notification {
-                                let _ = zhongshu_core::desktop::notification::show("任务触发", &name);
+                                let _ = zhongshu_core::desktop::notification::show("任务触发", &title);
                             }
                         }
-                        Event::Task(TaskEvent::Completed { name }) => {
+                        Event::Task(TaskEvent::Completed { title, .. }) => {
                             if self.config.agent.desktop_notification {
-                                let _ = zhongshu_core::desktop::notification::show("任务完成", &name);
+                                let _ = zhongshu_core::desktop::notification::show("任务完成", &title);
                             }
                         }
                         _ => {}
@@ -275,24 +319,23 @@ impl ZhongshuApp {
 
     fn reduce_responses(&mut self) -> bool {
         let mut active = false;
-        let mut assistant_id: Option<MessageId> = None;
-        let mut filter = zhongshu_message_core::streaming::ControlTokenFilter::new();
         while let Ok(ev) = self.response_rx.try_recv() {
             active = true;
             match ev {
                 ResponseEvent::MessageStarted { id, role } => {
                     if matches!(role, ResponseRole::Assistant) {
-                        assistant_id = Some(id);
+                        self.assistant_id = Some(id);
                         if let Some(ref ov) = self.overlay {
                             ov.set_state("thinking");
                         }
                     } else {
-                        assistant_id = None;
+                        self.assistant_id = None;
+                        self.filter = ControlTokenFilter::new();
                     }
                 }
                 ResponseEvent::MessageDelta { id, delta } => {
-                    if assistant_id.map(|aid| aid == id).unwrap_or(false) {
-                        let cleaned = filter.feed(&delta);
+                    if self.assistant_id.map(|aid| aid == id).unwrap_or(false) {
+                        let cleaned = self.filter.feed(&delta);
                         if !cleaned.is_empty() {
                             if let Some(ref ov) = self.overlay {
                                 ov.push_delta(&cleaned);
@@ -301,12 +344,12 @@ impl ZhongshuApp {
                     }
                 }
                 ResponseEvent::MessageCompleted { id } => {
-                    if assistant_id.map(|aid| aid == id).unwrap_or(false) {
+                    if self.assistant_id.map(|aid| aid == id).unwrap_or(false) {
                         if let Some(ref ov) = self.overlay {
                             ov.complete_message();
                         }
-                        filter.flush();
-                        assistant_id = None;
+                        self.filter.flush();
+                        self.assistant_id = None;
                     }
                 }
             }
@@ -607,8 +650,10 @@ fn main() {
     let equipment = {
         let dir = config::config_dir().join("equipment");
         std::fs::create_dir_all(&dir).unwrap_or(());
+        // Clean up old search-files skill — superseded by the dedicated tool.
+        let _ = std::fs::remove_dir_all(dir.join("search-files"));
         let mut reg = zhongshu_core::equipment::EquipmentRegistry::new(dir);
-        reg.install_defaults(); // 内部已调用 scan()
+        reg.install_defaults();
         reg
     };
     let equip_prompts = equipment.skill_prompts();
@@ -618,15 +663,313 @@ fn main() {
         system_prompt.push_str(prompt);
     }
 
+    // ── 核心数据库 ──
+    let core_db = {
+        let path = config::config_dir().join("core.db");
+        let db = zhongshu_core::core::Database::new(path);
+        if let Err(e) = db.migrate() {
+            tracing::warn!("core database migration failed: {e}");
+        }
+        std::sync::Arc::new(db)
+    };
+    let goal_tool = zhongshu_core::core::GoalTool::new(
+        zhongshu_core::core::GoalRepository::new(zhongshu_core::core::Database::new(core_db.path().clone())),
+    );
+    let task_tool = zhongshu_core::core::TaskTool::new(
+        zhongshu_core::core::TaskRepository::new(zhongshu_core::core::Database::new(core_db.path().clone())),
+    );
+
+    let core_db_path = core_db.path().clone();
+    let observation_store = zhongshu_core::core::ObservationStore::new(
+        zhongshu_core::core::Database::new(core_db_path.clone()),
+    );
+    let suggestion_engine = zhongshu_core::core::SuggestionEngine::new(
+        zhongshu_core::core::Database::new(core_db_path.clone()),
+    );
+    let suggestion_tool = zhongshu_core::core::SuggestionTool::new(
+        suggestion_engine.clone(),
+    ).with_event_bus(eb.clone());
+    let memory_policy = zhongshu_core::core::MemoryPolicy::new(
+        zhongshu_core::core::Database::new(core_db_path.clone()),
+    );
+    let memory_query_tool = zhongshu_core::core::MemoryQueryTool::new(
+        memory_policy.clone(),
+        zhongshu_core::core::MemoryCandidateStore::new(zhongshu_core::core::Database::new(core_db_path.clone())),
+    );
+    let _event_log = zhongshu_core::core::EventLogStore::new(
+        zhongshu_core::core::Database::new(core_db_path.clone()),
+    );
+    let scheduler = zhongshu_core::core::Scheduler::new(
+        zhongshu_core::core::Database::new(core_db_path.clone()),
+    ).with_event_bus(eb.clone());
+
+    // ── Background: scheduler + memory evaluation + suggestion analysis ──
+    scheduler.spawn(3600);
+
+    // MemoryPolicy::evaluate() every 10 minutes
+    {
+        let mp = memory_policy.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+                let m = mp.clone();
+                tokio::task::spawn_blocking(move || {
+                    match m.evaluate() {
+                        Ok(accepted) => {
+                            if !accepted.is_empty() {
+                                tracing::info!("memory: promoted {} candidates to memories", accepted.len());
+                            }
+                        }
+                        Err(e) => tracing::warn!("memory evaluate: {e}"),
+                    }
+                });
+            }
+        });
+    }
+
+    // Observation → suggestion analysis every 30 minutes
+    {
+        let obs = observation_store.clone();
+        let eng = suggestion_engine.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1800)).await;
+                let e = eng.clone();
+                let o = obs.clone();
+                tokio::task::spawn_blocking(move || {
+                    // Clean expired observations
+                    if let Ok(n) = o.cleanup_expired() {
+                        if n > 0 { tracing::info!("observations: cleaned {n} expired"); }
+                    }
+                    // Run pattern-based analysis
+                    match e.analyze() {
+                        Ok(sugs) => {
+                            if !sugs.is_empty() {
+                                tracing::info!("suggestions: generated {} from pattern analysis", sugs.len());
+                            }
+                        }
+                        Err(err) => tracing::warn!("suggestion analyze: {err}"),
+                    }
+                });
+            }
+        });
+    }
+
+    // ── Feed EventBus events into observation store ──
+    {
+        let obs = observation_store.clone();
+        let mut rx = eb.subscribe();
+        tokio::spawn(async move {
+            use zhongshu_core::event::Event;
+            use zhongshu_core::core::ObservationType;
+            while let Ok(event) = rx.recv().await {
+                let (type_, content) = match &event {
+                    Event::Agent(e) => (ObservationType::AgentAction, format!("{:?}", e)),
+                    Event::Tool(e) => (ObservationType::ToolResult, format!("{:?}", e)),
+                    _ => continue,
+                };
+                let obs = obs.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Err(e) = obs.insert(type_, &content, Some("eventbus"), None) {
+                        tracing::debug!("observation insert: {e}");
+                    }
+                });
+            }
+        });
+    }
+
+    // ── Event-driven workflow: suggestion accepted → create goal ──
+    {
+        let mut rx = eb.subscribe();
+        let goal_repo = zhongshu_core::core::GoalRepository::new(
+            zhongshu_core::core::Database::new(core_db_path.clone()),
+        );
+        let task_repo = zhongshu_core::core::TaskRepository::new(
+            zhongshu_core::core::Database::new(core_db_path.clone()),
+        );
+        tokio::spawn(async move {
+            use zhongshu_core::event::{Event, SuggestionEvent, GoalEvent};
+            use zhongshu_core::core::GoalType;
+            while let Ok(event) = rx.recv().await {
+                match event {
+                    Event::Suggestion(SuggestionEvent::Accepted { content, .. }) => {
+                        let repo = goal_repo.clone();
+                        let trepo = task_repo.clone();
+                        tokio::task::spawn_blocking(move || {
+                            if let Ok(goal) = repo.create(&content, None, GoalType::OneShot) {
+                                tracing::info!("event: created goal '{}' from accepted suggestion", goal.title);
+                                if let Ok(ref t) = trepo.create(Some(&goal.id), &goal.title) {
+                                    tracing::info!("event: created task '{}' from new goal", t.title);
+                                }
+                            }
+                        });
+                    }
+                    Event::Goal(GoalEvent::Created { goal_id, .. }) => {
+                        let trepo = task_repo.clone();
+                        tokio::task::spawn_blocking(move || {
+                                if trepo.create(Some(&goal_id), "执行目标").is_ok() {
+                                    tracing::info!("event: created task from goal {}", goal_id);
+                                }
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+
     let provider = OpenAiProvider::new(&ak, &cfg.llm.model).with_base_url(base_url);
+
+    // ── Task executor: listens for Task::Triggered → runs LLM → saves output ──
+    {
+        let eb = eb.clone();
+        let mut rx = eb.subscribe();
+        let task_repo = zhongshu_core::core::TaskRepository::new(
+            zhongshu_core::core::Database::new(core_db_path.clone()),
+        );
+        let planner = zhongshu_core::core::TaskPlanner::new(
+            zhongshu_core::core::Database::new(core_db_path.clone()),
+        );
+        let artifact_repo = zhongshu_core::core::ArtifactRepository::new(
+            zhongshu_core::core::Database::new(core_db_path.clone()),
+        );
+        let memory_candidates = zhongshu_core::core::MemoryCandidateStore::new(
+            zhongshu_core::core::Database::new(core_db_path.clone()),
+        );
+        let p = provider.clone();
+        tokio::spawn(async move {
+            use zhongshu_core::event::{Event, TaskEvent};
+            use zhongshu_core::agent::llm::{LlmProvider, ChatCompletionRequest};
+            use zhongshu_core::core::TaskStatus;
+            while let Ok(event) = rx.recv().await {
+                let (task_id, title) = match &event {
+                    Event::Task(TaskEvent::Triggered { task_id, title }) => (task_id.clone(), title.clone()),
+                    _ => continue,
+                };
+                let tid1 = task_id.clone();
+                let trepo = task_repo.clone();
+                let plnr = planner.clone();
+                let arepo = artifact_repo.clone();
+                let mc = memory_candidates.clone();
+                let prov = p.clone();
+                let ebus = eb.clone();
+
+                // 1. Plan the task (blocking DB)
+                let plan_str: Vec<String> = match tokio::task::spawn_blocking(move || {
+                    plnr.plan(&tid1).ok();
+                    let steps = trepo.list_steps(&tid1).unwrap_or_default();
+                    steps.iter().map(|s| format!("{}. {}", s.step_order + 1, s.action)).collect()
+                }).await {
+                    Ok(s) => s,
+                    Err(e) => { tracing::warn!("executor: plan failed: {e}"); continue; }
+                };
+                if plan_str.is_empty() { continue; }
+
+                // 2. Run LLM
+                let prompt = format!("执行以下任务：\n\n任务：{title}\n\n步骤：\n{}\n\n请输出最终结果。", plan_str.join("\n"));
+                let req = ChatCompletionRequest {
+                    model: "deepseek-chat".into(),
+                    messages: vec![zhongshu_core::agent::llm::Message { role: zhongshu_core::agent::llm::Role::User, content: prompt, tool_calls: None, tool_call_id: None }],
+                    tools: None,
+                    tool_choice: None,
+                    stream: false,
+                    temperature: None,
+                    max_tokens: Some(2000),
+                };
+                let output = match prov.chat(req).await {
+                    Ok(r) => r.choices.into_iter().next().map(|c| c.message.content).unwrap_or_default(),
+                    Err(e) => { tracing::warn!("executor: LLM call failed: {e}"); continue; }
+                };
+
+                // 3-6: Blocking: save output, artifact, memory candidate, publish
+                let trepo = task_repo.clone();
+                let arepo = artifact_repo.clone();
+                let mc = memory_candidates.clone();
+                let ebus = eb.clone();
+                let tid = task_id.clone();
+                let ttl = title.clone();
+                let out = output.clone();
+                tokio::task::spawn_blocking(move || {
+                    let _ = trepo.set_output(&tid, &out, None);
+                    let _ = trepo.update_status(&tid, TaskStatus::Completed);
+                    if let Ok(a) = arepo.insert(zhongshu_core::core::ArtifactType::Report, Some(&ttl), None, Some(&out.chars().take(500).collect::<String>())) {
+                        let _ = arepo.link(&tid, &a.id, "output");
+                    }
+                    let summary = format!("完成任务「{}」: {}", ttl, out.chars().take(200).collect::<String>());
+                    let _ = mc.insert(&summary, Some("procedure"), 0.6, Some("task"), Some(&tid));
+                    ebus.publish(Event::Task(TaskEvent::Completed { task_id: tid.clone(), title: ttl.clone(), output: out.clone() }));
+                    tracing::info!("executor: completed task '{}'", ttl);
+                });
+            }
+        });
+    }
+
+    // ── LLM-based suggestion engine: analyze observations every 30 min ──
+    {
+        let p = provider.clone();
+        let obs = observation_store.clone();
+        let eng = suggestion_engine.clone();
+        tokio::spawn(async move {
+            use zhongshu_core::agent::llm::{LlmProvider, ChatCompletionRequest};
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1800)).await;
+                let recent_obs = tokio::task::spawn_blocking({
+                    let o = obs.clone();
+                    move || o.recent(30).unwrap_or_default()
+                }).await.unwrap_or_default();
+                if recent_obs.is_empty() { continue; }
+                let obs_text: Vec<String> = recent_obs.iter().map(|o| {
+                    format!("[{}] {}", o.type_.as_str(), o.content.chars().take(200).collect::<String>())
+                }).collect();
+                let prompt = format!(
+                    "根据以下观察记录，判断是否有值得关注的事情。\
+                     如果有，用 JSON 数组格式返回建议，每个包含 type 和 content 字段。\
+                     如果没有值得关注的，返回空数组 [].\n\n观察:\n{}",
+                    obs_text.join("\n"),
+                );
+                let req = ChatCompletionRequest {
+                    model: "deepseek-chat".into(),
+                    messages: vec![zhongshu_core::agent::llm::Message { role: zhongshu_core::agent::llm::Role::User, content: prompt, tool_calls: None, tool_call_id: None }],
+                    tools: None, tool_choice: None, stream: false, temperature: Some(0.3), max_tokens: Some(1000),
+                };
+                let response = match p.chat(req).await {
+                    Ok(r) => r.choices.into_iter().next().map(|c| c.message.content).unwrap_or_default(),
+                    Err(e) => { tracing::warn!("suggestion LLM: {e}"); continue; }
+                };
+                let suggestions: Vec<serde_json::Value> = serde_json::from_str(&response).unwrap_or_default();
+                let e = eng.clone();
+                tokio::task::spawn_blocking(move || {
+                    for s in &suggestions {
+                        let type_ = s.get("type").and_then(|v| v.as_str());
+                        let content = s.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                        if !content.is_empty() {
+                            if let Err(err) = e.insert(content, type_, 0.5, None) {
+                                tracing::warn!("suggestion insert: {err}");
+                            }
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    let memory_tool = zhongshu_core::tool::memory::MemoryTool::new(
+        config::config_dir().join("agent.json"),
+    );
     let controller = Arc::new(AgentController::new(
         eb.clone(), response_tx.clone(),
         provider.clone(),
         default_registry().register(zhongshu_core::tool::search::WebSearchTool)
             .register(zhongshu_core::tool::browser::BrowserTool)
             .register(zhongshu_core::tool::webfetch::WebFetchTool)
-            .register(zhongshu_core::tool::screenshot::ScreenshotTool)
-            .register(zhongshu_core::tool::automation::AutomationTool),
+            //.register(zhongshu_core::tool::screenshot::ScreenshotTool) // disabled — model lacks multimodal support
+            .register(zhongshu_core::tool::search_files::SearchFilesTool)
+            .register(zhongshu_core::tool::automation::AutomationTool)
+            .register(memory_tool.clone())
+            .register(goal_tool.clone())
+            .register(task_tool.clone())
+            .register(suggestion_tool.clone())
+            .register(memory_query_tool.clone()),
         cfg.llm.model.clone(), SessionState::new(), system_prompt,
         config::config_dir().join("agent.json"),
     ));
@@ -664,8 +1007,14 @@ fn main() {
         default_registry().register(zhongshu_core::tool::search::WebSearchTool)
             .register(zhongshu_core::tool::browser::BrowserTool)
             .register(zhongshu_core::tool::webfetch::WebFetchTool)
-            .register(zhongshu_core::tool::screenshot::ScreenshotTool)
-            .register(zhongshu_core::tool::automation::AutomationTool),
+            //.register(zhongshu_core::tool::screenshot::ScreenshotTool) // disabled — model lacks multimodal support
+            .register(zhongshu_core::tool::search_files::SearchFilesTool)
+            .register(zhongshu_core::tool::automation::AutomationTool)
+            .register(memory_tool.clone())
+            .register(goal_tool.clone())
+            .register(task_tool.clone())
+            .register(suggestion_tool.clone())
+            .register(memory_query_tool.clone()),
         cfg.llm.model.clone(),
         AgentBudget {
             max_steps: 10,
@@ -756,7 +1105,10 @@ fn main() {
     EventLogger::replay(&event_log_path, &eb);
     let _event_logger = EventLogger::new(event_log_path).unwrap().spawn(&eb);
 
-    let mut app = match ZhongshuApp::new(cfg, controller, inbox.clone(), eb, event_rx, response_tx, response_rx, proxy, r) {
+    let task_repo = zhongshu_core::core::TaskRepository::new(
+        zhongshu_core::core::Database::new(config::config_dir().join("core.db")),
+    );
+    let mut app = match ZhongshuApp::new(cfg, controller, inbox.clone(), eb, event_rx, response_tx, response_rx, proxy, r, task_repo) {
         Ok(app) => app, Err(e) => { tracing::error!("init: {e:#}"); return; }
     };
 

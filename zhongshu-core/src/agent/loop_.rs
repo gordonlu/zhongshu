@@ -80,7 +80,12 @@ pub async fn run_agent(
         debug!(step, tokens = current_tokens, "agent loop iteration");
 
         let (content, tool_calls) = if let Some(ref cb) = callbacks {
-            stream_step(runtime, &messages, cb.clone()).await?
+            let n = messages.len();
+            let bytes: usize = messages.iter().map(|m| m.content.len()).sum();
+            debug!(step, msg_count = n, total_bytes = bytes, "stream_step start");
+            let result = stream_step(runtime, &messages, cb.clone()).await?;
+            debug!(step, content_len = result.0.len(), tool_call_count = result.1.len(), "stream_step done");
+            result
         } else {
             sync_step(runtime, &messages).await?
         };
@@ -129,8 +134,11 @@ pub async fn run_agent(
                 while crate::authority::is_pending() {
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
-                // Continue to next LLM step — after approval the agent can
-                // retry the tool (check() will now return Allow).
+                // User approved — update the stale auth_required observation so
+                // the LLM sees "approved" rather than concluding the request was denied.
+                if let Some(last) = messages.last_mut() {
+                    last.content = format!("<observation tool=\"{}\" status=\"approved\">用户已授权，可以执行此工具。</observation>", tc.function.name);
+                }
                 continue;
             }
 

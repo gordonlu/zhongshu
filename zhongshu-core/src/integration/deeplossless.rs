@@ -155,13 +155,19 @@ impl DeeplosslessProxy {
             }
         };
 
+        // deeplossless stores content as JSON-encoded strings, e.g. `"\"text\""`.
+        // Deserialize to get the actual text.
+        fn decode_json_str(raw: &str) -> String {
+            serde_json::from_str(raw).unwrap_or_else(|_| raw.to_string())
+        }
+
         let mut turns = Vec::new();
         for row in rows {
             match row {
                 Ok((role, content)) => {
                     // Only include user and assistant roles
                     if role == "user" || role == "assistant" {
-                        turns.push((role, content));
+                        turns.push((role, decode_json_str(&content)));
                     }
                 }
                 Err(e) => tracing::warn!("error reading message row: {e}"),
@@ -198,6 +204,20 @@ impl DeeplosslessProxy {
             }
         }
         tracing::info!("deleted {} nodes from conversation {conv_id}", all.len());
+
+        // Also delete from the messages table so history doesn't reappear on restart.
+        if let Ok(conn) = rusqlite::Connection::open(&self.db_path.replacen(
+            "~", &std::env::var("HOME").unwrap_or_else(|_| ".".into()), 1,
+        )) {
+            if let Err(e) = conn.execute(
+                "DELETE FROM messages WHERE conversation_id = ?1",
+                rusqlite::params![conv_id],
+            ) {
+                tracing::warn!("failed to delete messages for conversation {conv_id}: {e}");
+            } else {
+                tracing::info!("deleted all messages for conversation {conv_id}");
+            }
+        }
     }
 }
 

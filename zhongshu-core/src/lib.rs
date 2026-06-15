@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod authority;
+pub mod core;
 pub mod desktop;
 pub mod digest;
 pub mod equipment;

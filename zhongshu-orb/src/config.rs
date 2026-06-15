@@ -154,7 +154,7 @@ fn default_max_chat_entries() -> usize { 500 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
-    #[serde(default = "default_system_prompt")]
+    #[serde(default = "default_system_prompt", skip_serializing)]
     pub system_prompt: String,
     /// 个性风格：可选 "古典" / "极客" / "温度" / ""。首次设好后不要频繁更改，否则会降低 DeepSeek 缓存命中率。
     #[serde(default = "default_personality")]
@@ -344,11 +344,15 @@ fn default_system_prompt() -> String {
 - `web_search` — 网页搜索
 - `webfetch` — 读取网页内容（纯文本）
 - `browser` — 读取网页内容，可选择同时打开浏览器查看
-- `screenshot` — 截取屏幕
 - `system_info` — 获取 CPU/内存/磁盘/网络等系统信息（不用 shell 命令查）
+- `search_files` — 搜索文件，自动选择最优引擎（locate > fd > find）。如果提示未安装搜索工具，询问用户是否安装，不要直接改用更慢的方式
+- `goal` — 创建和管理长期目标（create/list/pause/complete）
+- `task` — 管理具体执行任务（create/list/cancel/retry/add_step）
+- `suggestion` — 查看和处理系统自动产生的建议
+- `memory_query` — 搜索已有记忆，或提议新记忆
 - `automation` — 模拟键盘鼠标操作
 
-敏感操作（shell、edit、write、browser、automation、screenshot）会弹出用户确认窗口。如果用户拒绝了，你能看到拒绝信息，可以尝试替代方案。
+敏感操作（shell、edit、write、browser、automation）会弹出用户确认窗口。如果用户拒绝了，你能看到拒绝信息，可以尝试替代方案。
 
 ## 安全规则（必须遵守）
 
@@ -582,6 +586,15 @@ pub fn load() -> AppConfig {
     cfg.ui.overlay_width = cfg.ui.overlay_width.max(520.0);
     cfg.ui.overlay_height = cfg.ui.overlay_height.max(800.0);
     if cfg.deeplossless.proxy_port == 0 { cfg.deeplossless.proxy_port = 8081; }
+
+    // System prompt belongs to code, not config.
+    cfg.agent.system_prompt = default_system_prompt();
+
+    // Sanitise: api_key_env must be an env var name, not a key value.
+    if cfg.llm.api_key_env.starts_with("sk-") {
+        tracing::warn!("api_key_env contained an API key instead of env var name; resetting to default");
+        cfg.llm.api_key_env = default_api_key_env();
+    }
 
     cfg
 }

@@ -128,6 +128,9 @@ pub struct OverlayHandle {
     pub request_stop: Arc<Mutex<bool>>,
     pub pending_open_settings: Arc<Mutex<bool>>,
     pub pending_load_more: Arc<Mutex<bool>>,
+    pub pending_list_tasks: Arc<Mutex<bool>>,
+    pub pending_cancel_task: Arc<Mutex<Option<String>>>,
+    pub pending_complete_task: Arc<Mutex<Option<String>>>,
     #[allow(dead_code)]
     pub request_quit: bool,
     #[allow(dead_code)]
@@ -230,6 +233,22 @@ impl OverlayHandle {
     pub fn take_load_more(&self) -> bool {
         std::mem::take(&mut *self.pending_load_more.lock().unwrap())
     }
+
+    pub fn take_list_tasks(&self) -> bool {
+        std::mem::take(&mut *self.pending_list_tasks.lock().unwrap())
+    }
+
+    pub fn take_cancel_task(&self) -> Option<String> {
+        std::mem::take(&mut *self.pending_cancel_task.lock().unwrap())
+    }
+
+    pub fn take_complete_task(&self) -> Option<String> {
+        std::mem::take(&mut *self.pending_complete_task.lock().unwrap())
+    }
+
+    pub fn show_tasks(&self, tasks: &[serde_json::Value]) {
+        self.send(&json!({ "type": "tasks", "tasks": tasks }));
+    }
 }
 
 impl Drop for OverlayHandle {
@@ -252,6 +271,9 @@ pub fn show(width: f32, height: f32) -> OverlayHandle {
     let request_stop: Arc<Mutex<bool>> = Default::default();
     let pending_open_settings: Arc<Mutex<bool>> = Default::default();
     let pending_load_more: Arc<Mutex<bool>> = Default::default();
+    let pending_list_tasks: Arc<Mutex<bool>> = Default::default();
+    let pending_cancel_task: Arc<Mutex<Option<String>>> = Default::default();
+    let pending_complete_task: Arc<Mutex<Option<String>>> = Default::default();
 
     let pi = pending_input.clone();
     let pa = pending_approve.clone();
@@ -262,6 +284,9 @@ pub fn show(width: f32, height: f32) -> OverlayHandle {
     let rs = request_stop.clone();
     let pos = pending_open_settings.clone();
     let plm = pending_load_more.clone();
+    let plt = pending_list_tasks.clone();
+    let pct = pending_cancel_task.clone();
+    let pcmt = pending_complete_task.clone();
 
     // Install IPC handler that writes to these shared queues
     *IPC_HANDLER.lock().unwrap() = Some(Box::new(move |request: http::Request<String>| {
@@ -306,6 +331,19 @@ pub fn show(width: f32, height: f32) -> OverlayHandle {
                 Some("load_more") => {
                     *plm.lock().unwrap() = true;
                 }
+                Some("list_tasks") => {
+                    *plt.lock().unwrap() = true;
+                }
+                Some("cancel_task") => {
+                    if let Some(id) = msg["task_id"].as_str() {
+                        *pct.lock().unwrap() = Some(id.to_string());
+                    }
+                }
+                Some("complete_task") => {
+                    if let Some(id) = msg["task_id"].as_str() {
+                        *pcmt.lock().unwrap() = Some(id.to_string());
+                    }
+                }
                 _ => {}
             }
         }
@@ -323,6 +361,9 @@ pub fn show(width: f32, height: f32) -> OverlayHandle {
         request_stop,
         pending_open_settings,
         pending_load_more,
+        pending_list_tasks,
+        pending_cancel_task,
+        pending_complete_task,
         request_quit: false,
         personality_selected: false,
     }

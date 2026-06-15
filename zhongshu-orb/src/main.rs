@@ -156,8 +156,7 @@ impl ZhongshuApp {
             config::save(&cfg);
         }
         if ov.take_new_conversation() {
-            self.controller.set_chat_history(Vec::new());
-            ov.clear_chat();
+            self.delete_all_history();
         }
         if ov.take_stop() {
             self.controller.cancel();
@@ -315,6 +314,16 @@ impl ZhongshuApp {
 
     // ── Overlay management ──────────────────────────────────────────
 
+    fn delete_all_history(&self) {
+        self.controller.set_chat_history(Vec::new());
+        self.runtime.block_on(async {
+            self.proxy.lock().await.delete_chat_history().await;
+        });
+        if let Some(ref ov) = self.overlay {
+            ov.clear_chat();
+        }
+    }
+
     fn try_open_overlay(&mut self, _el: &ActiveEventLoop) {
         if let Some(ref ov) = self.overlay {
             ov.show_window(self.config.ui.overlay_width, self.config.ui.overlay_height);
@@ -361,11 +370,7 @@ impl ZhongshuApp {
     }
 
     fn new_conversation(&mut self, _el: &ActiveEventLoop) {
-        self.controller.set_chat_history(Vec::new());
-        self.history_cache = Vec::new();
-        if let Some(ref ov) = self.overlay {
-            ov.clear_chat();
-        }
+        self.delete_all_history();
     }
 }
 

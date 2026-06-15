@@ -375,9 +375,9 @@ function scrollBottom() {
   chat.scrollTop = chat.scrollHeight;
 }
 
-function scrollTop(prevScrollHeight) {
+function scrollTop(prevScrollHeight, prevScrollTop) {
   let chat = document.getElementById('chat');
-  chat.scrollTop = chat.scrollHeight - prevScrollHeight;
+  chat.scrollTop = chat.scrollHeight - prevScrollHeight + prevScrollTop;
 }
 
 function render() {
@@ -495,7 +495,9 @@ function handleIpc(message) {
 
       case 'prepend_history':
         {
-          let prevScrollHeight = document.getElementById('chat').scrollHeight;
+          let chat = document.getElementById('chat');
+          let prevScrollHeight = chat.scrollHeight;
+          let prevScrollTop = chat.scrollTop;
           let prepend = [];
           for (let e of msg.entries) {
             let role = typeof e.role === 'string' ? e.role.toLowerCase() : 'assistant';
@@ -510,7 +512,7 @@ function handleIpc(message) {
           has_more = msg.has_more || false;
           loading_more = false;
           render();
-          scrollTop(prevScrollHeight);
+          scrollTop(prevScrollHeight, prevScrollTop);
         }
         break;
 

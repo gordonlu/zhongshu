@@ -139,7 +139,8 @@ impl DeeplosslessProxy {
         nodes.sort_by_key(|n| n.id);
 
         // DAG level 0 nodes store raw content text (with JSON quotes around).
-        // Alternate: odd → User, even → Assistant.
+        // Alternate User/Assistant on kept nodes (the first level-0 node
+        // that passes content checks is always the first user message).
         let mut turns = Vec::new();
         let mut user_turn = true;
         for node in &nodes {
@@ -185,6 +186,36 @@ impl DeeplosslessProxy {
         }
 
         turns
+    }
+
+    /// Permanently delete the most recent conversation from lcm.db.
+    pub async fn delete_chat_history(&self) {
+        let guard = self.coordinator.lock().await;
+        let coordinator = match guard.as_ref() {
+            Some(c) => c,
+            None => return,
+        };
+        let db = &coordinator.state.storage.db;
+        let conv_id = match db.last_conversation_id() {
+            Ok(Some(id)) => id,
+            _ => return,
+        };
+        // Soft-delete all DAG nodes in this conversation
+        let all = match db.get_all_dag_nodes(conv_id) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!("failed to load dag nodes for deletion: {e}");
+                return;
+            }
+        };
+        for node in &all {
+            if !node.deleted {
+                if let Err(e) = db.delete_dag_node(node.id) {
+                    tracing::warn!("failed to delete dag node {}: {e}", node.id);
+                }
+            }
+        }
+        tracing::info!("deleted {} nodes from conversation {conv_id}", all.len());
     }
 }
 

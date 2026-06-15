@@ -60,8 +60,10 @@ struct ZhongshuApp {
     indicator: Option<Indicator>,
     indicator_state: AgentState,
     overlay: Option<OverlayHandle>,
+    #[allow(dead_code)]
     event_bus: Arc<EventBus>,
     event_rx: EventRx,
+    #[allow(dead_code)]
     response_tx: ResponseTx,
     response_rx: ResponseRx,
     hotkey: HotkeyManager,

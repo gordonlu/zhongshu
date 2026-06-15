@@ -127,6 +127,7 @@ pub struct OverlayHandle {
     pub request_new_conversation: Arc<Mutex<bool>>,
     pub request_stop: Arc<Mutex<bool>>,
     pub pending_open_settings: Arc<Mutex<bool>>,
+    pub pending_load_more: Arc<Mutex<bool>>,
     #[allow(dead_code)]
     pub request_quit: bool,
     #[allow(dead_code)]
@@ -155,8 +156,12 @@ impl OverlayHandle {
         self.send(&json!({ "type": "complete" }));
     }
 
-    pub fn set_history(&self, entries: &[ChatEntry]) {
-        self.send(&json!({ "type": "history", "entries": entries }));
+    pub fn set_history(&self, entries: &[ChatEntry], has_more: bool) {
+        self.send(&json!({ "type": "history", "entries": entries, "has_more": has_more }));
+    }
+
+    pub fn prepend_history(&self, entries: &[ChatEntry], has_more: bool) {
+        self.send(&json!({ "type": "prepend_history", "entries": entries, "has_more": has_more }));
     }
 
     pub fn show_auth(&self, req: &AuthRequest) {
@@ -221,6 +226,10 @@ impl OverlayHandle {
     pub fn take_open_settings(&self) -> bool {
         std::mem::take(&mut *self.pending_open_settings.lock().unwrap())
     }
+
+    pub fn take_load_more(&self) -> bool {
+        std::mem::take(&mut *self.pending_load_more.lock().unwrap())
+    }
 }
 
 impl Drop for OverlayHandle {
@@ -242,6 +251,7 @@ pub fn show(width: f32, height: f32) -> OverlayHandle {
     let request_new_conversation: Arc<Mutex<bool>> = Default::default();
     let request_stop: Arc<Mutex<bool>> = Default::default();
     let pending_open_settings: Arc<Mutex<bool>> = Default::default();
+    let pending_load_more: Arc<Mutex<bool>> = Default::default();
 
     let pi = pending_input.clone();
     let pa = pending_approve.clone();
@@ -251,6 +261,7 @@ pub fn show(width: f32, height: f32) -> OverlayHandle {
     let rnc = request_new_conversation.clone();
     let rs = request_stop.clone();
     let pos = pending_open_settings.clone();
+    let plm = pending_load_more.clone();
 
     // Install IPC handler that writes to these shared queues
     *IPC_HANDLER.lock().unwrap() = Some(Box::new(move |request: http::Request<String>| {
@@ -290,8 +301,10 @@ pub fn show(width: f32, height: f32) -> OverlayHandle {
                     *pos.lock().unwrap() = true;
                 }
                 Some("delete_history") => {
-                    // Clear display
                     *rnc.lock().unwrap() = true;
+                }
+                Some("load_more") => {
+                    *plm.lock().unwrap() = true;
                 }
                 _ => {}
             }
@@ -309,6 +322,7 @@ pub fn show(width: f32, height: f32) -> OverlayHandle {
         request_new_conversation,
         request_stop,
         pending_open_settings,
+        pending_load_more,
         request_quit: false,
         personality_selected: false,
     }

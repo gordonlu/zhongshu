@@ -72,6 +72,7 @@ struct ZhongshuApp {
     drag_start_win: (i32, i32),
     ctrl_held: bool,
     pending_auth_notified: bool,
+    history_cache: Vec<(String, String)>,
 }
 
 impl ZhongshuApp {
@@ -97,6 +98,7 @@ impl ZhongshuApp {
             hotkey, last_activity: Instant::now(),
             is_dragging: false, cursor_pos: (0.0, 0.0), drag_start_cursor: (0.0, 0.0), drag_start_win: (0, 0), ctrl_held: false,
             pending_auth_notified: false,
+            history_cache: Vec::new(),
         })
     }
 
@@ -171,6 +173,24 @@ impl ZhongshuApp {
                 bg_prompt: Some(cfg.agent.background.prompt.clone()),
                 auto_evolve: Some(cfg.agent.auto_evolve),
             });
+        }
+        if ov.take_load_more() {
+            const BATCH_SIZE: usize = 40; // 20 pairs
+            let cache_len = self.history_cache.len();
+            if cache_len > 0 {
+                let take = BATCH_SIZE.min(cache_len);
+                let split = cache_len - take;
+                let batch: Vec<(String, String)> = self.history_cache.drain(split..).collect();
+                let has_more = self.history_cache.len() > 0;
+                let entries: Vec<overlay::ChatEntry> = batch.iter().map(|(role, content)| {
+                    overlay::ChatEntry {
+                        role: if role == "User" { overlay::EntryRole::User } else { overlay::EntryRole::Assistant },
+                        content: content.clone(),
+                        tool_calls: Vec::new(),
+                    }
+                }).collect();
+                ov.prepend_history(&entries, has_more);
+            }
         }
     }
 
@@ -307,22 +327,40 @@ impl ZhongshuApp {
         let cleaned_history: Vec<(String, String)> = history.into_iter()
             .map(|(role, content)| (role, zhongshu_message_core::strip_control_tokens(&content)))
             .collect();
-        let entries: Vec<overlay::ChatEntry> = cleaned_history.iter().map(|(role, content)| {
+
+        // Show only the last 20 pairs (40 entries) initially; cache older entries for lazy loading.
+        const INITIAL_PAIRS: usize = 20;
+        let max_initial = INITIAL_PAIRS * 2;
+        let has_more = cleaned_history.len() > max_initial;
+        let (initial, cache) = if has_more {
+            let split = cleaned_history.len() - max_initial;
+            let cache = cleaned_history[..split].to_vec();
+            let initial = cleaned_history[split..].to_vec();
+            (initial, cache)
+        } else {
+            (cleaned_history.clone(), Vec::new())
+        };
+        self.history_cache = cache;
+
+        // Full history (all entries) goes to controller for LLM context.
+        self.controller.set_chat_history(cleaned_history);
+
+        let entries: Vec<overlay::ChatEntry> = initial.iter().map(|(role, content)| {
             overlay::ChatEntry {
                 role: if role == "User" { overlay::EntryRole::User } else { overlay::EntryRole::Assistant },
                 content: content.clone(),
                 tool_calls: Vec::new(),
             }
         }).collect();
-        self.controller.set_chat_history(cleaned_history);
         if !entries.is_empty() {
-            ov.set_history(&entries);
+            ov.set_history(&entries, has_more);
         }
         self.overlay = Some(ov);
     }
 
     fn new_conversation(&mut self, _el: &ActiveEventLoop) {
         self.controller.set_chat_history(Vec::new());
+        self.history_cache = Vec::new();
         if let Some(ref ov) = self.overlay {
             ov.clear_chat();
         }

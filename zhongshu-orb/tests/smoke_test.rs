@@ -94,7 +94,7 @@ fn test_chat_html_renders_messages() {
         serde_json::to_string(&serde_json::json!({"type":"delta","content":"来自Rust的回复"})).unwrap()
     );
     webview.evaluate_script(&delta_js).expect("live delta eval failed");
-    pump_gtk(300);
+    pump_gtk(2000);
 
     let (tx4, rx4) = std::sync::mpsc::channel();
     webview.evaluate_script_with_callback(

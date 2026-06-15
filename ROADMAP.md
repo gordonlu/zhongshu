@@ -2,12 +2,9 @@
 
 ## Vision
 
-中书不是聊天窗口。
-
-中书是一个长期运行在用户电脑上的 Agent Runtime。
+中书不是聊天窗口。中书是一个长期运行在用户电脑上的 Agent Runtime。
 
 它拥有：
-
 * 长期记忆
 * 持续任务
 * 工具调用能力
@@ -22,25 +19,34 @@
 
 ```
 zhongshu-core       Rust lib — 纯逻辑，无 UI 依赖
+├── core/               核心领域模型 + SQLite 持久化
+│   ├── goal/               目标管理 (repository + tool)
+│   ├── task/               任务管理 (repository + tool + planner + executor)
+│   ├── observation/        观察存储 (auto-fed from EventBus)
+│   ├── suggestion/         建议引擎 (pattern + LLM-based)
+│   ├── memory/             记忆管道 (candidate → policy → memory)
+│   ├── artifact/           资料存储
+│   ├── scheduler/          Goal→Task 定时触发器
+│   ├── event/              Event 持久化日志
+│   ├── db.rs               SQLite WAL-mode 数据库
+│   ├── models.rs           13 个核心模型
+│   └── tests.rs            19 个集成测试
 ├── agent/              LLM provider + ReAct loop + streaming + guardrails
-├── event/              EventBus (broadcast) + ResponseStream (bounded mpsc) + MessageId
-├── memory/             deeplossless DAG 记忆存储 + 压缩
-├── task/               Trigger trait + Scheduler + Worker
-├── tool/               shell / fs / search / browser / screenshot / automation
-└── integration/        ContextEngine facade
+├── event/              EventBus (broadcast) + ResponseStream (mpsc)
+├── integration/        deeplossless DAG 记忆存储
+├── tool/               shell / fs / search / browser / screenshot / search_files / memory
+├── authority/          4 级权限关卡 (Safe/Moderate/Dangerous/Blocked)
+└── equipment/          军器监 (search-files skill → 已迁移为 tool)
 
-zhongshu-cli         CLI binary — 交互式命令行
-
-zhongshu-orb         Desktop UI
-├── app.rs              AgentController (lifecycle) + BackgroundRunner + AgentInbox
-├── agent.rs            AgentMemory (长期记忆: identity + goals + todos)
+zhongshu-orb         Desktop UI (wry + GTK WebView)
+├── app.rs              AgentController (lifecycle) + spawn_task + AgentInbox
+├── agent.rs            AgentMemory (goals + todos + long_term_memory)
 ├── config.rs           统一配置 (llm/hotkey/ui/agent)
-├── event/              EventBus + ResponseStream (in core, shared)
-├── gpu.rs              GpuContext (共享) + WindowSurface (每窗口)
-├── hotkey.rs           全局快捷键 Win+; (可配置)
-├── indicator.rs        StatusIndicator (Windows orb / Linux tray)
-├── overlay.rs          Markdown 渲染 + Tool 时间线
-└── main.rs             入口 + winit event loop
+├── main.rs             入口 + winit event loop + EventBus wiring
+├── overlay.rs          WebView IPC + task UI + auth dialog
+├── indicator.rs        Linux tray / Windows orb
+├── hotkey.rs           全局快捷键
+└── assets/chat.html    HTML/CSS/JS 前端
 ```
 
 ---
@@ -51,24 +57,21 @@ zhongshu-orb         Desktop UI
 
 UI 是可替换的。Agent Runtime 是核心。
 
-CLI、Desktop、未来 VSCode Plugin 都共享同一 Runtime。
-
 ## Memory Native
 
 所有行为默认进入记忆系统。用户不需要主动保存。
 
 ## Event Driven
 
-```text
-EventBus (broadcast, system notifications)   → 允许丢
-ResponseStream (mpsc bounded, UI streaming)  → 不丢
+```
+EventBus (broadcast) → 观察、任务、记忆全部事件驱动
 ```
 
 UI、Task、Memory 解耦。
 
 ## Streaming Everywhere
 
-token streaming / tool streaming / progress streaming，统一协议。
+token streaming / tool streaming，统一协议。
 
 ---
 
@@ -76,134 +79,90 @@ token streaming / tool streaming / progress streaming，统一协议。
 
 ## Agent Runtime
 * OpenAI Compatible Provider
-* Streaming
-* ReAct Loop
-* Tool Execution
-* Budget Control + Failure Recovery
+* Streaming + ReAct Loop
+* Tool Execution + Budget Control
+* deeplossless DAG memory
 
-## Memory Runtime
-* deeplossless integration
-* DAG conversation storage + context retrieval + compression
-
-## Tools
-* Shell / Filesystem / Search / Browser / Screenshot / Automation
-
-## Task Runtime
-* Reminder / Interval / FileWatch
-
-## CLI
-* Interactive Chat + Streaming Output
+## Core Tools
+* Shell / Filesystem / WebSearch / Browser / ScreenShot / Automation
 
 ---
 
 # Phase 2 — Desktop Runtime ✅
 
-## EventBus ✅
+## wry + GTK WebView
+替换 egui/wgpu，使用系统 WebView 渲染 chat HTML。
 
-统一事件总线，发布/订阅，UI / Task / Memory 解耦。ResponseStream 独立 mpsc channel（bounded，backpressure 安全）。
+## EventBus + Overlay IPC
+统一事件总线，WebView 双向 IPC。
 
-## Status Indicator ✅
+## Auth Dialog
+授权审批 UI（inline bar，非 modal 遮挡）。
 
-```
-Windows: OrbIndicator (winit + softbuffer 透明悬浮球)
-Linux:   TrayIndicator (tray-icon / GTK / D-Bus)
-```
-
-## Overlay ✅
-
-egui + wgpu 对话框。Markdown 渲染（LayoutJob stack-based）、Code block（monospace）、Tool 时间线（Running/Done 状态 + 耗时）。流式文本缓存（content hash），CJK 字体自动加载。
-
-## Global Hotkey ✅
-
-Win+; 默认，可配置（`~/.config/zhongshu/hotkey.json`）。跨平台 global-hotkey crate。
-
-## 架构硬化 ✅
-
-统一配置系统（原子写入，API key 不入盘）、GPU 资源生命周期（WindowSurface + Drop）、聊天历史上限（max_chat_entries 截断）、streaming 超时检测、EventBus lagged 可观测、drain() reducer pipeline、AgentController UI 解耦。
+## 架构硬化
+统一配置、原子写入、API key 环境变量、streaming 超时检测。
 
 ---
 
-# Phase 3 — Agent OS 🏗️
+# Phase 3 — Agent Operating System ✅
 
-## Persistent Agent ✅
-
-Agent 拥有长期身份和记忆。
-
+## Persistent Agent
 ```
-AgentProfile  (identity + active_goals + todos)
-     ↓
- 每次对话注入 system prompt（活跃目标 + 待办列表）
-     ↓
- 响应后自动解析 - [ ] checkbox → 提取 TodoItem → 持久化
+AgentProfile → 每次对话注入 system prompt
+响应后自动解析 todo/goal checkbox → 持久化
 ```
 
-## Background Runner ✅
+## Core Database (core.db) ✅
+10 张 SQLite 表：observations / suggestions / goals / tasks / task_steps / task_runs / artifacts / task_artifacts / memory_candidates / memories / events
 
-定时自主检查。处于 Idle 时才触发，防止重叠执行。
-
-## Agent Inbox ✅
-
-统一入口：用户消息和后台任务通过同一队列排队，Agent Idle 时逐条分发。
-
+## Goal/Task 生命周期 ✅
 ```
-用户输入 ─┐
-          ├→ AgentInbox (VecDeque) → AgentController.run()
-后台任务 ─┘          ↑
-            EventBus Idle 事件触发 drain
+LLM goal tool → GoalRepository → Scheduler → Task → Executor → Artifact → MemoryCandidate
+全部经 EventBus 驱动
 ```
 
-## System Safety & Privacy ✅
-
-### Authority Gate v1.1
-统一权限关卡（单例 `GLOBAL_GATE`），覆盖 shell / screenshot / automation / browser 所有工具。
-
+## 自动记忆沉淀 ✅
 ```
-4 级风险: Safe → Moderate → Dangerous → Blocked
-缓存:     批准后 30 分钟免审（keyed by tool + program）
-审计:     audit.log 追加写入（ALLOW / BLOCK / GRANT / DENY）
+Observation → EventBus → MemoryCandidate (confidence≥0.7) → MemoryPolicy.evaluate() → Memory
+后台任务每 600s 评估一次
 ```
 
-### System Integrity
-- 磁盘/分区工具（`format`、`mkfs`、`dd of=/dev`）→ **Blocked**
-- 系统路径写入（`/etc/`、`/boot/`、`/sys/`、`/usr/`、`/lib*`、`/bin/`、`/sbin/`）→ **Blocked**
-- 提权绕过防护（`sudo`/`pkexec`/`doas` + 破坏性操作）→ **Blocked**
-- 命令链绕过防护（`&&`、`;` 多命令拼接）→ **Dangerous**
-- 递归根删除（`rm -rf /`、`rm -rf ~`）→ **Blocked**
-- 误报控制：`/`lib` 匹配不误伤 `/libreoffice`
+## 建议引擎 ✅
+```
+ObservationStore → LLM 分析 → SuggestionEngine → SuggestionTool
+模式分析 + LLM 分析双通道，每 1800s 运行
+```
 
-### Privacy
-- 敏感路径检测：`~/.ssh/`、`~/.gnupg/`、`~/.aws/`、`~/.kube/`、`~/.config/zhongshu/` → **Dangerous**
-- 任何涉及敏感路径的命令都需用户批准（包括 `cat`、`ls` 等只读命令）
-- `/.ssh` 前缀匹配避免 `find -name .ssh` 误报
-- 嵌入路径检测（`dd of=~/.ssh/authorized_keys` → 危险）
-- 系统提示词注入防御：忽略网页/文件中的恶意指令，不读取私密文件，不外发数据
+## 权限关卡 ✅
+4 级风险 + TTL 缓存 + 审计日志
 
-### UI/UX
-- 输入响应修复：`Poll` + `request_redraw()` 替代 `WaitUntil`，消除 Wayland 输入延迟
-- Overlay 视觉重设计：温暖极简主题（terracotta 主色 #d04a1a、卡式对话气泡）
-- 权限审批机制：LLM 检测用户确认词（yes/可以/确认）→ 调用 `approve_pending()`
-- 标签泄露修复：`<final_answer` 无 `>` 断块也能被 strip
-
-## 待完成
-
-* 长期目标生命周期管理：GoalStatus::Archived、结构化记忆 schema
-* 任务调度器完整接入：Reminder/FileWatch → inbox 路由
-* 桌面通知系统：notify-rust 已引入，未完全接入
-* AuthorityGate UI 审批对话框：当前是 LLM 中介模式，未来 overlay 直接展示审批界面
+## UI 任务面板 ✅
+Header 📋 按钮 → 弹出任务列表，支持完成/取消
 
 ---
 
-# Phase 4 — Multi-Agent
+# Phase 4 — Intelligence
+
+* **LLM Planner** — TaskPlanner 从硬编码模板升级为 LLM 生成执行计划
+* **Task Step 执行** — 按步骤逐步执行，更新 step status
+* **Suggestion→Goal 自动转化** — 高置信度建议自动创建目标
+* **Memory 向量检索** — embedding 列 + 语义搜索
+* **Event log 持久化** — EventBus 事件入库，支持 replay/debug
+* **Scheduler 配置化** — 通过 UI 配置 goal trigger 规则
+
+---
+
+# Phase 5 — Multi-Agent
 
 * Planner: 拆任务
 * Researcher: 搜索
 * Executor: 工具执行
 * Reviewer: 检查结果
-* 共享 deeplossless 记忆系统
+* 共享 core.db 记忆系统
 
 ---
 
-# Phase 5 — Knowledge Operating System
+# Phase 6 — Knowledge Operating System
 
 * Personal Knowledge Graph（自动构建实体/关系图谱）
 * Memory Compaction v2（对话压缩 → 知识提取）

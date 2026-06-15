@@ -654,6 +654,9 @@ window.handleIpc = handleIpc;
 // Signal ready
 sendIpc({type: 'ready'});
 
+// ── Disable right-click context menu ──
+document.addEventListener('contextmenu', function(e) { e.preventDefault(); });
+
 // ── Lazy load older history on scroll to top ──
 document.getElementById('chat').addEventListener('scroll', function() {
   if (!has_more || loading_more || this.scrollTop > 80) return;

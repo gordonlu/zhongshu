@@ -55,10 +55,12 @@ impl AttentionManager {
         tracing::trace!(worker = %report.worker, level = ?report.attention, "attention manager processing report");
         match report.attention {
             AttentionLevel::Immediate => {
-                self.eb.publish(Event::Attention(AttentionEvent::Interrupt { report }));
+                self.eb
+                    .publish(Event::Attention(AttentionEvent::Interrupt { report }));
             }
             AttentionLevel::Notify => {
-                self.eb.publish(Event::Attention(AttentionEvent::Notify { report }));
+                self.eb
+                    .publish(Event::Attention(AttentionEvent::Notify { report }));
             }
             AttentionLevel::Digest => {
                 let mut dq = self.digest_queue.lock().unwrap();
@@ -155,7 +157,10 @@ mod tests {
 
         mgr.process(dummy_report(AttentionLevel::Immediate));
         let event = rx.try_recv().unwrap();
-        assert!(matches!(event, Event::Attention(AttentionEvent::Interrupt { .. })));
+        assert!(matches!(
+            event,
+            Event::Attention(AttentionEvent::Interrupt { .. })
+        ));
     }
 
     #[test]
@@ -166,7 +171,10 @@ mod tests {
 
         mgr.process(dummy_report(AttentionLevel::Notify));
         let event = rx.try_recv().unwrap();
-        assert!(matches!(event, Event::Attention(AttentionEvent::Notify { .. })));
+        assert!(matches!(
+            event,
+            Event::Attention(AttentionEvent::Notify { .. })
+        ));
     }
 
     #[test]

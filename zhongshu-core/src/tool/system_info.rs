@@ -7,7 +7,9 @@ pub struct SystemInfoTool;
 
 #[async_trait]
 impl Tool for SystemInfoTool {
-    fn name(&self) -> &str { "system_info" }
+    fn name(&self) -> &str {
+        "system_info"
+    }
 
     fn description(&self) -> &str {
         "Collect system information (OS, CPU, memory, disks, network, processes, uptime) using native APIs. No shell required."
@@ -29,12 +31,18 @@ impl Tool for SystemInfoTool {
         let os = System::os_version().unwrap_or_default();
         let uptime = System::uptime();
 
-        let cpus: Vec<serde_json::Value> = system.cpus().iter().map(|cpu| json!({
-            "name": cpu.name(),
-            "brand": cpu.brand(),
-            "usage_pct": cpu.cpu_usage(),
-            "frequency_mhz": cpu.frequency(),
-        })).collect();
+        let cpus: Vec<serde_json::Value> = system
+            .cpus()
+            .iter()
+            .map(|cpu| {
+                json!({
+                    "name": cpu.name(),
+                    "brand": cpu.brand(),
+                    "usage_pct": cpu.cpu_usage(),
+                    "frequency_mhz": cpu.frequency(),
+                })
+            })
+            .collect();
         let cpu_count = system.cpus().len();
         let cpu_usage: f32 = system.global_cpu_usage();
 
@@ -45,20 +53,30 @@ impl Tool for SystemInfoTool {
         let used_swap = system.used_swap();
 
         let disks = Disks::new_with_refreshed_list();
-        let disk_list: Vec<serde_json::Value> = disks.iter().map(|d| json!({
-            "mount": d.mount_point(),
-            "total_bytes": d.total_space(),
-            "available_bytes": d.available_space(),
-            "file_system": format!("{}", d.file_system().to_string_lossy()),
-            "kind": format!("{:?}", d.kind()),
-        })).collect();
+        let disk_list: Vec<serde_json::Value> = disks
+            .iter()
+            .map(|d| {
+                json!({
+                    "mount": d.mount_point(),
+                    "total_bytes": d.total_space(),
+                    "available_bytes": d.available_space(),
+                    "file_system": format!("{}", d.file_system().to_string_lossy()),
+                    "kind": format!("{:?}", d.kind()),
+                })
+            })
+            .collect();
 
         let networks = Networks::new_with_refreshed_list();
-        let net_list: Vec<serde_json::Value> = networks.iter().map(|(name, data)| json!({
-            "interface": name,
-            "received_bytes": data.total_received(),
-            "transmitted_bytes": data.total_transmitted(),
-        })).collect();
+        let net_list: Vec<serde_json::Value> = networks
+            .iter()
+            .map(|(name, data)| {
+                json!({
+                    "interface": name,
+                    "received_bytes": data.total_received(),
+                    "transmitted_bytes": data.total_transmitted(),
+                })
+            })
+            .collect();
 
         let load = System::load_average();
 

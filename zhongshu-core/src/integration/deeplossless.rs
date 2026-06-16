@@ -37,7 +37,11 @@ pub struct DeeplosslessProxy {
 
 impl DeeplosslessProxy {
     pub async fn new(config: DeeplosslessConfig) -> anyhow::Result<Self> {
-        let key = if config.api_key.is_empty() { None } else { Some(config.api_key.clone()) };
+        let key = if config.api_key.is_empty() {
+            None
+        } else {
+            Some(config.api_key.clone())
+        };
 
         let coord_config = CoordinatorConfig {
             upstream: config.upstream.clone(),
@@ -116,7 +120,11 @@ impl DeeplosslessProxy {
     /// Opens a direct read-only SQLite connection to lcm.db.
     /// Returns a list of (role, content) pairs from the most recent conversation.
     pub async fn load_chat_history(&self) -> Vec<(String, String)> {
-        let expanded = self.db_path.replacen("~", &std::env::var("HOME").unwrap_or_else(|_| ".".into()), 1);
+        let expanded = self.db_path.replacen(
+            "~",
+            &std::env::var("HOME").unwrap_or_else(|_| ".".into()),
+            1,
+        );
         let conn = match rusqlite::Connection::open(&expanded) {
             Ok(c) => c,
             Err(e) => {
@@ -125,18 +133,20 @@ impl DeeplosslessProxy {
             }
         };
 
-        let conv_id: Option<i64> = conn.query_row(
-            "SELECT id FROM conversations ORDER BY id DESC LIMIT 1",
-            [],
-            |row| row.get(0),
-        ).ok();
+        let conv_id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM conversations ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
         let conv_id = match conv_id {
             Some(id) => id,
             None => return Vec::new(),
         };
 
         let mut stmt = match conn.prepare(
-            "SELECT role, content FROM messages WHERE conversation_id = ?1 ORDER BY id ASC"
+            "SELECT role, content FROM messages WHERE conversation_id = ?1 ORDER BY id ASC",
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -207,7 +217,9 @@ impl DeeplosslessProxy {
 
         // Also delete from the messages table so history doesn't reappear on restart.
         if let Ok(conn) = rusqlite::Connection::open(&self.db_path.replacen(
-            "~", &std::env::var("HOME").unwrap_or_else(|_| ".".into()), 1,
+            "~",
+            &std::env::var("HOME").unwrap_or_else(|_| ".".into()),
+            1,
         )) {
             if let Err(e) = conn.execute(
                 "DELETE FROM messages WHERE conversation_id = ?1",
@@ -225,7 +237,11 @@ impl DeeplosslessProxy {
 async fn bind_socket(start_port: u16) -> anyhow::Result<(tokio::net::TcpListener, u16)> {
     let attempts = if start_port == 0 { 1 } else { PORT_RANGE };
     for offset in 0..attempts {
-        let port = if start_port == 0 { 0 } else { start_port + offset };
+        let port = if start_port == 0 {
+            0
+        } else {
+            start_port + offset
+        };
         let addr = format!("127.0.0.1:{port}");
         match tokio::net::TcpListener::bind(&addr).await {
             Ok(listener) => {
@@ -239,7 +255,11 @@ async fn bind_socket(start_port: u16) -> anyhow::Result<(tokio::net::TcpListener
             Err(e) => return Err(anyhow::anyhow!("cannot bind to {addr}: {e}")),
         }
     }
-    Err(anyhow::anyhow!("no free port in range {}-{}", start_port, start_port + PORT_RANGE - 1))
+    Err(anyhow::anyhow!(
+        "no free port in range {}-{}",
+        start_port,
+        start_port + PORT_RANGE - 1
+    ))
 }
 
 #[cfg(test)]
@@ -276,7 +296,11 @@ mod tests {
         // Verify the health endpoint responds
         let health_url = format!("http://127.0.0.1:{}/v1/health", proxy.port());
         let resp = reqwest::get(&health_url).await.expect("health check");
-        assert!(resp.status().is_success(), "health should return 200, got {}", resp.status());
+        assert!(
+            resp.status().is_success(),
+            "health should return 200, got {}",
+            resp.status()
+        );
 
         proxy.shutdown().await;
     }

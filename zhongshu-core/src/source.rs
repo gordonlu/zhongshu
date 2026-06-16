@@ -80,7 +80,12 @@ pub struct DiskUsageSource {
 
 impl DiskUsageSource {
     /// `threshold`: 0.0–1.0，使用率超过此值触发告警。
-    pub fn new(name: impl Into<String>, path: impl Into<PathBuf>, threshold: f64, cooldown: Duration) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        path: impl Into<PathBuf>,
+        threshold: f64,
+        cooldown: Duration,
+    ) -> Self {
         DiskUsageSource {
             name: name.into(),
             path: path.into(),
@@ -97,7 +102,8 @@ impl DiskUsageSource {
             let output = std::process::Command::new("df")
                 .arg("--output=pcent")
                 .arg(path_str)
-                .output().ok()?;
+                .output()
+                .ok()?;
             let stdout = String::from_utf8(output.stdout).ok()?;
             let line = stdout.lines().nth(1)?;
             let pct: f64 = line.trim().trim_end_matches('%').parse().ok()?;
@@ -105,10 +111,10 @@ impl DiskUsageSource {
         }
         #[cfg(target_os = "windows")]
         {
-            use winapi::um::fileapi::GetDiskFreeSpaceExW;
-            use winapi::shared::ntdef::ULARGE_INTEGER;
             use std::ffi::OsStr;
             use std::os::windows::ffi::OsStrExt;
+            use winapi::shared::ntdef::ULARGE_INTEGER;
+            use winapi::um::fileapi::GetDiskFreeSpaceExW;
             let path: Vec<u16> = OsStr::new(self.path.as_os_str())
                 .encode_wide()
                 .chain(std::iter::once(0))
@@ -117,7 +123,15 @@ impl DiskUsageSource {
             let mut free_bytes: ULARGE_INTEGER = unsafe { std::mem::zeroed() };
             let mut total_bytes: ULARGE_INTEGER = unsafe { std::mem::zeroed() };
             let mut _total_free: ULARGE_INTEGER = unsafe { std::mem::zeroed() };
-            if unsafe { GetDiskFreeSpaceExW(path.as_ptr(), &mut free_bytes, &mut total_bytes, &mut _total_free) } == 0 {
+            if unsafe {
+                GetDiskFreeSpaceExW(
+                    path.as_ptr(),
+                    &mut free_bytes,
+                    &mut total_bytes,
+                    &mut _total_free,
+                )
+            } == 0
+            {
                 return None;
             }
             // SAFETY: reading the anonymous QuadPart field of an initialised union.
@@ -217,7 +231,8 @@ impl BatterySource {
         #[cfg(target_os = "linux")]
         {
             return std::fs::read_to_string("/sys/class/power_supply/BAT0/status")
-                .ok().is_some_and(|s| s.trim() == "Charging");
+                .ok()
+                .is_some_and(|s| s.trim() == "Charging");
         }
         #[cfg(target_os = "windows")]
         {
@@ -316,8 +331,8 @@ impl SourceManager {
 mod tests {
     use super::*;
     use crate::event::SourceEvent;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     struct TestSource {
         name: String,
@@ -357,7 +372,10 @@ mod tests {
     #[tokio::test]
     async fn timer_source_does_not_fire_twice() {
         let mut src = TimerSource::new("t", Duration::from_secs(60));
-        assert!(src.poll().await.is_some(), "should fire on first poll (Option<Instant> init to None)");
+        assert!(
+            src.poll().await.is_some(),
+            "should fire on first poll (Option<Instant> init to None)"
+        );
         assert!(src.poll().await.is_none(), "should not fire twice in a row");
     }
 

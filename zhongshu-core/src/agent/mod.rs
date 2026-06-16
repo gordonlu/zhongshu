@@ -11,7 +11,7 @@ pub mod worker;
 pub use attention::AttentionLevel;
 pub use attention_manager::AttentionManager;
 pub use dispatcher::AttentionDispatcher;
-pub use loop_::{AgentBudget, AgentCallbacks, LoopResult, StopReason, run_agent};
+pub use loop_::{run_agent, AgentBudget, AgentCallbacks, LoopResult, StopReason};
 pub use profile::AgentProfile;
 pub use report::Report;
 pub use runtime::AgentRuntime;

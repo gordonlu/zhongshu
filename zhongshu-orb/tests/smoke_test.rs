@@ -1,6 +1,6 @@
+use gtk::prelude::*;
 use std::sync::Once;
 use std::time::Duration;
-use gtk::prelude::*;
 use wry::WebViewBuilderExtUnix;
 
 fn pump_gtk(ms: u64) {
@@ -41,9 +41,11 @@ fn test_chat_html_renders_messages() {
 
     // Check JS state
     let (tx, rx) = std::sync::mpsc::channel();
-    webview.evaluate_script_with_callback("JSON.stringify(messages.length)", move |r| {
-        tx.send(r).ok();
-    }).expect("check eval failed");
+    webview
+        .evaluate_script_with_callback("JSON.stringify(messages.length)", move |r| {
+            tx.send(r).ok();
+        })
+        .expect("check eval failed");
     pump_gtk(2000);
     let msg_count = rx.try_recv().unwrap_or_default();
     println!("messages.length = {msg_count}");
@@ -52,19 +54,24 @@ fn test_chat_html_renders_messages() {
     assert_eq!(msg_parsed, "2", "should have 2 messages, got '{msg_count}'");
 
     // Step 2: Stream a delta
-    webview.evaluate_script(
-        r#"
+    webview
+        .evaluate_script(
+            r#"
         window.handleIpc(JSON.parse('{"type":"state_change","state":"thinking"}'));
         window.handleIpc(JSON.parse('{"type":"delta","content":"这是一条流式消息"}'));
         window.handleIpc(JSON.parse('{"type":"complete"}'));
-    "#).expect("delta eval failed");
+    "#,
+        )
+        .expect("delta eval failed");
     pump_gtk(500);
 
     // Check total messages
     let (tx2, rx2) = std::sync::mpsc::channel();
-    webview.evaluate_script_with_callback("JSON.stringify(messages.length)", move |r| {
-        tx2.send(r).ok();
-    }).expect("check2 eval failed");
+    webview
+        .evaluate_script_with_callback("JSON.stringify(messages.length)", move |r| {
+            tx2.send(r).ok();
+        })
+        .expect("check2 eval failed");
     pump_gtk(2000);
     let total = rx2.try_recv().unwrap_or_default();
     println!("total messages = {total}");
@@ -79,9 +86,11 @@ fn test_chat_html_renders_messages() {
         for (let i = 0; i < chat.children.length; i++) { allText += chat.children[i].textContent + ' | '; }
         JSON.stringify({children: chat.children.length, text: allText.substring(0,200)})
     "#;
-    webview.evaluate_script_with_callback(dom_check, move |r| {
-        tx3.send(r).ok();
-    }).expect("dom check failed");
+    webview
+        .evaluate_script_with_callback(dom_check, move |r| {
+            tx3.send(r).ok();
+        })
+        .expect("dom check failed");
     pump_gtk(2000);
     let dom = rx3.try_recv().unwrap_or_default();
     println!("DOM: {dom}");
@@ -91,9 +100,12 @@ fn test_chat_html_renders_messages() {
     // Step 3: Verify deltas from Rust-like JS (the actual IPC format)
     let delta_js = format!(
         "window.handleIpc(JSON.parse({}))",
-        serde_json::to_string(&serde_json::json!({"type":"delta","content":"来自Rust的回复"})).unwrap()
+        serde_json::to_string(&serde_json::json!({"type":"delta","content":"来自Rust的回复"}))
+            .unwrap()
     );
-    webview.evaluate_script(&delta_js).expect("live delta eval failed");
+    webview
+        .evaluate_script(&delta_js)
+        .expect("live delta eval failed");
     pump_gtk(2000);
 
     let (tx4, rx4) = std::sync::mpsc::channel();

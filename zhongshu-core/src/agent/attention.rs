@@ -1,7 +1,9 @@
 /// Worker output 的通知层级。
 ///
 /// 排序：Ignore < Digest < Notify < Immediate
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum AttentionLevel {
     /// 不通知，仅归档
     Ignore,

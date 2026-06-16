@@ -38,7 +38,9 @@ impl Default for AppConfig {
     }
 }
 
-fn default_version() -> u32 { CURRENT_CONFIG_VERSION }
+fn default_version() -> u32 {
+    CURRENT_CONFIG_VERSION
+}
 
 /// Current config schema version. Bump when making breaking changes and
 /// add a `migrate_vX_to_vY` function.
@@ -74,9 +76,15 @@ impl LlmConfig {
     }
 }
 
-fn default_api_key_env() -> String { "DEEPSEEK_API_KEY".into() }
-fn default_model() -> String { "deepseek-v4-flash".into() }
-fn default_api_base() -> String { "https://api.deepseek.com".into() }
+fn default_api_key_env() -> String {
+    "DEEPSEEK_API_KEY".into()
+}
+fn default_model() -> String {
+    "deepseek-v4-flash".into()
+}
+fn default_api_base() -> String {
+    "https://api.deepseek.com".into()
+}
 
 // ── Hotkey ──────────────────────────────────────────────────────────
 
@@ -97,8 +105,12 @@ impl Default for HotkeyConfig {
     }
 }
 
-fn default_hotkey_modifiers() -> Vec<String> { vec!["Alt".into()] }
-fn default_hotkey_key() -> String { "Semicolon".into() }
+fn default_hotkey_modifiers() -> Vec<String> {
+    vec!["Alt".into()]
+}
+fn default_hotkey_key() -> String {
+    "Semicolon".into()
+}
 
 // ── UI ──────────────────────────────────────────────────────────────
 
@@ -145,10 +157,18 @@ impl Default for UiConfig {
     }
 }
 
-fn default_orb_size() -> u32 { 64 }
-fn default_overlay_width() -> f32 { 520.0 }
-fn default_overlay_height() -> f32 { 800.0 }
-fn default_max_chat_entries() -> usize { 500 }
+fn default_orb_size() -> u32 {
+    64
+}
+fn default_overlay_width() -> f32 {
+    520.0
+}
+fn default_overlay_height() -> f32 {
+    800.0
+}
+fn default_max_chat_entries() -> usize {
+    500
+}
 
 // ── Agent ───────────────────────────────────────────────────────────
 
@@ -182,7 +202,9 @@ pub struct AgentConfig {
     pub auto_evolve: bool,
 }
 
-fn default_personality() -> String { "古典".into() }
+fn default_personality() -> String {
+    "古典".into()
+}
 
 impl AgentConfig {
     pub fn effective_system_prompt(&self) -> String {
@@ -238,7 +260,11 @@ pub fn ensure_personalities() {
         tracing::warn!("cannot create personalities dir: {e}");
         return;
     }
-    for (name, text) in [("古典", PERSONALITY_CLASSICAL), ("极客", PERSONALITY_GEEK), ("温度", PERSONALITY_WARM)] {
+    for (name, text) in [
+        ("古典", PERSONALITY_CLASSICAL),
+        ("极客", PERSONALITY_GEEK),
+        ("温度", PERSONALITY_WARM),
+    ] {
         let path = dir.join(format!("{name}.txt"));
         // Always overwrite built-in personalities so updates take effect.
         if let Err(e) = std::fs::write(&path, text) {
@@ -281,8 +307,12 @@ impl Default for AuthorityConfig {
     }
 }
 
-fn default_true() -> bool { true }
-fn default_sudo_timeout() -> u64 { 1800 }
+fn default_true() -> bool {
+    true
+}
+fn default_sudo_timeout() -> u64 {
+    1800
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackgroundConfig {
@@ -306,7 +336,9 @@ impl Default for BackgroundConfig {
     }
 }
 
-fn default_background_interval() -> u64 { 600 } // 10 minutes
+fn default_background_interval() -> u64 {
+    600
+} // 10 minutes
 fn default_background_prompt() -> String {
     "[定时检查] 使用 system_info 工具收集系统信息并检查异常，不要使用 shell。".into()
 }
@@ -425,11 +457,21 @@ Worker 只在以下情况创建：
 - 需要用户决定的事给出选项和建议，不加多余描述
 - 用中文回复".into()
 }
-fn default_max_steps() -> u32 { 30 }
-fn default_max_tool_calls() -> u32 { 20 }
-fn default_token_limit() -> u32 { 128_000 }
-fn default_streaming_timeout_secs() -> u64 { 180 }
-fn default_response_capacity() -> usize { 512 }
+fn default_max_steps() -> u32 {
+    30
+}
+fn default_max_tool_calls() -> u32 {
+    20
+}
+fn default_token_limit() -> u32 {
+    128_000
+}
+fn default_streaming_timeout_secs() -> u64 {
+    180
+}
+fn default_response_capacity() -> usize {
+    512
+}
 
 // ── Scheduler ───────────────────────────────────────────────────────
 
@@ -469,7 +511,9 @@ pub struct FileWatchEntry {
 /// Directory for all zhongshu user config files.
 pub fn config_dir() -> PathBuf {
     let base = if cfg!(windows) {
-        std::env::var("APPDATA").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."))
+        std::env::var("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."))
     } else {
         std::env::var("XDG_CONFIG_HOME")
             .map(PathBuf::from)
@@ -488,7 +532,9 @@ pub struct DeeplosslessSection {
     pub proxy_port: u16,
 }
 
-fn default_proxy_port() -> u16 { 8081 }
+fn default_proxy_port() -> u16 {
+    8081
+}
 
 impl Default for DeeplosslessSection {
     fn default() -> Self {
@@ -504,8 +550,10 @@ fn config_path() -> PathBuf {
 /// Ensure the config directory and its subdirectories exist.
 fn ensure_config_dir() -> Result<()> {
     let dir = config_dir();
-    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create config dir {}", dir.display()))?;
-    std::fs::create_dir_all(dir.join("profiles")).with_context(|| format!("cannot create profiles dir"))?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("cannot create config dir {}", dir.display()))?;
+    std::fs::create_dir_all(dir.join("profiles"))
+        .with_context(|| format!("cannot create profiles dir"))?;
     Ok(())
 }
 
@@ -538,7 +586,10 @@ pub fn load() -> AppConfig {
     let mut raw: Value = match text.parse() {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!("Config {} is malformed JSON: {e}. Using defaults.", path.display());
+            tracing::warn!(
+                "Config {} is malformed JSON: {e}. Using defaults.",
+                path.display()
+            );
             let cfg = AppConfig::default();
             save_inner(&path, &cfg);
             return cfg;
@@ -563,7 +614,10 @@ pub fn load() -> AppConfig {
     let mut cfg: AppConfig = match serde_json::from_value(raw.clone()) {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!("Config v{} failed to deserialize: {e}. Attempting salvage.", raw["version"]);
+            tracing::warn!(
+                "Config v{} failed to deserialize: {e}. Attempting salvage.",
+                raw["version"]
+            );
             salvage_config(&mut raw);
             match serde_json::from_value(raw) {
                 Ok(c) => c,
@@ -585,14 +639,18 @@ pub fn load() -> AppConfig {
     // Ensure UI minimums (config file may have old defaults baked in).
     cfg.ui.overlay_width = cfg.ui.overlay_width.max(520.0);
     cfg.ui.overlay_height = cfg.ui.overlay_height.max(800.0);
-    if cfg.deeplossless.proxy_port == 0 { cfg.deeplossless.proxy_port = 8081; }
+    if cfg.deeplossless.proxy_port == 0 {
+        cfg.deeplossless.proxy_port = 8081;
+    }
 
     // System prompt belongs to code, not config.
     cfg.agent.system_prompt = default_system_prompt();
 
     // Sanitise: api_key_env must be an env var name, not a key value.
     if cfg.llm.api_key_env.starts_with("sk-") {
-        tracing::warn!("api_key_env contained an API key instead of env var name; resetting to default");
+        tracing::warn!(
+            "api_key_env contained an API key instead of env var name; resetting to default"
+        );
         cfg.llm.api_key_env = default_api_key_env();
     }
 
@@ -603,8 +661,17 @@ pub fn load() -> AppConfig {
 /// deserialize. Uses a whitelist of known top‑level keys.
 fn salvage_config(raw: &mut Value) {
     let known_keys: Vec<String> = [
-        "version", "llm", "hotkey", "ui", "agent", "scheduler", "deeplossless",
-    ].iter().map(|s| s.to_string()).collect();
+        "version",
+        "llm",
+        "hotkey",
+        "ui",
+        "agent",
+        "scheduler",
+        "deeplossless",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
 
     if let Some(obj) = raw.as_object_mut() {
         obj.retain(|k, _| known_keys.contains(k));
@@ -623,9 +690,7 @@ fn salvage_config(raw: &mut Value) {
 
 type MigrationFn = fn(&mut Value);
 
-const MIGRATIONS: &[MigrationFn] = &[
-    migrate_v1_to_v2,
-];
+const MIGRATIONS: &[MigrationFn] = &[migrate_v1_to_v2];
 
 /// v1 → v2 (personality system + deeplossless proxy).
 /// All new fields have serde defaults, so no transformation needed —
@@ -673,7 +738,11 @@ fn save_inner(path: &Path, cfg: &AppConfig) {
         return;
     }
     if let Err(e) = std::fs::rename(&tmp, path) {
-        tracing::warn!("Failed to rename config {} -> {}: {e}", tmp.display(), path.display());
+        tracing::warn!(
+            "Failed to rename config {} -> {}: {e}",
+            tmp.display(),
+            path.display()
+        );
     }
 }
 

@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use crate::core::db::Database;
 use crate::core::goal::GoalRepository;
-use crate::core::task::TaskRepository;
 use crate::core::models::*;
+use crate::core::task::TaskRepository;
 use crate::event::{Event, EventBus, TaskEvent};
 
 #[derive(Clone)]
@@ -42,21 +42,35 @@ impl Scheduler {
         for goal in &goals {
             let task = match goal.goal_type {
                 GoalType::OneShot => {
-                    if self.has_pending_task(&goal.id) { continue; }
+                    if self.has_pending_task(&goal.id) {
+                        continue;
+                    }
                     self.task_repo.create(Some(&goal.id), &goal.title)
                 }
                 GoalType::Recurring => {
-                    if self.has_active_or_pending_task(&goal.id) { continue; }
-                    let title = format!("{} ({})", goal.title, chrono::Local::now().format("%Y-%m-%d"));
+                    if self.has_active_or_pending_task(&goal.id) {
+                        continue;
+                    }
+                    let title = format!(
+                        "{} ({})",
+                        goal.title,
+                        chrono::Local::now().format("%Y-%m-%d")
+                    );
                     self.task_repo.create(Some(&goal.id), &title)
                 }
                 GoalType::Ongoing => {
-                    if self.has_pending_task(&goal.id) { continue; }
+                    if self.has_pending_task(&goal.id) {
+                        continue;
+                    }
                     self.task_repo.create(Some(&goal.id), &goal.title)
                 }
             };
             if let Ok(task) = task {
-                tracing::info!("scheduler: created task '{}' for goal '{}'", task.title, goal.id);
+                tracing::info!(
+                    "scheduler: created task '{}' for goal '{}'",
+                    task.title,
+                    goal.id
+                );
                 if let Some(eb) = &self.eb {
                     eb.publish(Event::Task(TaskEvent::Triggered {
                         task_id: task.id.clone(),
@@ -70,15 +84,31 @@ impl Scheduler {
     }
 
     fn has_pending_task(&self, goal_id: &str) -> bool {
-        self.task_repo.list_by_goal(goal_id).ok().map_or(false, |tasks| {
-            tasks.iter().any(|t| matches!(t.status, TaskStatus::Pending | TaskStatus::Planning | TaskStatus::Running))
-        })
+        self.task_repo
+            .list_by_goal(goal_id)
+            .ok()
+            .map_or(false, |tasks| {
+                tasks.iter().any(|t| {
+                    matches!(
+                        t.status,
+                        TaskStatus::Pending | TaskStatus::Planning | TaskStatus::Running
+                    )
+                })
+            })
     }
 
     fn has_active_or_pending_task(&self, goal_id: &str) -> bool {
-        self.task_repo.list_by_goal(goal_id).ok().map_or(false, |tasks| {
-            tasks.iter().any(|t| !matches!(t.status, TaskStatus::Completed | TaskStatus::Cancelled | TaskStatus::Failed))
-        })
+        self.task_repo
+            .list_by_goal(goal_id)
+            .ok()
+            .map_or(false, |tasks| {
+                tasks.iter().any(|t| {
+                    !matches!(
+                        t.status,
+                        TaskStatus::Completed | TaskStatus::Cancelled | TaskStatus::Failed
+                    )
+                })
+            })
     }
 
     pub fn spawn(self, interval_secs: u64) {

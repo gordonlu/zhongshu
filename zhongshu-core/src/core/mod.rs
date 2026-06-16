@@ -1,24 +1,24 @@
-pub mod db;
-pub mod models;
-pub mod goal;
-pub mod task;
-pub mod observation;
-pub mod suggestion;
 pub mod artifact;
-pub mod memory;
+pub mod db;
 pub mod event;
+pub mod goal;
+pub mod memory;
+pub mod models;
+pub mod observation;
 pub mod scheduler;
+pub mod suggestion;
+pub mod task;
 
-pub use db::Database;
-pub use models::*;
-pub use goal::{GoalRepository, GoalTool};
-pub use task::{TaskRepository, TaskTool, TaskPlanner};
-pub use observation::ObservationStore;
-pub use suggestion::{SuggestionEngine, SuggestionTool};
 pub use artifact::ArtifactRepository;
-pub use memory::{MemoryQueryTool, MemoryPolicy, MemoryCandidateStore};
+pub use db::Database;
 pub use event::EventLogStore;
+pub use goal::{GoalRepository, GoalTool};
+pub use memory::{MemoryCandidateStore, MemoryPolicy, MemoryQueryTool};
+pub use models::*;
+pub use observation::ObservationStore;
 pub use scheduler::Scheduler;
+pub use suggestion::{SuggestionEngine, SuggestionTool};
+pub use task::{TaskPlanner, TaskRepository, TaskTool};
 
 #[cfg(test)]
 mod tests;

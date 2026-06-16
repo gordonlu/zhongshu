@@ -13,7 +13,13 @@ impl ObservationStore {
         ObservationStore { db }
     }
 
-    pub fn insert(&self, type_: ObservationType, content: &str, source: Option<&str>, metadata: Option<&serde_json::Value>) -> rusqlite::Result<Observation> {
+    pub fn insert(
+        &self,
+        type_: ObservationType,
+        content: &str,
+        source: Option<&str>,
+        metadata: Option<&serde_json::Value>,
+    ) -> rusqlite::Result<Observation> {
         let conn = self.db.conn()?;
         let obs = Observation {
             id: id("obs"),
@@ -60,16 +66,22 @@ impl ObservationStore {
 
     pub fn cleanup_expired(&self) -> rusqlite::Result<usize> {
         let conn = self.db.conn()?;
-        conn.execute("DELETE FROM observations WHERE expires_at <= ?1", params![now()])
+        conn.execute(
+            "DELETE FROM observations WHERE expires_at <= ?1",
+            params![now()],
+        )
     }
 
     fn row(row: &rusqlite::Row) -> rusqlite::Result<Observation> {
         Ok(Observation {
             id: row.get(0)?,
-            type_: ObservationType::from_str(&row.get::<_, String>(1)?).unwrap_or(ObservationType::AgentAction),
+            type_: ObservationType::from_str(&row.get::<_, String>(1)?)
+                .unwrap_or(ObservationType::AgentAction),
             content: row.get(2)?,
             source: row.get(3)?,
-            metadata: row.get::<_, Option<String>>(4)?.and_then(|s| serde_json::from_str(&s).ok()),
+            metadata: row
+                .get::<_, Option<String>>(4)?
+                .and_then(|s| serde_json::from_str(&s).ok()),
             created_at: row.get(5)?,
             expires_at: row.get(6)?,
         })

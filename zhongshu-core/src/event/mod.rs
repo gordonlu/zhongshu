@@ -13,16 +13,25 @@ pub struct MessageId {
 impl MessageId {
     pub fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        MessageId { id: NEXT.fetch_add(1, Ordering::Relaxed), parent: None }
+        MessageId {
+            id: NEXT.fetch_add(1, Ordering::Relaxed),
+            parent: None,
+        }
     }
 
     pub fn with_parent(parent: MessageId) -> Self {
-        MessageId { id: Self::new().id, parent: Some(parent.id) }
+        MessageId {
+            id: Self::new().id,
+            parent: Some(parent.id),
+        }
     }
 
     #[allow(dead_code)]
     pub fn parent(&self) -> Option<MessageId> {
-        self.parent.map(|p| MessageId { id: p, parent: None })
+        self.parent.map(|p| MessageId {
+            id: p,
+            parent: None,
+        })
     }
 }
 
@@ -101,8 +110,13 @@ pub enum GoalEvent {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum SuggestionEvent {
-    Accepted { suggestion_id: String, content: String },
-    Rejected { suggestion_id: String },
+    Accepted {
+        suggestion_id: String,
+        content: String,
+    },
+    Rejected {
+        suggestion_id: String,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -125,17 +139,11 @@ pub enum AgentEvent {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum AttentionEvent {
     /// 需要立即打断用户（P0）
-    Interrupt {
-        report: Report,
-    },
+    Interrupt { report: Report },
     /// 桌面通知即可（P1）
-    Notify {
-        report: Report,
-    },
+    Notify { report: Report },
     /// 归入日/周报（P3）
-    Digest {
-        report: Report,
-    },
+    Digest { report: Report },
 }
 
 /// Source 系统产生的事件。
@@ -157,8 +165,15 @@ pub enum ToolEvent {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum TaskEvent {
-    Triggered { task_id: String, title: String },
-    Completed { task_id: String, title: String, output: String },
+    Triggered {
+        task_id: String,
+        title: String,
+    },
+    Completed {
+        task_id: String,
+        title: String,
+        output: String,
+    },
 }
 
 // ── EventBus ────────────────────────────────────────────────────────
@@ -195,10 +210,39 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+const EVENT_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
+const EVENT_LOG_KEEP_LINES: usize = 10_000;
+const EVENT_LOG_CHECK_INTERVAL: u64 = 100;
+
 /// Append-only event log for debugging and replay.
+/// Automatically truncates to the last 10k lines when the file exceeds 10 MB.
 pub struct EventLogger {
     file: Mutex<std::fs::File>,
-    _path: PathBuf,
+    path: PathBuf,
+    write_count: AtomicU64,
+}
+
+fn truncate_jsonl(path: &Path, max_bytes: u64, keep_lines: usize) {
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    if meta.len() <= max_bytes {
+        return;
+    }
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.len() <= keep_lines {
+        return;
+    }
+    if let Ok(mut f) = std::fs::File::create(path) {
+        for line in lines.iter().rev().take(keep_lines).rev() {
+            let _ = writeln!(f, "{line}");
+        }
+    }
 }
 
 impl EventLogger {
@@ -208,12 +252,17 @@ impl EventLogger {
             std::fs::create_dir_all(parent)?;
         }
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
-        Ok(EventLogger { file: Mutex::new(file), _path: path })
+        Ok(EventLogger {
+            file: Mutex::new(file),
+            path,
+            write_count: AtomicU64::new(0),
+        })
     }
 
     /// Spawn a background task that writes every EventBus event to the log.
     pub fn spawn(self, eb: &EventBus) -> tokio::task::JoinHandle<()> {
         let mut rx = eb.subscribe();
+        let path = self.path.clone();
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
@@ -221,6 +270,11 @@ impl EventLogger {
                         if let Ok(line) = serde_json::to_string(&event) {
                             if let Ok(mut f) = self.file.lock() {
                                 let _ = writeln!(f, "{line}");
+                                let _ = f.flush();
+                            }
+                            let count = self.write_count.fetch_add(1, Ordering::Relaxed);
+                            if count % EVENT_LOG_CHECK_INTERVAL == 0 {
+                                truncate_jsonl(&path, EVENT_LOG_MAX_BYTES, EVENT_LOG_KEEP_LINES);
                             }
                         }
                     }
@@ -316,11 +370,15 @@ mod tests {
     fn event_bus_publish_subscribe() {
         let bus = EventBus::new(16);
         let mut rx = bus.subscribe();
-        bus.publish(Event::Agent(AgentEvent::StateChanged { from: AgentState::Idle, to: AgentState::Thinking }));
+        bus.publish(Event::Agent(AgentEvent::StateChanged {
+            from: AgentState::Idle,
+            to: AgentState::Thinking,
+        }));
         let ev = rx.try_recv().unwrap();
         match ev {
             Event::Agent(AgentEvent::StateChanged { from, to }) => {
-                assert_eq!(from, AgentState::Idle); assert_eq!(to, AgentState::Thinking);
+                assert_eq!(from, AgentState::Idle);
+                assert_eq!(to, AgentState::Thinking);
             }
             _ => panic!("unexpected event"),
         }
@@ -331,7 +389,9 @@ mod tests {
         let bus = EventBus::new(16);
         let mut rx1 = bus.subscribe();
         let mut rx2 = bus.subscribe();
-        bus.publish(Event::Tool(ToolEvent::Started { name: "search".into() }));
+        bus.publish(Event::Tool(ToolEvent::Started {
+            name: "search".into(),
+        }));
         assert!(rx1.try_recv().is_ok());
         assert!(rx2.try_recv().is_ok());
     }
@@ -348,8 +408,14 @@ mod tests {
     fn response_channel_bounded_send_recv() {
         let (tx, mut rx) = mpsc::channel::<ResponseEvent>(16);
         let id = MessageId::new();
-        let _ = tx.try_send(ResponseEvent::MessageStarted { id, role: ResponseRole::Assistant });
-        let _ = tx.try_send(ResponseEvent::MessageDelta { id, delta: "hello".into() });
+        let _ = tx.try_send(ResponseEvent::MessageStarted {
+            id,
+            role: ResponseRole::Assistant,
+        });
+        let _ = tx.try_send(ResponseEvent::MessageDelta {
+            id,
+            delta: "hello".into(),
+        });
         let _ = tx.try_send(ResponseEvent::MessageCompleted { id });
         assert!(rx.try_recv().is_ok());
         assert!(rx.try_recv().is_ok());
@@ -363,8 +429,14 @@ mod tests {
     async fn smoke_event_flow_timeout() {
         let bus = EventBus::new(32);
         let mut rx = bus.subscribe();
-        bus.publish(Event::Agent(AgentEvent::StateChanged { from: AgentState::Idle, to: AgentState::Thinking }));
-        let ev = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await.unwrap().unwrap();
+        bus.publish(Event::Agent(AgentEvent::StateChanged {
+            from: AgentState::Idle,
+            to: AgentState::Thinking,
+        }));
+        let ev = tokio::time::timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
         assert!(matches!(ev, Event::Agent(_)));
     }
 
@@ -372,8 +444,15 @@ mod tests {
     async fn smoke_response_stream_timeout() {
         let (tx, mut rx) = mpsc::channel::<ResponseEvent>(8);
         let id = MessageId::new();
-        tx.send(ResponseEvent::MessageDelta { id, delta: "ok".into() }).await.unwrap();
-        let msg = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await.unwrap();
+        tx.send(ResponseEvent::MessageDelta {
+            id,
+            delta: "ok".into(),
+        })
+        .await
+        .unwrap();
+        let msg = tokio::time::timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .unwrap();
         assert!(matches!(msg, Some(ResponseEvent::MessageDelta { .. })));
     }
 
@@ -386,7 +465,9 @@ mod tests {
             bus.publish(Event::Memory(MemoryEvent::Compacted));
         }
         for _ in 0..3 {
-            let _ = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await.unwrap();
+            let _ = tokio::time::timeout(Duration::from_millis(50), rx.recv())
+                .await
+                .unwrap();
         }
     }
 
@@ -395,10 +476,21 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<ResponseEvent>(2);
         let id = MessageId::new();
         // Fill to capacity, sender should not panic.
-        let _ = tx.try_send(ResponseEvent::MessageDelta { id, delta: "a".into() });
-        let _ = tx.try_send(ResponseEvent::MessageDelta { id, delta: "b".into() });
+        let _ = tx.try_send(ResponseEvent::MessageDelta {
+            id,
+            delta: "a".into(),
+        });
+        let _ = tx.try_send(ResponseEvent::MessageDelta {
+            id,
+            delta: "b".into(),
+        });
         // Third send should fail (full), not block or panic.
-        assert!(tx.try_send(ResponseEvent::MessageDelta { id, delta: "c".into() }).is_err());
+        assert!(tx
+            .try_send(ResponseEvent::MessageDelta {
+                id,
+                delta: "c".into()
+            })
+            .is_err());
         // Drain.
         while rx.try_recv().is_ok() {}
     }

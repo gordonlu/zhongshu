@@ -7,11 +7,11 @@ use zhongshu_core::event::AgentState;
 
 fn state_color(state: AgentState) -> (u8, u8, u8) {
     match state {
-        AgentState::Idle => (100, 140, 255),                     // soft indigo
-        AgentState::Thinking => (255, 200, 60),                  // warm amber
-        AgentState::Executing => (255, 100, 60),                 // coral
-        AgentState::Done { success: true } => (60, 200, 100),    // green
-        AgentState::Done { success: false } => (220, 60, 60),    // red
+        AgentState::Idle => (100, 140, 255),     // soft indigo
+        AgentState::Thinking => (255, 200, 60),  // warm amber
+        AgentState::Executing => (255, 100, 60), // coral
+        AgentState::Done { success: true } => (60, 200, 100), // green
+        AgentState::Done { success: false } => (220, 60, 60), // red
     }
 }
 
@@ -19,16 +19,16 @@ fn state_color(state: AgentState) -> (u8, u8, u8) {
 
 #[cfg(not(target_os = "linux"))]
 mod orb {
+    use crate::render;
     use std::num::NonZeroU32;
     use std::sync::Arc;
     use std::time::Instant;
     use winit::dpi::{LogicalSize, PhysicalPosition};
     use winit::event_loop::ActiveEventLoop;
-    use winit::window::{Window, WindowAttributes, WindowId, WindowLevel};
     #[cfg(target_os = "windows")]
     use winit::platform::windows::WindowAttributesExtWindows;
+    use winit::window::{Window, WindowAttributes, WindowId, WindowLevel};
     use zhongshu_core::event::AgentState;
-    use crate::render;
 
     use super::state_color;
 
@@ -186,11 +186,11 @@ mod orb {
 
 #[cfg(target_os = "linux")]
 pub mod tray {
+    use crossbeam_channel::{self, Receiver, Sender};
+    use ksni::TrayMethods;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
-    use crossbeam_channel::{self, Receiver, Sender};
-    use ksni::TrayMethods;
     use winit::event_loop::ActiveEventLoop;
     use winit::window::WindowId;
     use zhongshu_core::event::AgentState;
@@ -292,49 +292,57 @@ pub mod tray {
         let sizes: &[i32] = &[16, 22, 24, 32, 48, 64];
         let (r, g, b) = state_color(state);
 
-        sizes.iter().map(|size| {
-            let period = match state {
-                AgentState::Idle => 2.0,
-                AgentState::Thinking => 1.2,
-                AgentState::Executing => 0.5,
-                AgentState::Done { .. } => 2.0,
-            };
-            let breath = 1.0 + ((phase / 50.0 * std::f64::consts::TAU / period).sin() * 0.12) as f32;
+        sizes
+            .iter()
+            .map(|size| {
+                let period = match state {
+                    AgentState::Idle => 2.0,
+                    AgentState::Thinking => 1.2,
+                    AgentState::Executing => 0.5,
+                    AgentState::Done { .. } => 2.0,
+                };
+                let breath =
+                    1.0 + ((phase / 50.0 * std::f64::consts::TAU / period).sin() * 0.12) as f32;
 
-            let mut data = vec![0u8; (size * size * 4) as usize];
-            let cx = *size as f32 / 2.0;
-            let cy = *size as f32 / 2.0;
-            let outer_r = (*size as f32 / 2.0 - 1.0) * breath;
-            let core_r = (outer_r * 0.5).max(2.0);
-            let outer_r2 = outer_r.powi(2);
-            let core_r2 = core_r.powi(2);
+                let mut data = vec![0u8; (size * size * 4) as usize];
+                let cx = *size as f32 / 2.0;
+                let cy = *size as f32 / 2.0;
+                let outer_r = (*size as f32 / 2.0 - 1.0) * breath;
+                let core_r = (outer_r * 0.5).max(2.0);
+                let outer_r2 = outer_r.powi(2);
+                let core_r2 = core_r.powi(2);
 
-            for y in 0..*size {
-                for x in 0..*size {
-                    let idx = ((y * size + x) * 4) as usize;
-                    let dx = x as f32 - cx;
-                    let dy = y as f32 - cy;
-                    let dist2 = dx * dx + dy * dy;
-                    if dist2 > outer_r2 {
-                        continue;
+                for y in 0..*size {
+                    for x in 0..*size {
+                        let idx = ((y * size + x) * 4) as usize;
+                        let dx = x as f32 - cx;
+                        let dy = y as f32 - cy;
+                        let dist2 = dx * dx + dy * dy;
+                        if dist2 > outer_r2 {
+                            continue;
+                        }
+
+                        let dist = dist2.sqrt();
+                        let frac = 1.0 - (dist / outer_r);
+                        let alpha = if dist2 <= core_r2 {
+                            255
+                        } else {
+                            (255.0 * frac * frac) as u8
+                        };
+
+                        data[idx] = alpha;
+                        data[idx + 1] = r;
+                        data[idx + 2] = g;
+                        data[idx + 3] = b;
                     }
-
-                    let dist = dist2.sqrt();
-                    let frac = 1.0 - (dist / outer_r);
-                    let alpha = if dist2 <= core_r2 {
-                        255
-                    } else {
-                        (255.0 * frac * frac) as u8
-                    };
-
-                    data[idx] = alpha;
-                    data[idx + 1] = r;
-                    data[idx + 2] = g;
-                    data[idx + 3] = b;
                 }
-            }
-            ksni::Icon { width: *size, height: *size, data }
-        }).collect()
+                ksni::Icon {
+                    width: *size,
+                    height: *size,
+                    data,
+                }
+            })
+            .collect()
     }
 
     impl TrayIndicator {

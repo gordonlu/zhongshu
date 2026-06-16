@@ -9,6 +9,7 @@ pub struct OpenAiProvider {
     api_key: String,
     base_url: String,
     model: String,
+    embedding_model: Option<String>,
 }
 
 impl OpenAiProvider {
@@ -18,6 +19,7 @@ impl OpenAiProvider {
             api_key: api_key.into(),
             base_url: "https://api.deepseek.com/v1".into(),
             model: model.into(),
+            embedding_model: None,
         }
     }
 
@@ -26,48 +28,79 @@ impl OpenAiProvider {
         self
     }
 
+    pub fn with_embedding_model(mut self, model: impl Into<String>) -> Self {
+        self.embedding_model = Some(model.into());
+        self
+    }
+
     fn build_body(&self, mut request: ChatCompletionRequest) -> serde_json::Value {
         request.model = self.model.clone();
         request.stream = false;
 
-        let msgs: Vec<serde_json::Value> = request.messages.iter().map(|m| {
-            let mut obj = serde_json::json!({ "role": m.role.as_str(), "content": m.content });
-            if let Some(ref tc) = m.tool_calls {
-                obj["tool_calls"] = serde_json::to_value(tc).unwrap();
-            }
-            if let Some(ref tci) = m.tool_call_id {
-                obj["tool_call_id"] = serde_json::Value::String(tci.clone());
-            }
-            obj
-        }).collect();
+        let msgs: Vec<serde_json::Value> = request
+            .messages
+            .iter()
+            .map(|m| {
+                let mut obj = serde_json::json!({ "role": m.role.as_str(), "content": m.content });
+                if let Some(ref tc) = m.tool_calls {
+                    obj["tool_calls"] = serde_json::to_value(tc).unwrap();
+                }
+                if let Some(ref tci) = m.tool_call_id {
+                    obj["tool_call_id"] = serde_json::Value::String(tci.clone());
+                }
+                obj
+            })
+            .collect();
 
-        let mut body = serde_json::json!({ "model": request.model, "messages": msgs, "stream": false });
-        if let Some(ref tools) = request.tools { body["tools"] = serde_json::to_value(tools).unwrap(); }
-        if let Some(ref tc) = request.tool_choice { body["tool_choice"] = serde_json::Value::String(tc.clone()); }
-        if let Some(t) = request.temperature { body["temperature"] = serde_json::Value::from(t); }
-        if let Some(mt) = request.max_tokens { body["max_tokens"] = serde_json::Value::from(mt); }
+        let mut body =
+            serde_json::json!({ "model": request.model, "messages": msgs, "stream": false });
+        if let Some(ref tools) = request.tools {
+            body["tools"] = serde_json::to_value(tools).unwrap();
+        }
+        if let Some(ref tc) = request.tool_choice {
+            body["tool_choice"] = serde_json::Value::String(tc.clone());
+        }
+        if let Some(t) = request.temperature {
+            body["temperature"] = serde_json::Value::from(t);
+        }
+        if let Some(mt) = request.max_tokens {
+            body["max_tokens"] = serde_json::Value::from(mt);
+        }
         body
     }
 
     fn build_stream_body(&self, mut request: ChatCompletionRequest) -> serde_json::Value {
         request.model = self.model.clone();
 
-        let msgs: Vec<serde_json::Value> = request.messages.iter().map(|m| {
-            let mut obj = serde_json::json!({ "role": m.role.as_str(), "content": m.content });
-            if let Some(ref tc) = m.tool_calls {
-                obj["tool_calls"] = serde_json::to_value(tc).unwrap();
-            }
-            if let Some(ref tci) = m.tool_call_id {
-                obj["tool_call_id"] = serde_json::Value::String(tci.clone());
-            }
-            obj
-        }).collect();
+        let msgs: Vec<serde_json::Value> = request
+            .messages
+            .iter()
+            .map(|m| {
+                let mut obj = serde_json::json!({ "role": m.role.as_str(), "content": m.content });
+                if let Some(ref tc) = m.tool_calls {
+                    obj["tool_calls"] = serde_json::to_value(tc).unwrap();
+                }
+                if let Some(ref tci) = m.tool_call_id {
+                    obj["tool_call_id"] = serde_json::Value::String(tci.clone());
+                }
+                obj
+            })
+            .collect();
 
-        let mut body = serde_json::json!({ "model": request.model, "messages": msgs, "stream": true });
-        if let Some(ref tools) = request.tools { body["tools"] = serde_json::to_value(tools).unwrap(); }
-        if let Some(ref tc) = request.tool_choice { body["tool_choice"] = serde_json::Value::String(tc.clone()); }
-        if let Some(t) = request.temperature { body["temperature"] = serde_json::Value::from(t); }
-        if let Some(mt) = request.max_tokens { body["max_tokens"] = serde_json::Value::from(mt); }
+        let mut body =
+            serde_json::json!({ "model": request.model, "messages": msgs, "stream": true });
+        if let Some(ref tools) = request.tools {
+            body["tools"] = serde_json::to_value(tools).unwrap();
+        }
+        if let Some(ref tc) = request.tool_choice {
+            body["tool_choice"] = serde_json::Value::String(tc.clone());
+        }
+        if let Some(t) = request.temperature {
+            body["temperature"] = serde_json::Value::from(t);
+        }
+        if let Some(mt) = request.max_tokens {
+            body["max_tokens"] = serde_json::Value::from(mt);
+        }
         body
     }
 }
@@ -78,23 +111,37 @@ impl LlmProvider for OpenAiProvider {
         let body = self.build_body(request);
         let url = format!("{}/chat/completions", self.base_url);
 
-        let response = self.client.post(&url)
+        let response = self
+            .client
+            .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .json(&body)
-            .send().await
+            .send()
+            .await
             .map_err(|e| anyhow::anyhow!("DeepSeek API request failed: {e}"))?;
 
         let status = response.status();
-        let text = response.text().await
+        let text = response
+            .text()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to read response body: {e}"))?;
 
         if !status.is_success() {
-            return Err(anyhow::anyhow!("DeepSeek API error {}: {}", status, text.chars().take(500).collect::<String>()));
+            return Err(anyhow::anyhow!(
+                "DeepSeek API error {}: {}",
+                status,
+                text.chars().take(500).collect::<String>()
+            ));
         }
 
-        serde_json::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("Failed to parse DeepSeek response: {} — body: {}", e, text.chars().take(300).collect::<String>()))
+        serde_json::from_str(&text).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to parse DeepSeek response: {} — body: {}",
+                e,
+                text.chars().take(300).collect::<String>()
+            )
+        })
     }
 
     async fn stream_chat(
@@ -105,17 +152,24 @@ impl LlmProvider for OpenAiProvider {
         let body = self.build_stream_body(request);
         let url = format!("{}/chat/completions", self.base_url);
 
-        let response = self.client.post(&url)
+        let response = self
+            .client
+            .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .json(&body)
-            .send().await
+            .send()
+            .await
             .map_err(|e| anyhow::anyhow!("DeepSeek stream request failed: {e}"))?;
 
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("DeepSeek API error {}: {}", status, text.chars().take(500).collect::<String>()));
+            return Err(anyhow::anyhow!(
+                "DeepSeek API error {}: {}",
+                status,
+                text.chars().take(500).collect::<String>()
+            ));
         }
 
         let mut stream = response.bytes_stream();
@@ -207,14 +261,17 @@ impl LlmProvider for OpenAiProvider {
         let tool_calls: Vec<StreamToolCall> = {
             let mut indices: Vec<u32> = tool_call_bufs.keys().copied().collect();
             indices.sort();
-            indices.into_iter().filter_map(|i| {
-                let acc = tool_call_bufs.remove(&i)?;
-                Some(StreamToolCall {
-                    id: acc.id.unwrap_or_default(),
-                    name: acc.name.unwrap_or_default(),
-                    arguments: acc.args,
+            indices
+                .into_iter()
+                .filter_map(|i| {
+                    let acc = tool_call_bufs.remove(&i)?;
+                    Some(StreamToolCall {
+                        id: acc.id.unwrap_or_default(),
+                        name: acc.name.unwrap_or_default(),
+                        arguments: acc.args,
+                    })
                 })
-            }).collect()
+                .collect()
         };
 
         on_event(StreamEvent::Finished {
@@ -226,7 +283,65 @@ impl LlmProvider for OpenAiProvider {
         Ok(())
     }
 
-    fn model_name(&self) -> &str { &self.model }
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+
+    async fn embed(&self, input: &str) -> anyhow::Result<Vec<f32>> {
+        let model = self
+            .embedding_model
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no embedding model configured"))?;
+        let url = format!("{}/embeddings", self.base_url);
+
+        let body = serde_json::json!({
+            "model": model,
+            "input": input,
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("embedding request failed: {e}"))?;
+
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to read embedding response: {e}"))?;
+
+        if !status.is_success() {
+            return Err(anyhow::anyhow!(
+                "embedding API error {}: {}",
+                status,
+                text.chars().take(500).collect::<String>()
+            ));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct EmbeddingResponse {
+            data: Vec<EmbeddingData>,
+        }
+        #[derive(serde::Deserialize)]
+        struct EmbeddingData {
+            embedding: Vec<f32>,
+        }
+
+        let parsed: EmbeddingResponse = serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("failed to parse embedding response: {e}"))?;
+
+        parsed
+            .data
+            .into_iter()
+            .next()
+            .map(|d| d.embedding)
+            .ok_or_else(|| anyhow::anyhow!("embedding response contained no data"))
+    }
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]

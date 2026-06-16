@@ -13,7 +13,14 @@ impl MemoryCandidateStore {
         MemoryCandidateStore { db }
     }
 
-    pub fn insert(&self, content: &str, memory_type: Option<&str>, confidence: f64, source_type: Option<&str>, source_id: Option<&str>) -> rusqlite::Result<MemoryCandidate> {
+    pub fn insert(
+        &self,
+        content: &str,
+        memory_type: Option<&str>,
+        confidence: f64,
+        source_type: Option<&str>,
+        source_id: Option<&str>,
+    ) -> rusqlite::Result<MemoryCandidate> {
         let conn = self.db.conn()?;
         let mc = MemoryCandidate {
             id: id("mc"),
@@ -43,7 +50,10 @@ impl MemoryCandidateStore {
 
     pub fn update_status(&self, id: &str, status: &str) -> rusqlite::Result<bool> {
         let conn = self.db.conn()?;
-        let n = conn.execute("UPDATE memory_candidates SET status = ?1 WHERE id = ?2", params![status, id])?;
+        let n = conn.execute(
+            "UPDATE memory_candidates SET status = ?1 WHERE id = ?2",
+            params![status, id],
+        )?;
         Ok(n > 0)
     }
 

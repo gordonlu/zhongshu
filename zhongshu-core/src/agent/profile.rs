@@ -89,7 +89,8 @@ impl AgentProfile {
                     None
                 }
             }
-        }).collect()
+        })
+        .collect()
     }
 
     /// 转换为 Worker 运行时使用的 `AgentBudget`。
@@ -115,9 +116,15 @@ pub struct AgentBudgetProfile {
     pub token_limit: usize,
 }
 
-fn default_max_steps() -> usize { 10 }
-fn default_max_tool_calls() -> usize { 5 }
-fn default_token_limit() -> usize { 32_000 }
+fn default_max_steps() -> usize {
+    10
+}
+fn default_max_tool_calls() -> usize {
+    5
+}
+fn default_token_limit() -> usize {
+    32_000
+}
 
 impl AgentBudgetProfile {
     fn from_budget(budget: &AgentBudget) -> Self {
@@ -133,15 +140,36 @@ impl AgentBudgetProfile {
     /// 校验预算值是否在合理范围内，越界则 clamp 并记录警告。
     fn validate(&mut self, context: &str) {
         if self.max_steps < MIN_STEPS || self.max_steps > MAX_STEPS {
-            tracing::warn!(context, field = "max_steps", value = self.max_steps, min = MIN_STEPS, max = MAX_STEPS, "clamping to range");
+            tracing::warn!(
+                context,
+                field = "max_steps",
+                value = self.max_steps,
+                min = MIN_STEPS,
+                max = MAX_STEPS,
+                "clamping to range"
+            );
             self.max_steps = self.max_steps.clamp(MIN_STEPS, MAX_STEPS);
         }
         if self.max_tool_calls < MIN_TOOL_CALLS || self.max_tool_calls > MAX_TOOL_CALLS {
-            tracing::warn!(context, field = "max_tool_calls", value = self.max_tool_calls, min = MIN_TOOL_CALLS, max = MAX_TOOL_CALLS, "clamping to range");
+            tracing::warn!(
+                context,
+                field = "max_tool_calls",
+                value = self.max_tool_calls,
+                min = MIN_TOOL_CALLS,
+                max = MAX_TOOL_CALLS,
+                "clamping to range"
+            );
             self.max_tool_calls = self.max_tool_calls.clamp(MIN_TOOL_CALLS, MAX_TOOL_CALLS);
         }
         if self.token_limit < MIN_TOKEN_LIMIT || self.token_limit > MAX_TOKEN_LIMIT {
-            tracing::warn!(context, field = "token_limit", value = self.token_limit, min = MIN_TOKEN_LIMIT, max = MAX_TOKEN_LIMIT, "clamping to range");
+            tracing::warn!(
+                context,
+                field = "token_limit",
+                value = self.token_limit,
+                min = MIN_TOKEN_LIMIT,
+                max = MAX_TOKEN_LIMIT,
+                "clamping to range"
+            );
             self.token_limit = self.token_limit.clamp(MIN_TOKEN_LIMIT, MAX_TOKEN_LIMIT);
         }
     }
@@ -186,7 +214,11 @@ mod tests {
             "qintianjian",
             "你是一个天气助手。",
             vec!["weather".into(), "calendar".into()],
-            AgentBudget { max_steps: 5, max_tool_calls: 3, token_limit: 10_000 },
+            AgentBudget {
+                max_steps: 5,
+                max_tool_calls: 3,
+                token_limit: 10_000,
+            },
         );
         let json = serde_json::to_string(&p).unwrap();
         let loaded: AgentProfile = serde_json::from_str(&json).unwrap();
@@ -229,8 +261,16 @@ mod tests {
 
     #[test]
     fn budget_conversion() {
-        let p = AgentProfile::new("x", "prompt", vec![],
-            AgentBudget { max_steps: 3, max_tool_calls: 2, token_limit: 5000 });
+        let p = AgentProfile::new(
+            "x",
+            "prompt",
+            vec![],
+            AgentBudget {
+                max_steps: 3,
+                max_tool_calls: 2,
+                token_limit: 5000,
+            },
+        );
         let b = p.to_worker_budget();
         assert_eq!(b.max_steps, 3);
         assert_eq!(b.max_tool_calls, 2);

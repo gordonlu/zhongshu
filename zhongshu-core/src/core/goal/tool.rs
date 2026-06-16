@@ -18,7 +18,9 @@ impl GoalTool {
 
 #[async_trait]
 impl Tool for GoalTool {
-    fn name(&self) -> &str { "goal" }
+    fn name(&self) -> &str {
+        "goal"
+    }
 
     fn description(&self) -> &str {
         "管理长期目标。支持创建、查看、暂停、完成目标。\
@@ -79,24 +81,27 @@ impl Tool for GoalTool {
                     Err(e) => ToolOutput::error(&format!("创建目标失败: {e}")),
                 }
             }
-            "list" => {
-                match self.repo.list_active() {
-                    Ok(goals) => {
-                        let items: Vec<serde_json::Value> = goals.iter().map(|g| json!({
-                            "id": g.id,
-                            "title": g.title,
-                            "type": g.goal_type.as_str(),
-                            "status": g.status.as_str(),
-                        })).collect();
-                        if items.is_empty() {
-                            ToolOutput::success(json!({"goals": [], "note": "暂无活跃目标"}))
-                        } else {
-                            ToolOutput::success(json!({"goals": items}))
-                        }
+            "list" => match self.repo.list_active() {
+                Ok(goals) => {
+                    let items: Vec<serde_json::Value> = goals
+                        .iter()
+                        .map(|g| {
+                            json!({
+                                "id": g.id,
+                                "title": g.title,
+                                "type": g.goal_type.as_str(),
+                                "status": g.status.as_str(),
+                            })
+                        })
+                        .collect();
+                    if items.is_empty() {
+                        ToolOutput::success(json!({"goals": [], "note": "暂无活跃目标"}))
+                    } else {
+                        ToolOutput::success(json!({"goals": items}))
                     }
-                    Err(e) => ToolOutput::error(&format!("读取目标失败: {e}")),
                 }
-            }
+                Err(e) => ToolOutput::error(&format!("读取目标失败: {e}")),
+            },
             "pause" => {
                 let id = match arguments["goal_id"].as_str() {
                     Some(i) => i,

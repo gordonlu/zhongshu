@@ -1,0 +1,624 @@
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use winit::application::ApplicationHandler;
+use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow};
+use winit::window::WindowId;
+
+use zhongshu_core::authority;
+use zhongshu_core::event::{
+    AgentEvent, AgentState, Event, EventBus, EventRx, MessageId, ResponseEvent, ResponseRole,
+    ResponseRx, ResponseTx, TaskEvent, ToolEvent,
+};
+use zhongshu_core::integration::DeeplosslessProxy;
+use zhongshu_message_core::streaming::ControlTokenFilter;
+
+use crate::app::{AgentController, AgentInbox};
+use crate::config::AppConfig;
+use crate::hotkey::HotkeyManager;
+use crate::indicator::Indicator;
+use crate::overlay::{AuthRequest, OverlayHandle};
+
+// ── App state ────────────────────────────────────────────────────────
+
+pub struct ZhongshuApp {
+    pub config: AppConfig,
+    pub controller: Arc<AgentController>,
+    pub proxy: Arc<tokio::sync::Mutex<DeeplosslessProxy>>,
+    pub runtime: tokio::runtime::Runtime,
+    pub inbox: Arc<AgentInbox>,
+    pub indicator: Option<Indicator>,
+    pub indicator_state: AgentState,
+    pub overlay: Option<OverlayHandle>,
+    #[allow(dead_code)]
+    pub event_bus: Arc<EventBus>,
+    pub event_rx: EventRx,
+    #[allow(dead_code)]
+    pub response_tx: ResponseTx,
+    pub response_rx: ResponseRx,
+    pub hotkey: HotkeyManager,
+    pub last_activity: Instant,
+    pub is_dragging: bool,
+    pub cursor_pos: (f64, f64),
+    pub drag_start_cursor: (f64, f64),
+    pub drag_start_win: (i32, i32),
+    pub ctrl_held: bool,
+    pub pending_auth_notified: bool,
+    pub history_cache: Vec<(String, String)>,
+    pub assistant_id: Option<MessageId>,
+    pub filter: ControlTokenFilter,
+    pub task_repo: zhongshu_core::core::TaskRepository,
+}
+
+impl ZhongshuApp {
+    pub fn new(
+        config: AppConfig,
+        controller: Arc<AgentController>,
+        inbox: Arc<AgentInbox>,
+        event_bus: Arc<EventBus>,
+        event_rx: EventRx,
+        response_tx: ResponseTx,
+        response_rx: ResponseRx,
+        proxy: DeeplosslessProxy,
+        runtime: tokio::runtime::Runtime,
+        task_repo: zhongshu_core::core::TaskRepository,
+    ) -> anyhow::Result<Self> {
+        let hotkey = HotkeyManager::new(&config.hotkey).unwrap_or_else(|e| {
+            tracing::warn!("Global hotkey unavailable: {e:#}");
+            HotkeyManager::passive()
+        });
+        Ok(ZhongshuApp {
+            config,
+            controller,
+            inbox,
+            indicator: None,
+            indicator_state: AgentState::Idle,
+            proxy: Arc::new(tokio::sync::Mutex::new(proxy)),
+            runtime,
+            overlay: None,
+            event_bus,
+            event_rx,
+            response_tx,
+            response_rx,
+            hotkey,
+            last_activity: Instant::now(),
+            is_dragging: false,
+            cursor_pos: (0.0, 0.0),
+            drag_start_cursor: (0.0, 0.0),
+            drag_start_win: (0, 0),
+            ctrl_held: false,
+            pending_auth_notified: false,
+            history_cache: Vec::new(),
+            assistant_id: None,
+            filter: ControlTokenFilter::new(),
+            task_repo,
+        })
+    }
+
+    // ── Event reducers ──────────────────────────────────────────────
+
+    fn drain(&mut self) {
+        let activity = self.reduce_events() | self.reduce_responses();
+        self.poll_pending_auth();
+        self.poll_overlay_actions();
+        if activity {
+            self.last_activity = Instant::now();
+        }
+    }
+
+    /// Poll pending actions from overlay IPC.
+    fn poll_overlay_actions(&mut self) {
+        let ov = match self.overlay.as_ref() {
+            Some(ov) => ov,
+            None => return,
+        };
+
+        if let Some(text) = ov.take_input() {
+            self.inbox.submit(text);
+        }
+        if let Some(rid) = ov.take_approve() {
+            authority::approve_pending(&rid);
+        }
+        if let Some(rid) = ov.take_deny() {
+            authority::deny_pending(&rid);
+        }
+        if let Some(p) = ov.take_personality() {
+            let mut cfg = crate::config::load();
+            cfg.agent.personality = p.clone();
+            cfg.agent.personality_selected = true;
+            crate::config::save(&cfg);
+            self.controller
+                .set_system_prompt(cfg.agent.effective_system_prompt());
+        }
+        if let Some(settings) = ov.take_settings() {
+            let mut cfg = crate::config::load();
+            if !settings.api_key.is_empty() {
+                std::env::set_var(&cfg.llm.api_key_env, &settings.api_key);
+            }
+            if !settings.api_base.is_empty() {
+                cfg.llm.api_base = settings.api_base;
+            }
+            if !settings.model.is_empty() {
+                cfg.llm.model = settings.model;
+            }
+            if let Some(port) = settings.proxy_port {
+                if !port.is_empty() {
+                    cfg.deeplossless.proxy_port = port.parse().unwrap_or(8081);
+                }
+            }
+            if let Some(enabled) = settings.bg_enabled {
+                cfg.agent.background.enabled = enabled;
+            }
+            if let Some(interval) = settings.bg_interval {
+                if !interval.is_empty() {
+                    cfg.agent.background.interval_secs = interval.parse().unwrap_or(600);
+                }
+            }
+            if let Some(prompt) = settings.bg_prompt {
+                cfg.agent.background.prompt = prompt;
+            }
+            if let Some(evolve) = settings.auto_evolve {
+                cfg.agent.auto_evolve = evolve;
+            }
+            if settings.personality != "默认" && !settings.personality.is_empty() {
+                cfg.agent.personality = settings.personality;
+                cfg.agent.personality_selected = true;
+                self.controller
+                    .set_system_prompt(cfg.agent.effective_system_prompt());
+            }
+            crate::config::save(&cfg);
+        }
+        if ov.take_new_conversation() {
+            self.delete_all_history();
+        }
+        if ov.take_stop() {
+            self.controller.cancel();
+        }
+        if ov.take_open_settings() {
+            let cfg = crate::config::load();
+            ov.show_settings(&crate::overlay::SettingsConfig {
+                api_key: cfg.llm.api_key(),
+                api_base: cfg.llm.api_base.clone(),
+                model: cfg.llm.model.clone(),
+                personality: cfg.agent.personality.clone(),
+                proxy_port: Some(cfg.deeplossless.proxy_port.to_string()),
+                bg_enabled: Some(cfg.agent.background.enabled),
+                bg_interval: Some(cfg.agent.background.interval_secs.to_string()),
+                bg_prompt: Some(cfg.agent.background.prompt.clone()),
+                auto_evolve: Some(cfg.agent.auto_evolve),
+            });
+        }
+        if ov.take_load_more() {
+            const BATCH_SIZE: usize = 40;
+            let cache_len = self.history_cache.len();
+            if cache_len > 0 {
+                let take = BATCH_SIZE.min(cache_len);
+                let split = cache_len - take;
+                let batch: Vec<(String, String)> = self.history_cache.drain(split..).collect();
+                let has_more = self.history_cache.len() > 0;
+                let entries: Vec<crate::overlay::ChatEntry> = batch
+                    .iter()
+                    .map(|(role, content)| crate::overlay::ChatEntry {
+                        role: if role == "user" {
+                            crate::overlay::EntryRole::User
+                        } else {
+                            crate::overlay::EntryRole::Assistant
+                        },
+                        content: content.clone(),
+                        tool_calls: Vec::new(),
+                    })
+                    .collect();
+                if !entries.is_empty() {
+                    ov.prepend_history(&entries, has_more);
+                }
+            }
+        }
+        let mut refresh = ov.take_list_tasks();
+        if let Some(task_id) = ov.take_cancel_task() {
+            if let Err(e) = self
+                .task_repo
+                .update_status(&task_id, zhongshu_core::core::TaskStatus::Cancelled)
+            {
+                tracing::warn!("cancel task failed: {e}");
+            }
+            refresh = true;
+        }
+        if let Some(task_id) = ov.take_complete_task() {
+            if let Err(e) = self
+                .task_repo
+                .update_status(&task_id, zhongshu_core::core::TaskStatus::Completed)
+            {
+                tracing::warn!("complete task failed: {e}");
+            }
+            refresh = true;
+        }
+        if refresh {
+            let tasks = match self.task_repo.list_pending() {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!("list tasks failed: {e}");
+                    vec![]
+                }
+            };
+            let items: Vec<serde_json::Value> = tasks.iter().map(|t| serde_json::json!({
+                "id": t.id, "title": t.title, "status": t.status.as_str(), "created_at": t.created_at,
+            })).collect();
+            ov.show_tasks(&items);
+        }
+        if ov.take_list_tasks() {
+            let tasks = match self.task_repo.list_pending() {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!("list tasks failed: {e}");
+                    vec![]
+                }
+            };
+            let items: Vec<serde_json::Value> = tasks
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "id": t.id,
+                        "title": t.title,
+                        "status": t.status.as_str(),
+                        "created_at": t.created_at,
+                    })
+                })
+                .collect();
+            ov.show_tasks(&items);
+        }
+    }
+
+    /// Poll for pending authority requests and show in overlay.
+    fn poll_pending_auth(&mut self) {
+        if let Some(req) = zhongshu_core::authority::peek_pending() {
+            if !self.pending_auth_notified {
+                self.pending_auth_notified = true;
+                let title = if req.source.is_empty() {
+                    "需要授权".into()
+                } else {
+                    format!("需要授权 · {}", req.source)
+                };
+                let _ = zhongshu_core::desktop::notification::show_urgent(
+                    &title,
+                    &format!("{} - {}", req.tool, req.command),
+                );
+            }
+            let request = AuthRequest {
+                request_id: req.id.clone(),
+                tool: req.tool.clone(),
+                source: req.source.clone(),
+                command: req.command.clone(),
+            };
+            if let Some(ref ov) = self.overlay {
+                ov.show_auth(&request);
+            }
+        } else {
+            self.pending_auth_notified = false;
+        }
+    }
+
+    fn reduce_events(&mut self) -> bool {
+        let mut active = false;
+        loop {
+            match self.event_rx.try_recv() {
+                Ok(ev) => {
+                    active = true;
+                    match ev {
+                        Event::Agent(AgentEvent::StateChanged { from: _, to }) => {
+                            if self.config.agent.desktop_notification {
+                                if let AgentState::Done { success } = to {
+                                    if success {
+                                        let _ = zhongshu_core::desktop::notification::show(
+                                            "完成",
+                                            "任务完成",
+                                        );
+                                    } else {
+                                        let _ = zhongshu_core::desktop::notification::show(
+                                            "失败",
+                                            "任务出错",
+                                        );
+                                    }
+                                }
+                            }
+                            self.indicator_state = to;
+                            if let Some(ind) = self.indicator.as_mut() {
+                                ind.set_state(to);
+                            }
+                        }
+                        Event::Tool(ToolEvent::Started { name }) => {
+                            self.indicator_state = AgentState::Executing;
+                            if let Some(ind) = self.indicator.as_mut() {
+                                ind.set_state(AgentState::Executing);
+                            }
+                            if let Some(ref ov) = self.overlay {
+                                ov.toast(&format!("工具调用: {name}"));
+                            }
+                        }
+                        Event::Tool(ToolEvent::Completed { name, success }) => {
+                            if let Some(ref ov) = self.overlay {
+                                ov.toast(&format!(
+                                    "工具完成: {name} {}",
+                                    if success { "✓" } else { "✗" }
+                                ));
+                            }
+                        }
+                        Event::Task(TaskEvent::Triggered { title, .. }) => {
+                            if self.config.agent.desktop_notification {
+                                let _ =
+                                    zhongshu_core::desktop::notification::show("任务触发", &title);
+                            }
+                        }
+                        Event::Task(TaskEvent::Completed { title, .. }) => {
+                            if self.config.agent.desktop_notification {
+                                let _ =
+                                    zhongshu_core::desktop::notification::show("任务完成", &title);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
+                    tracing::warn!("event bus lagged: {n} events dropped");
+                    active = true;
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Closed)
+                | Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+            }
+        }
+        active
+    }
+
+    fn reduce_responses(&mut self) -> bool {
+        let mut active = false;
+        while let Ok(ev) = self.response_rx.try_recv() {
+            active = true;
+            match ev {
+                ResponseEvent::MessageStarted { id, role } => {
+                    if matches!(role, ResponseRole::Assistant) {
+                        self.assistant_id = Some(id);
+                        if let Some(ref ov) = self.overlay {
+                            ov.set_state("thinking");
+                        }
+                    } else {
+                        self.assistant_id = None;
+                        self.filter = ControlTokenFilter::new();
+                    }
+                }
+                ResponseEvent::MessageDelta { id, delta } => {
+                    if self.assistant_id.map(|aid| aid == id).unwrap_or(false) {
+                        let cleaned = self.filter.feed(&delta);
+                        if !cleaned.is_empty() {
+                            if let Some(ref ov) = self.overlay {
+                                ov.push_delta(&cleaned);
+                            }
+                        }
+                    }
+                }
+                ResponseEvent::MessageCompleted { id } => {
+                    if self.assistant_id.map(|aid| aid == id).unwrap_or(false) {
+                        if let Some(ref ov) = self.overlay {
+                            ov.complete_message();
+                        }
+                        self.filter.flush();
+                        self.assistant_id = None;
+                    }
+                }
+            }
+        }
+        active
+    }
+
+    // ── Overlay management ──────────────────────────────────────────
+
+    pub fn delete_all_history(&self) {
+        self.controller.set_chat_history(Vec::new());
+        self.runtime.block_on(async {
+            self.proxy.lock().await.delete_chat_history().await;
+        });
+        if let Some(ref ov) = self.overlay {
+            ov.clear_chat();
+        }
+    }
+
+    pub fn try_open_overlay(&mut self, _el: &ActiveEventLoop) {
+        if let Some(ref ov) = self.overlay {
+            ov.show_window(self.config.ui.overlay_width, self.config.ui.overlay_height);
+            return;
+        }
+        let ov = crate::overlay::show(self.config.ui.overlay_width, self.config.ui.overlay_height);
+        // Load previous conversation from lcm.db and send to JS
+        let proxy = self.proxy.clone();
+        let history = self
+            .runtime
+            .block_on(async { proxy.lock().await.load_chat_history().await });
+        let cleaned_history: Vec<(String, String)> = history
+            .into_iter()
+            .map(|(role, content)| (role, zhongshu_message_core::strip_control_tokens(&content)))
+            .collect();
+
+        // Show only the last 20 pairs (40 entries) initially; cache older entries for lazy loading.
+        const INITIAL_PAIRS: usize = 20;
+        let max_initial = INITIAL_PAIRS * 2;
+        let has_more = cleaned_history.len() > max_initial;
+        let (initial, cache) = if has_more {
+            let split = cleaned_history.len() - max_initial;
+            let cache = cleaned_history[..split].to_vec();
+            let initial = cleaned_history[split..].to_vec();
+            (initial, cache)
+        } else {
+            (cleaned_history.clone(), Vec::new())
+        };
+        self.history_cache = cache;
+
+        // Full history (all entries) goes to controller for LLM context.
+        self.controller.set_chat_history(cleaned_history);
+
+        let entries: Vec<crate::overlay::ChatEntry> = initial
+            .iter()
+            .map(|(role, content)| crate::overlay::ChatEntry {
+                role: if role == "user" {
+                    crate::overlay::EntryRole::User
+                } else {
+                    crate::overlay::EntryRole::Assistant
+                },
+                content: content.clone(),
+                tool_calls: Vec::new(),
+            })
+            .collect();
+        if !entries.is_empty() {
+            ov.set_history(&entries, has_more);
+        }
+        self.overlay = Some(ov);
+    }
+
+    pub fn new_conversation(&mut self, _el: &ActiveEventLoop) {
+        self.delete_all_history();
+    }
+}
+
+// ── ApplicationHandler (winit event loop) ────────────────────────────
+
+impl ApplicationHandler for ZhongshuApp {
+    fn resumed(&mut self, el: &ActiveEventLoop) {
+        self.indicator = Some(Indicator::create(el, self.config.ui.orb_size));
+    }
+    fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        self.drain();
+        let orb_id = self.indicator.as_ref().and_then(|i| i.window_id());
+        #[allow(unused)]
+        let on_orb = orb_id == Some(id);
+        match event {
+            WindowEvent::CloseRequested => {
+                if orb_id == Some(id) {
+                    el.exit();
+                } else {
+                    // GTK overlay handles its own close
+                }
+            }
+            WindowEvent::RedrawRequested => {
+                if orb_id == Some(id) {
+                    self.indicator.as_mut().unwrap().render();
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button,
+                ..
+            } => {
+                if on_orb && button == MouseButton::Left {
+                    if let Some(w) = self.indicator.as_ref().unwrap().window() {
+                        if let Ok(p) = w.outer_position() {
+                            self.drag_start_win = (p.x, p.y);
+                            self.drag_start_cursor = self.cursor_pos;
+                            self.is_dragging = true;
+                        }
+                    }
+                }
+                if on_orb && button == MouseButton::Right {
+                    match crate::show_context_menu(self.indicator.as_ref().unwrap().window()) {
+                        crate::MenuAction::NewConversation => self.new_conversation(el),
+                        crate::MenuAction::Quit => el.exit(),
+                        crate::MenuAction::None => {}
+                    }
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
+                if on_orb {
+                    self.is_dragging = false;
+                    if let Some(ind) = self.indicator.as_ref() {
+                        ind.save_position();
+                    }
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                if on_orb && self.is_dragging {
+                    let dx = position.x - self.cursor_pos.0;
+                    let dy = position.y - self.cursor_pos.1;
+                    if let Some(w) = self.indicator.as_ref().unwrap().window() {
+                        if let Ok(p) = w.outer_position() {
+                            let _ = w.set_outer_position(winit::dpi::PhysicalPosition::new(
+                                p.x + dx as i32,
+                                p.y + dy as i32,
+                            ));
+                        }
+                    }
+                }
+                self.cursor_pos = (position.x, position.y);
+            }
+            WindowEvent::ModifiersChanged(m) => {
+                self.ctrl_held = m.state().control_key();
+            }
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic: false,
+                ..
+            } if self.ctrl_held
+                && event.state == ElementState::Pressed
+                && event.logical_key == "q" =>
+            {
+                el.exit();
+            }
+            WindowEvent::Focused(true) => {
+                // GTK overlay handles its own focus/IME
+            }
+            _ => {}
+        }
+    }
+    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        self.drain();
+
+        if self.hotkey.try_recv().is_some() {
+            self.try_open_overlay(el);
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let mut tray_events = Vec::new();
+            if let Some(Indicator::Tray(t)) = self.indicator.as_mut() {
+                while let Ok(ev) = t.rx.try_recv() {
+                    tray_events.push(ev);
+                }
+            }
+            for ev in tray_events {
+                match ev {
+                    crate::indicator::tray::TrayEvent::OpenOverlay => self.try_open_overlay(el),
+                    crate::indicator::tray::TrayEvent::NewConversation => self.new_conversation(el),
+                    crate::indicator::tray::TrayEvent::Quit => {
+                        tracing::info!("tray quit");
+                        el.exit();
+                    }
+                }
+            }
+        }
+
+        // Notification click → focus overlay
+        if zhongshu_core::desktop::notification::consume_focus_request() {
+            self.try_open_overlay(el);
+        }
+
+        // Streaming timeout — warn only, don't kill the message
+        let elapsed = self.last_activity.elapsed().as_secs();
+        let timeout = self.config.agent.streaming_timeout_secs;
+        if !matches!(self.indicator_state, AgentState::Idle) && elapsed > timeout {
+            tracing::warn!(
+                "streaming timeout after {elapsed}s (limit {timeout}s), agent still running"
+            );
+            self.last_activity = Instant::now();
+        }
+
+        let idle = matches!(self.indicator_state, AgentState::Idle);
+        let tray_active = cfg!(target_os = "linux");
+        el.set_control_flow(if self.overlay.is_some() || !idle {
+            ControlFlow::Poll
+        } else if tray_active {
+            ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(200))
+        } else {
+            ControlFlow::Wait
+        });
+    }
+}

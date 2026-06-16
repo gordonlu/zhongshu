@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Context;
 
 use zhongshu_core::agent::llm::{Message, OpenAiProvider};
-use zhongshu_core::agent::{AgentBudget, AgentRuntime, AgentCallbacks, StopReason, run_agent};
+use zhongshu_core::agent::{run_agent, AgentBudget, AgentCallbacks, AgentRuntime, StopReason};
 use zhongshu_core::tool::default_registry;
 
 const SYSTEM_PROMPT: &str = "\
@@ -53,8 +53,7 @@ async fn main() -> anyhow::Result<()> {
         .without_time()
         .init();
 
-    let api_key = std::env::var("DEEPSEEK_API_KEY")
-        .context("请设置环境变量 DEEPSEEK_API_KEY")?;
+    let api_key = std::env::var("DEEPSEEK_API_KEY").context("请设置环境变量 DEEPSEEK_API_KEY")?;
 
     let model = std::env::var("ZHONGSHU_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".into());
 
@@ -68,43 +67,65 @@ async fn main() -> anyhow::Result<()> {
         .register(zhongshu_core::tool::screenshot::ScreenshotTool)
         .register(zhongshu_core::tool::automation::AutomationTool);
 
-    let budget = AgentBudget { max_steps: 30, max_tool_calls: 20, token_limit: 128_000 };
+    let budget = AgentBudget {
+        max_steps: 30,
+        max_tool_calls: 20,
+        token_limit: 128_000,
+    };
 
     loop {
         print!("\n中书 > ");
         io::stdout().flush()?;
 
         let mut input = String::new();
-        if io::stdin().read_line(&mut input).is_err() { break; }
+        if io::stdin().read_line(&mut input).is_err() {
+            break;
+        }
         let input = input.trim().to_string();
-        if input.is_empty() { continue; }
+        if input.is_empty() {
+            continue;
+        }
 
         match input.as_str() {
-            "/exit" | "/quit" => { println!("再见。"); break; }
+            "/exit" | "/quit" => {
+                println!("再见。");
+                break;
+            }
             "/help" => {
                 println!("  /exit, /quit  退出");
                 println!("  /budget       执行预算");
                 continue;
             }
             "/budget" => {
-                println!("max_steps={} max_tool_calls={} token_limit={}",
-                    budget.max_steps, budget.max_tool_calls, budget.token_limit);
+                println!(
+                    "max_steps={} max_tool_calls={} token_limit={}",
+                    budget.max_steps, budget.max_tool_calls, budget.token_limit
+                );
                 continue;
             }
             _ => {}
         }
 
-        let messages = vec![
-            Message::system(SYSTEM_PROMPT),
-            Message::user(input.clone()),
-        ];
+        let messages = vec![Message::system(SYSTEM_PROMPT), Message::user(input.clone())];
 
-        let runtime = AgentRuntime::new(provider.clone(), tools.clone(), model.clone(), budget.clone());
+        let runtime = AgentRuntime::new(
+            provider.clone(),
+            tools.clone(),
+            model.clone(),
+            budget.clone(),
+        );
         let callbacks = AgentCallbacks {
-            on_text: Box::new(move |text| { print!("{text}"); io::stdout().flush().ok(); }),
-            on_tool_start: Box::new(move |tool| { status_line(tool, true); }),
+            on_text: Box::new(move |text| {
+                print!("{text}");
+                io::stdout().flush().ok();
+            }),
+            on_tool_start: Box::new(move |tool| {
+                status_line(tool, true);
+            }),
             on_tool_done: Box::new(move |_tool, success| {
-                if !success { status_line(_tool, false); }
+                if !success {
+                    status_line(_tool, false);
+                }
             }),
         };
 
@@ -116,7 +137,10 @@ async fn main() -> anyhow::Result<()> {
                 if r.stop_reason != StopReason::Finished {
                     println!("[停止: {:?}]", r.stop_reason);
                 }
-                println!("── {} 次工具 · {} tokens ──", r.tool_calls_made, r.estimated_tokens);
+                println!(
+                    "── {} 次工具 · {} tokens ──",
+                    r.tool_calls_made, r.estimated_tokens
+                );
             }
             Err(e) => eprintln!("错误: {e}"),
         }

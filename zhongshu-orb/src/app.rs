@@ -1,27 +1,25 @@
+use std::collections::VecDeque;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::collections::VecDeque;
-use std::io::Write;
 use std::time::Duration;
 
 const KEEP_COMPLETED_GOALS: usize = 20;
 const AGENT_TIMEOUT: Duration = Duration::from_secs(300);
+use crate::agent::AgentMemory;
+use crate::config;
+use tokio::sync::RwLock;
 use zhongshu_core::agent::llm::{Message, OpenAiProvider};
 use zhongshu_core::agent::{
-    AgentBudget, AgentRuntime, AgentCallbacks, AgentProfile, Worker, run_agent,
+    run_agent, AgentBudget, AgentCallbacks, AgentProfile, AgentRuntime, Worker,
 };
 use zhongshu_core::event::{
-    AgentState,
-    Event, AgentEvent, ToolEvent,
-    ResponseEvent, ResponseRole, MessageId,
-    EventBus, ResponseTx,
+    AgentEvent, AgentState, Event, EventBus, MessageId, ResponseEvent, ResponseRole, ResponseTx,
+    ToolEvent,
 };
-use zhongshu_core::tool::ToolRegistry;
 use zhongshu_core::task::TaskQueue;
-use tokio::sync::RwLock;
-use crate::agent::{AgentMemory};
-use crate::config;
+use zhongshu_core::tool::ToolRegistry;
 
 // ── Session persistence ─────────────────────────────────────────────
 
@@ -63,14 +61,18 @@ impl AgentController {
         provider: OpenAiProvider,
         tools: ToolRegistry,
         model: String,
-    #[allow(dead_code)]
-    session: SessionState,
+        #[allow(dead_code)] session: SessionState,
         system_prompt: String,
         profile_path: PathBuf,
     ) -> Self {
         let memory = AgentMemory::load(&profile_path);
         AgentController {
-            event_bus, response_tx, provider, tools, model, session,
+            event_bus,
+            response_tx,
+            provider,
+            tools,
+            model,
+            session,
             system_prompt: Mutex::new(system_prompt),
             history: Arc::new(Mutex::new(Vec::new())),
             state: Arc::new(RwLock::new(AgentState::Idle)),
@@ -119,8 +121,13 @@ impl AgentController {
 
         // User approval keywords → approve pending authority requests.
         let trimmed = input.trim().to_lowercase();
-        if matches!(trimmed.as_str(), "yes" | "y" | "可以" | "确认" | "同意" | "好" | "是") {
-            zhongshu_core::authority::approve_pending();
+        if matches!(
+            trimmed.as_str(),
+            "yes" | "y" | "可以" | "确认" | "同意" | "好" | "是"
+        ) {
+            if let Some(req) = zhongshu_core::authority::peek_pending() {
+                zhongshu_core::authority::approve_pending(&req.id);
+            }
         }
 
         self.emit_start(&input);
@@ -145,14 +152,23 @@ impl AgentController {
 
     fn emit_start(&self, input: &str) {
         let uid = MessageId::new();
-        let _ = self.response_tx.try_send(ResponseEvent::MessageStarted { id: uid, role: ResponseRole::User });
-        let _ = self.response_tx.try_send(ResponseEvent::MessageDelta { id: uid, delta: input.to_string() });
-        let _ = self.response_tx.try_send(ResponseEvent::MessageCompleted { id: uid });
+        let _ = self.response_tx.try_send(ResponseEvent::MessageStarted {
+            id: uid,
+            role: ResponseRole::User,
+        });
+        let _ = self.response_tx.try_send(ResponseEvent::MessageDelta {
+            id: uid,
+            delta: input.to_string(),
+        });
+        let _ = self
+            .response_tx
+            .try_send(ResponseEvent::MessageCompleted { id: uid });
 
-        self.event_bus.publish(Event::Agent(AgentEvent::StateChanged {
-            from: AgentState::Idle,
-            to: AgentState::Thinking,
-        }));
+        self.event_bus
+            .publish(Event::Agent(AgentEvent::StateChanged {
+                from: AgentState::Idle,
+                to: AgentState::Thinking,
+            }));
     }
 
     fn spawn_task(&self, input: String) {
@@ -171,7 +187,12 @@ impl AgentController {
 
         let handle = tokio::spawn(async move {
             let aid = MessageId::new();
-            let _ = tx.send(ResponseEvent::MessageStarted { id: aid, role: ResponseRole::Assistant }).await;
+            let _ = tx
+                .send(ResponseEvent::MessageStarted {
+                    id: aid,
+                    role: ResponseRole::Assistant,
+                })
+                .await;
 
             let mut msgs = vec![Message::system(&sys)];
             if !profile_ctx.is_empty() {
@@ -196,7 +217,10 @@ impl AgentController {
                     Box::new(move |x: &str| {
                         if !x.is_empty() {
                             tracing::debug!(len = x.len(), "on_text");
-                            let _ = tx.try_send(ResponseEvent::MessageDelta { id: aid, delta: x.to_string() });
+                            let _ = tx.try_send(ResponseEvent::MessageDelta {
+                                id: aid,
+                                delta: x.to_string(),
+                            });
                         } else {
                             tracing::debug!("on_text empty");
                         }
@@ -205,26 +229,41 @@ impl AgentController {
                 on_tool_start: {
                     let eb = eb.clone();
                     Box::new(move |name: &str| {
-                        eb.publish(Event::Tool(ToolEvent::Started { name: name.to_string() }));
+                        eb.publish(Event::Tool(ToolEvent::Started {
+                            name: name.to_string(),
+                        }));
                     })
                 },
                 on_tool_done: {
                     let eb = eb.clone();
                     Box::new(move |name: &str, ok: bool| {
-                        eb.publish(Event::Tool(ToolEvent::Completed { name: name.to_string(), success: ok }));
+                        eb.publish(Event::Tool(ToolEvent::Completed {
+                            name: name.to_string(),
+                            success: ok,
+                        }));
                     })
                 },
             };
 
-            let r = tokio::time::timeout(AGENT_TIMEOUT, run_agent(&runtime, msgs, Some(Arc::new(callbacks)), &input)).await;
+            let r = tokio::time::timeout(
+                AGENT_TIMEOUT,
+                run_agent(&runtime, msgs, Some(Arc::new(callbacks)), &input),
+            )
+            .await;
 
             match r {
                 Ok(Ok(rr)) => {
                     let last = rr.messages.last().map(|x| x.content.as_str()).unwrap_or("");
                     // Append to conversation history for next turn.
-                    history_arc.lock().unwrap().push(("user".to_string(), input.clone()));
+                    history_arc
+                        .lock()
+                        .unwrap()
+                        .push(("user".to_string(), input.clone()));
                     if !last.is_empty() {
-                        history_arc.lock().unwrap().push(("assistant".to_string(), last.to_string()));
+                        history_arc
+                            .lock()
+                            .unwrap()
+                            .push(("assistant".to_string(), last.to_string()));
                     }
                     // Extract todos and goal completions.
                     memory.extract_todos(last);
@@ -238,7 +277,12 @@ impl AgentController {
                     }));
                 }
                 Ok(Err(e)) => {
-                    let _ = tx.send(ResponseEvent::MessageDelta { id: aid, delta: format!("{e}") }).await;
+                    let _ = tx
+                        .send(ResponseEvent::MessageDelta {
+                            id: aid,
+                            delta: format!("{e}"),
+                        })
+                        .await;
                     let _ = tx.send(ResponseEvent::MessageCompleted { id: aid }).await;
                     eb.publish(Event::Agent(AgentEvent::StateChanged {
                         from: AgentState::Thinking,
@@ -247,7 +291,12 @@ impl AgentController {
                 }
                 Err(_) => {
                     tracing::warn!("agent task timed out after 300s");
-                    let _ = tx.send(ResponseEvent::MessageDelta { id: aid, delta: "[连接超时: 300s 无响应]".into() }).await;
+                    let _ = tx
+                        .send(ResponseEvent::MessageDelta {
+                            id: aid,
+                            delta: "[连接超时: 300s 无响应]".into(),
+                        })
+                        .await;
                     let _ = tx.send(ResponseEvent::MessageCompleted { id: aid }).await;
                     eb.publish(Event::Agent(AgentEvent::StateChanged {
                         from: AgentState::Thinking,
@@ -289,7 +338,9 @@ impl AgentInbox {
     /// Must be called after the tokio runtime is active.
     pub fn start(&self) {
         let mut spawned = self.listener_spawned.lock().unwrap();
-        if *spawned { return; }
+        if *spawned {
+            return;
+        }
         *spawned = true;
         drop(spawned);
         Self::spawn_listener(self.controller.clone(), self.queue.clone());
@@ -322,7 +373,10 @@ impl AgentInbox {
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
-                    Ok(Event::Agent(AgentEvent::StateChanged { to: AgentState::Idle, .. })) => {
+                    Ok(Event::Agent(AgentEvent::StateChanged {
+                        to: AgentState::Idle,
+                        ..
+                    })) => {
                         while let Some(msg) = queue.lock().unwrap().pop_front() {
                             controller.run(msg);
                         }
@@ -339,13 +393,18 @@ impl AgentInbox {
 }
 
 /// Append a worker report to ~/.config/zhongshu/check_log.jsonl.
+/// Automatically truncates when the file exceeds 10 MB (keeping the last 5000 lines).
 fn log_check(report: &zhongshu_core::agent::report::Report) {
     let path = config::config_dir().join("check_log.jsonl");
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let line = serde_json::json!({
             "ts": ts,
             "task_id": report.task_id,
@@ -355,6 +414,31 @@ fn log_check(report: &zhongshu_core::agent::report::Report) {
             "attention": format!("{:?}", report.attention),
         });
         let _ = writeln!(f, "{line}");
+    }
+    truncate_jsonl(&path, 10 * 1024 * 1024, 5000);
+}
+
+/// Keep a JSONL file under `max_bytes` by keeping only the last `keep_lines` lines.
+fn truncate_jsonl(path: &std::path::Path, max_bytes: u64, keep_lines: usize) {
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    if meta.len() <= max_bytes {
+        return;
+    }
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.len() <= keep_lines {
+        return;
+    }
+    if let Ok(mut f) = std::fs::File::create(path) {
+        for line in lines.iter().rev().take(keep_lines).rev() {
+            let _ = writeln!(f, "{line}");
+        }
     }
 }
 

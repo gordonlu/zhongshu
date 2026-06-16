@@ -12,11 +12,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use zhongshu_core::agent::attention::AttentionLevel;
 use zhongshu_core::agent::llm::{
-    ChatCompletionRequest, ChatCompletionResponse, FinalChoice, LlmProvider,
-    Message, StreamEvent,
+    ChatCompletionRequest, ChatCompletionResponse, FinalChoice, LlmProvider, Message, StreamEvent,
 };
 use zhongshu_core::agent::{
-    AttentionManager, AgentBudget, AgentProfile, AgentRuntime, Report, Worker,
+    AgentBudget, AgentProfile, AgentRuntime, AttentionManager, Report, Worker,
 };
 use zhongshu_core::event::{Event, EventBus, SourceEvent};
 use zhongshu_core::rule::{Rule, RuleCondition, RuleEngine, RuleTask};
@@ -206,14 +205,19 @@ async fn smoke_rule_engine_ignores_non_matching_events() {
 
     // Non-tick events should not produce tasks.
     engine.process(&Event::Memory(zhongshu_core::event::MemoryEvent::Compacted));
-    engine.process(&Event::Agent(zhongshu_core::event::AgentEvent::StateChanged {
-        from: zhongshu_core::event::AgentState::Idle,
-        to: zhongshu_core::event::AgentState::Thinking,
-    }));
+    engine.process(&Event::Agent(
+        zhongshu_core::event::AgentEvent::StateChanged {
+            from: zhongshu_core::event::AgentState::Idle,
+            to: zhongshu_core::event::AgentState::Thinking,
+        },
+    ));
 
-    let task_found = tokio::time::timeout(std::time::Duration::from_millis(200), queue.recv())
-        .await;
-    assert!(task_found.is_err(), "non-matching events should not produce tasks");
+    let task_found =
+        tokio::time::timeout(std::time::Duration::from_millis(200), queue.recv()).await;
+    assert!(
+        task_found.is_err(),
+        "non-matching events should not produce tasks"
+    );
 }
 
 #[tokio::test]
@@ -269,5 +273,8 @@ async fn smoke_attention_manager_drains_digest_queue() {
 
     let drained = mgr.drain_digest();
     assert_eq!(drained.len(), 3);
-    assert!(mgr.drain_digest().is_empty(), "second drain should be empty");
+    assert!(
+        mgr.drain_digest().is_empty(),
+        "second drain should be empty"
+    );
 }

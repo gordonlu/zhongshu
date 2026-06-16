@@ -39,7 +39,9 @@ pub struct ControlTokenFilter {
 
 impl ControlTokenFilter {
     pub fn new() -> Self {
-        Self { pending: String::new() }
+        Self {
+            pending: String::new(),
+        }
     }
 
     /// Feed a text delta through the filter.
@@ -266,16 +268,16 @@ mod tests {
     fn test_control_filter_split_token() {
         let mut msg = StreamingMessage::new();
         msg.append("Hello");
-        msg.append("</final_answer");  // split: still starts with </final_answer → buffered
-        msg.append(">");               // completes the tag → stripped
+        msg.append("</final_answer"); // split: still starts with </final_answer → buffered
+        msg.append(">"); // completes the tag → stripped
         assert_eq!(msg.buffer, "Hello");
     }
 
     #[test]
     fn test_control_filter_split_close_tag_across_chunks() {
         let mut msg = StreamingMessage::new();
-        msg.append("正文。</");           // `</` deferred as control prefix
-        msg.append("final_answer>");     // completes → stripped
+        msg.append("正文。</"); // `</` deferred as control prefix
+        msg.append("final_answer>"); // completes → stripped
         assert_eq!(msg.buffer, "正文。");
     }
 
@@ -291,7 +293,10 @@ mod tests {
         let mut msg = StreamingMessage::new();
         msg.append("Hello world");
         assert!(!msg.blocks.is_empty());
-        assert!(matches!(msg.blocks.blocks[0], MessageBlock::Paragraph { .. }));
+        assert!(matches!(
+            msg.blocks.blocks[0],
+            MessageBlock::Paragraph { .. }
+        ));
     }
 
     #[test]
@@ -299,7 +304,11 @@ mod tests {
         let mut msg = StreamingMessage::new();
         msg.append("Some code:\n```rust\nfn main() {}\n```");
         assert!(msg.blocks.len() >= 2);
-        let code_block = msg.blocks.blocks.iter().find(|b| matches!(b, MessageBlock::Code { .. }));
+        let code_block = msg
+            .blocks
+            .blocks
+            .iter()
+            .find(|b| matches!(b, MessageBlock::Code { .. }));
         assert!(code_block.is_some());
         if let Some(MessageBlock::Code { language, content }) = code_block {
             assert_eq!(language.as_deref(), Some("rust"));
@@ -319,9 +328,16 @@ mod tests {
     fn test_observation_table_separated() {
         let mut msg = StreamingMessage::new();
         msg.append("<observation tool=\"system_info\">\n{\n  \"os\": \"Linux\"\n}\n</observation>\n\n| 类别 | 项目 | 值 |\n|---|---|---|\n| CPU | AMD | x64 |\n| RAM | 32G | DDR5 |");
-        assert!(!msg.buffer.contains("<observation"), "observation tags stripped");
+        assert!(
+            !msg.buffer.contains("<observation"),
+            "observation tags stripped"
+        );
         assert!(msg.buffer.contains("CPU"), "table data preserved");
-        let table = msg.blocks.blocks.iter().find(|b| matches!(b, MessageBlock::Table { .. }));
+        let table = msg
+            .blocks
+            .blocks
+            .iter()
+            .find(|b| matches!(b, MessageBlock::Table { .. }));
         assert!(table.is_some(), "should have a table block");
         if let Some(MessageBlock::Table { headers, rows }) = table {
             assert_eq!(headers.len(), 3);
@@ -342,20 +358,32 @@ mod tests {
     #[test]
     fn test_divergence_from_old_blocks() {
         let old = vec![
-            MessageBlock::Paragraph { text: "Hello".into() },
-            MessageBlock::Paragraph { text: "World".into() },
+            MessageBlock::Paragraph {
+                text: "Hello".into(),
+            },
+            MessageBlock::Paragraph {
+                text: "World".into(),
+            },
         ];
         let new = vec![
-            MessageBlock::Paragraph { text: "Hello".into() },
-            MessageBlock::Paragraph { text: "Universe".into() },
+            MessageBlock::Paragraph {
+                text: "Hello".into(),
+            },
+            MessageBlock::Paragraph {
+                text: "Universe".into(),
+            },
         ];
         assert_eq!(find_divergence(&old, &new), 1);
     }
 
     #[test]
     fn test_divergence_same() {
-        let old = vec![MessageBlock::Paragraph { text: "Hello".into() }];
-        let new = vec![MessageBlock::Paragraph { text: "Hello".into() }];
+        let old = vec![MessageBlock::Paragraph {
+            text: "Hello".into(),
+        }];
+        let new = vec![MessageBlock::Paragraph {
+            text: "Hello".into(),
+        }];
         assert_eq!(find_divergence(&old, &new), 1);
     }
 
@@ -372,7 +400,11 @@ mod tests {
     fn test_list_block() {
         let mut msg = StreamingMessage::new();
         msg.append("- item 1\n- item 2\n- item 3");
-        let has_list = msg.blocks.blocks.iter().any(|b| matches!(b, MessageBlock::List { .. }));
+        let has_list = msg
+            .blocks
+            .blocks
+            .iter()
+            .any(|b| matches!(b, MessageBlock::List { .. }));
         assert!(has_list);
     }
 
@@ -380,7 +412,11 @@ mod tests {
     fn test_blockquote() {
         let mut msg = StreamingMessage::new();
         msg.append("> quoted text");
-        let has_quote = msg.blocks.blocks.iter().any(|b| matches!(b, MessageBlock::Blockquote { .. }));
+        let has_quote = msg
+            .blocks
+            .blocks
+            .iter()
+            .any(|b| matches!(b, MessageBlock::Blockquote { .. }));
         assert!(has_quote);
     }
 
@@ -438,21 +474,21 @@ mod tests {
         // Exact split from the user's log: <final_answer>你好，说事。</final_answer>
         // Log shows: < | final | _answer | > | 你好 | 。 | 请问 | ... | </ | final | _answer | >
         let deltas = [
-            "<",         // preview=<
-            "final",     // preview=final
-            "_answer",   // preview=_answer
-            ">",         // preview=>
-            "你好",      // 你好
-            "。",        // 。
+            "<",       // preview=<
+            "final",   // preview=final
+            "_answer", // preview=_answer
+            ">",       // preview=>
+            "你好",    // 你好
+            "。",      // 。
             "请问",
             "有什么",
             "需要",
             "处理的",
             "？",
-            "</",        // preview=</
-            "final",     // preview=final
-            "_answer",   // preview=_answer
-            ">",         // preview=>
+            "</",      // preview=</
+            "final",   // preview=final
+            "_answer", // preview=_answer
+            ">",       // preview=>
         ];
         let mut filter = super::ControlTokenFilter::new();
         let mut combined = String::new();
@@ -466,7 +502,10 @@ mod tests {
         assert!(!combined.contains("<"), "bare '<' leaked: '{combined}'");
         assert!(!combined.contains(">"), "bare '>' leaked: '{combined}'");
         assert!(combined.contains("你好"), "content preserved");
-        assert!(combined.contains("请问有什么需要处理的"), "full content preserved");
+        assert!(
+            combined.contains("请问有什么需要处理的"),
+            "full content preserved"
+        );
         println!("ACTUAL OK: \"{combined}\"");
     }
 
@@ -481,7 +520,7 @@ mod tests {
     #[test]
     fn test_control_filter_split_at_less_than() {
         let mut msg = StreamingMessage::new();
-        msg.append("hello<");           // `<` at chunk boundary — deferred to pending
+        msg.append("hello<"); // `<` at chunk boundary — deferred to pending
         msg.append("final_answer>world"); // completes the tag → stripped
         msg.append("</final_answer>");
         assert_eq!(msg.buffer, "helloworld");
@@ -490,8 +529,8 @@ mod tests {
     #[test]
     fn test_control_filter_less_than_preserved_when_not_control() {
         let mut msg = StreamingMessage::new();
-        msg.append("a <");              // `<` at boundary, deferred
-        msg.append("b> c");            // not a control token → released
+        msg.append("a <"); // `<` at boundary, deferred
+        msg.append("b> c"); // not a control token → released
         assert_eq!(msg.buffer, "a <b> c");
     }
 
@@ -506,8 +545,8 @@ mod tests {
     fn test_complete_discards_unclosed_pending() {
         let mut msg = StreamingMessage::new();
         msg.append("Hello");
-        msg.append("</final_answer");  // unclosed — goes to pending
-        msg.complete();                // flush discards pending
+        msg.append("</final_answer"); // unclosed — goes to pending
+        msg.complete(); // flush discards pending
         assert_eq!(msg.buffer, "Hello");
         assert_eq!(msg.state, MessageState::Complete);
     }
@@ -518,15 +557,15 @@ mod tests {
         msg.append("Hello");
         msg.append("<final_answer>World");
         msg.append("</final_answer>");
-        msg.append("\n\n");  // trailing whitespace
+        msg.append("\n\n"); // trailing whitespace
         assert_eq!(msg.buffer, "HelloWorld");
     }
 
     #[test]
     fn test_control_filter_partial_at_start() {
         let mut msg = StreamingMessage::new();
-        msg.append("</final_answer");  // starts with </final_answer → buffered
-        msg.append(">rest");           // tag completed → stripped, "rest" passes through
+        msg.append("</final_answer"); // starts with </final_answer → buffered
+        msg.append(">rest"); // tag completed → stripped, "rest" passes through
         assert_eq!(msg.buffer, "rest");
     }
 }

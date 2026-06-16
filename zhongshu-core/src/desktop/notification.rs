@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use notify_rust::Notification;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Global flag: user clicked an urgent notification (wants to focus overlay).
 static FOCUS_OVERLAY: AtomicBool = AtomicBool::new(false);

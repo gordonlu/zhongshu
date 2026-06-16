@@ -8,7 +8,9 @@ pub struct AutomationTool;
 
 #[async_trait]
 impl Tool for AutomationTool {
-    fn name(&self) -> &str { "desktop" }
+    fn name(&self) -> &str {
+        "desktop"
+    }
     fn description(&self) -> &str {
         "Desktop automation: type text, press keys, move/click mouse."
     }
@@ -29,7 +31,9 @@ impl Tool for AutomationTool {
 
     async fn execute(&self, arguments: &serde_json::Value) -> ToolOutput {
         match authority::check_tool("automation") {
-            CheckResult::Deny { reason } => return ToolOutput::error(format!("[BLOCKED] {reason}")),
+            CheckResult::Deny { reason } => {
+                return ToolOutput::error(format!("[BLOCKED] {reason}"))
+            }
             CheckResult::RequireAuth { request } => {
                 authority::set_pending(&request.tool, &request.program, &request.command, "");
                 return ToolOutput::auth_required(&request.program, &request.command);
@@ -43,10 +47,15 @@ impl Tool for AutomationTool {
         };
 
         #[cfg(any(target_os = "linux", target_os = "windows"))]
-        { return exec_automation(action, arguments); }
+        {
+            return exec_automation(action, arguments);
+        }
 
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-        { let _ = (action, arguments); ToolOutput::error("此平台不支持桌面自动化") }
+        {
+            let _ = (action, arguments);
+            ToolOutput::error("此平台不支持桌面自动化")
+        }
     }
 }
 
@@ -110,9 +119,19 @@ fn exec_automation(action: &str, arguments: &serde_json::Value) -> ToolOutput {
 fn sim_key_combo(enigo: &mut enigo::Enigo, combo: &str) -> anyhow::Result<()> {
     let parts: Vec<&str> = combo.split('+').map(|s| s.trim()).collect();
     let mut keys: Vec<enigo::Key> = Vec::new();
-    for part in &parts { keys.push(parse_key(part)?); }
-    for key in &keys { enigo.key(*key, enigo::Direction::Press).map_err(|e| anyhow::anyhow!("{e}"))?; }
-    for key in keys.iter().rev() { enigo.key(*key, enigo::Direction::Release).map_err(|e| anyhow::anyhow!("{e}"))?; }
+    for part in &parts {
+        keys.push(parse_key(part)?);
+    }
+    for key in &keys {
+        enigo
+            .key(*key, enigo::Direction::Press)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+    for key in keys.iter().rev() {
+        enigo
+            .key(*key, enigo::Direction::Release)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
     Ok(())
 }
 

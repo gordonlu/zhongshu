@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::core::task::TaskRepository;
 use crate::core::models::*;
+use crate::core::task::TaskRepository;
 use crate::tool::{Tool, ToolOutput};
 
 #[derive(Clone)]
@@ -18,7 +18,9 @@ impl TaskTool {
 
 #[async_trait]
 impl Tool for TaskTool {
-    fn name(&self) -> &str { "task" }
+    fn name(&self) -> &str {
+        "task"
+    }
 
     fn description(&self) -> &str {
         "管理具体执行任务。任务从目标派生。\
@@ -83,38 +85,44 @@ impl Tool for TaskTool {
                     Err(e) => ToolOutput::error(&format!("创建任务失败: {e}")),
                 }
             }
-            "list" => {
-                match self.repo.list_pending() {
-                    Ok(tasks) => {
-                        let items: Vec<serde_json::Value> = tasks.iter().map(|t| json!({
-                            "id": t.id,
-                            "title": t.title,
-                            "status": t.status.as_str(),
-                            "goal_id": t.goal_id,
-                        })).collect();
-                        if items.is_empty() {
-                            ToolOutput::success(json!({"tasks": [], "note": "暂无待办任务"}))
-                        } else {
-                            ToolOutput::success(json!({"tasks": items}))
-                        }
-                    }
-                    Err(e) => ToolOutput::error(&format!("读取任务失败: {e}")),
-                }
-            }
-            "recent" => {
-                match self.repo.list_recent(20) {
-                    Ok(tasks) => {
-                        let items: Vec<serde_json::Value> = tasks.iter().map(|t| json!({
-                            "id": t.id,
-                            "title": t.title,
-                            "status": t.status.as_str(),
-                            "created_at": t.created_at,
-                        })).collect();
+            "list" => match self.repo.list_pending() {
+                Ok(tasks) => {
+                    let items: Vec<serde_json::Value> = tasks
+                        .iter()
+                        .map(|t| {
+                            json!({
+                                "id": t.id,
+                                "title": t.title,
+                                "status": t.status.as_str(),
+                                "goal_id": t.goal_id,
+                            })
+                        })
+                        .collect();
+                    if items.is_empty() {
+                        ToolOutput::success(json!({"tasks": [], "note": "暂无待办任务"}))
+                    } else {
                         ToolOutput::success(json!({"tasks": items}))
                     }
-                    Err(e) => ToolOutput::error(&format!("读取任务失败: {e}")),
                 }
-            }
+                Err(e) => ToolOutput::error(&format!("读取任务失败: {e}")),
+            },
+            "recent" => match self.repo.list_recent(20) {
+                Ok(tasks) => {
+                    let items: Vec<serde_json::Value> = tasks
+                        .iter()
+                        .map(|t| {
+                            json!({
+                                "id": t.id,
+                                "title": t.title,
+                                "status": t.status.as_str(),
+                                "created_at": t.created_at,
+                            })
+                        })
+                        .collect();
+                    ToolOutput::success(json!({"tasks": items}))
+                }
+                Err(e) => ToolOutput::error(&format!("读取任务失败: {e}")),
+            },
             "complete" => {
                 let id = match arguments["task_id"].as_str() {
                     Some(i) => i,

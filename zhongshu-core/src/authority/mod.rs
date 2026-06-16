@@ -28,7 +28,9 @@ pub struct ParsedCommand {
 /// Returns `None` if the string is empty or unparseable.
 pub fn parse_command(raw: &str) -> Option<ParsedCommand> {
     let raw = raw.trim();
-    if raw.is_empty() { return None; }
+    if raw.is_empty() {
+        return None;
+    }
 
     let mut program = String::new();
     let mut args = Vec::new();
@@ -64,8 +66,11 @@ pub fn parse_command(raw: &str) -> Option<ParsedCommand> {
             // Collect the redirect target.
             i += 1;
             current.clear();
-            while i < chars.len() && chars[i].is_whitespace() { i += 1; }
-            while i < chars.len() && !chars[i].is_whitespace() && chars[i] != '|' && chars[i] != ';' {
+            while i < chars.len() && chars[i].is_whitespace() {
+                i += 1;
+            }
+            while i < chars.len() && !chars[i].is_whitespace() && chars[i] != '|' && chars[i] != ';'
+            {
                 current.push(chars[i]);
                 i += 1;
             }
@@ -90,8 +95,17 @@ pub fn parse_command(raw: &str) -> Option<ParsedCommand> {
         }
     }
 
-    if program.is_empty() { return None; }
-    Some(ParsedCommand { program, args, has_pipe, has_redirect, has_chaining, targets })
+    if program.is_empty() {
+        return None;
+    }
+    Some(ParsedCommand {
+        program,
+        args,
+        has_pipe,
+        has_redirect,
+        has_chaining,
+        targets,
+    })
 }
 
 /// Collapse `./` and `../` components in a Unix or Windows path.
@@ -103,24 +117,35 @@ fn normalize_path(path: &str) -> String {
     for c in components {
         match c {
             "" | "." => {}
-            ".." => { result.pop(); }
+            ".." => {
+                result.pop();
+            }
             _ => result.push(c),
         }
     }
     if result.is_empty() {
-        if is_windows { format!("{}:\\", path.get(0..2).unwrap_or("C:")) }
-        else { "/".to_string() }
+        if is_windows {
+            format!("{}:\\", path.get(0..2).unwrap_or("C:"))
+        } else {
+            "/".to_string()
+        }
     } else if is_windows && result.len() == 1 && path.ends_with(':') {
         format!("{}:\\", result[0])
     } else {
-        let mut s = if is_windows { String::new() } else { String::from("/") };
+        let mut s = if is_windows {
+            String::new()
+        } else {
+            String::from("/")
+        };
         s.push_str(&result.join(&sep.to_string()));
         s
     }
 }
 
 fn flush_token(current: &mut String, program: &mut String, args: &mut Vec<String>) {
-    if current.is_empty() { return; }
+    if current.is_empty() {
+        return;
+    }
     if program.is_empty() {
         *program = std::mem::take(current);
     } else {
@@ -134,7 +159,9 @@ fn flush_token(current: &mut String, program: &mut String, args: &mut Vec<String
 /// patterns are checked first; platform‑specific additions are
 /// handled by the caller.
 pub fn classify(cmd: &ParsedCommand) -> Risk {
-    if is_blocked(cmd) { return Risk::Blocked; }
+    if is_blocked(cmd) {
+        return Risk::Blocked;
+    }
 
     // Sensitive path protection: any command whose arguments reference
     // private user data (SSH keys, cloud credentials, etc.) requires
@@ -144,8 +171,12 @@ pub fn classify(cmd: &ParsedCommand) -> Risk {
         return Risk::Dangerous;
     }
 
-    if is_dangerous(cmd) { return Risk::Dangerous; }
-    if is_safe(cmd) { return Risk::Safe; }
+    if is_dangerous(cmd) {
+        return Risk::Dangerous;
+    }
+    if is_safe(cmd) {
+        return Risk::Safe;
+    }
     Risk::Moderate
 }
 
@@ -156,18 +187,36 @@ fn is_blocked(cmd: &ParsedCommand) -> bool {
     // ── Direct patterns ──────────────────────────────────────────
     match p {
         // Disk destruction
-        "format" | "mkfs" | "mkfs.ext4" | "mkfs.xfs" | "mkfs.ntfs" | "mkfs.fat" | "diskpart" => return true,
+        "format" | "mkfs" | "mkfs.ext4" | "mkfs.xfs" | "mkfs.ntfs" | "mkfs.fat" | "diskpart" => {
+            return true
+        }
         "dd" if args_str.contains("of=/dev") || args_str.contains("of=\\\\.\\") => return true,
         // System registry deletion (Windows)
-        "reg" if args_str.contains("delete") && (args_str.contains("HKLM") || args_str.contains("HKEY_LOCAL_MACHINE")) => return true,
+        "reg"
+            if args_str.contains("delete")
+                && (args_str.contains("HKLM") || args_str.contains("HKEY_LOCAL_MACHINE")) =>
+        {
+            return true
+        }
         // Recursive root deletion
-        "rm" if has_flag(&cmd.args, "-rf") || has_flag(&cmd.args, "-fr") || has_flag(&cmd.args, "-r") => {
-            if cmd.args.iter().any(|a| a == "/" || a == "/*" || a == "C:\\" || a == "c:\\" || a == "~") {
+        "rm" if has_flag(&cmd.args, "-rf")
+            || has_flag(&cmd.args, "-fr")
+            || has_flag(&cmd.args, "-r") =>
+        {
+            if cmd
+                .args
+                .iter()
+                .any(|a| a == "/" || a == "/*" || a == "C:\\" || a == "c:\\" || a == "~")
+            {
                 return true;
             }
         }
         "del" if has_flag(&cmd.args, "/s") || has_flag(&cmd.args, "/q") => {
-            if cmd.args.iter().any(|a| a.starts_with("C:\\") || a.starts_with("c:\\") || a == "C:" || a == "c:") {
+            if cmd
+                .args
+                .iter()
+                .any(|a| a.starts_with("C:\\") || a.starts_with("c:\\") || a == "C:" || a == "c:")
+            {
                 return true;
             }
         }
@@ -189,7 +238,9 @@ fn is_blocked(cmd: &ParsedCommand) -> bool {
     }
 
     // ── Elevation + destructive args → permanently blocked ───────
-    if is_elevation_program(p) && (elevation_is_destructive(&cmd.args) || elevation_is_blocked_root(&cmd.args)) {
+    if is_elevation_program(p)
+        && (elevation_is_destructive(&cmd.args) || elevation_is_blocked_root(&cmd.args))
+    {
         return true;
     }
 
@@ -227,28 +278,82 @@ fn is_dangerous(cmd: &ParsedCommand) -> bool {
 fn is_safe(cmd: &ParsedCommand) -> bool {
     let p = cmd.program.as_str();
     // Safe read-only commands.
-    matches!(p,
-        "ls" | "dir" | "cat" | "type" | "less" | "more" | "head" | "tail"
-        | "grep" | "rg" | "find" | "wc" | "sort" | "uniq" | "cut" | "awk" | "sed"
-        | "echo" | "printf" | "date" | "whoami" | "id" | "uname" | "hostname"
-        | "pwd" | "cd" | "which" | "where" | "whereis"
-        | "ps" | "top" | "htop" | "df" | "du" | "free" | "uptime"
-        | "ping" | "traceroute" | "nslookup" | "dig" | "curl" | "wget"
-        | "git" | "cargo" | "rustc" | "python" | "node" | "npm" | "pip"
-        | "docker" | "kubectl" | "ssh" | "scp" | "rsync"
-        | "tasklist" | "systeminfo" | "ipconfig"
+    matches!(
+        p,
+        "ls" | "dir"
+            | "cat"
+            | "type"
+            | "less"
+            | "more"
+            | "head"
+            | "tail"
+            | "grep"
+            | "rg"
+            | "find"
+            | "wc"
+            | "sort"
+            | "uniq"
+            | "cut"
+            | "awk"
+            | "sed"
+            | "echo"
+            | "printf"
+            | "date"
+            | "whoami"
+            | "id"
+            | "uname"
+            | "hostname"
+            | "pwd"
+            | "cd"
+            | "which"
+            | "where"
+            | "whereis"
+            | "ps"
+            | "top"
+            | "htop"
+            | "df"
+            | "du"
+            | "free"
+            | "uptime"
+            | "ping"
+            | "traceroute"
+            | "nslookup"
+            | "dig"
+            | "curl"
+            | "wget"
+            | "git"
+            | "cargo"
+            | "rustc"
+            | "python"
+            | "node"
+            | "npm"
+            | "pip"
+            | "docker"
+            | "kubectl"
+            | "ssh"
+            | "scp"
+            | "rsync"
+            | "tasklist"
+            | "systeminfo"
+            | "ipconfig"
     )
 }
 
 fn has_flag(args: &[String], flag: &str) -> bool {
-    args.iter().any(|a| a == flag || a.starts_with(&format!("{flag}=")))
+    args.iter()
+        .any(|a| a == flag || a.starts_with(&format!("{flag}=")))
 }
 
 fn has_elevated_flags(args: &[String]) -> bool {
     let s = args.join(" ");
-    s.contains("-Command") || s.contains("-EncodedCommand") || s.contains("-ExecutionPolicy Bypass")
-        || s.contains("Invoke-Expression") || s.contains("iex") || s.contains("Start-Process")
-        || s.contains("runAs") || s.contains("Verb runAs")
+    s.contains("-Command")
+        || s.contains("-EncodedCommand")
+        || s.contains("-ExecutionPolicy Bypass")
+        || s.contains("Invoke-Expression")
+        || s.contains("iex")
+        || s.contains("Start-Process")
+        || s.contains("runAs")
+        || s.contains("Verb runAs")
 }
 
 fn targets_system_paths(targets: &[String]) -> bool {
@@ -265,12 +370,20 @@ fn args_contain_system_path(args: &[String]) -> bool {
 }
 
 fn is_system_path(p: &str) -> bool {
-    p.starts_with("/etc") || p.starts_with("/boot") || p.starts_with("/sys")
-    || p.starts_with("/proc") || p.starts_with("/usr") || p.starts_with("/lib")
-    || p.starts_with("/bin") || p.starts_with("/sbin")
-    || p.starts_with("C:\\Windows") || p.starts_with("c:\\Windows")
-    || p.starts_with("C:\\Program Files") || p.starts_with("c:\\Program Files")
-    || p.starts_with("C:\\Program Files (x86)") || p.starts_with("c:\\Program Files (x86)")
+    p.starts_with("/etc")
+        || p.starts_with("/boot")
+        || p.starts_with("/sys")
+        || p.starts_with("/proc")
+        || p.starts_with("/usr")
+        || p.starts_with("/lib")
+        || p.starts_with("/bin")
+        || p.starts_with("/sbin")
+        || p.starts_with("C:\\Windows")
+        || p.starts_with("c:\\Windows")
+        || p.starts_with("C:\\Program Files")
+        || p.starts_with("c:\\Program Files")
+        || p.starts_with("C:\\Program Files (x86)")
+        || p.starts_with("c:\\Program Files (x86)")
 }
 
 /// Substrings that indicate a path targets user-private data (SSH keys,
@@ -320,13 +433,25 @@ fn is_sensitive_path(p: &str) -> bool {
 }
 
 const DESTRUCTIVE_PROGRAMS: &[&str] = &[
-    "rm", "rmdir", "dd", "chmod", "chown", "truncate", "fallocate", "tee",
-    "del", "reg", "sc", "icacls", "takeown", "format", "diskpart",
+    "rm",
+    "rmdir",
+    "dd",
+    "chmod",
+    "chown",
+    "truncate",
+    "fallocate",
+    "tee",
+    "del",
+    "reg",
+    "sc",
+    "icacls",
+    "takeown",
+    "format",
+    "diskpart",
 ];
 
 fn is_destructive_program(program: &str) -> bool {
-    DESTRUCTIVE_PROGRAMS.contains(&program)
-        || program.starts_with("mkfs")
+    DESTRUCTIVE_PROGRAMS.contains(&program) || program.starts_with("mkfs")
 }
 
 const ELEVATION_PROGRAMS: &[&str] = &["sudo", "pkexec", "doas"];
@@ -342,11 +467,17 @@ fn has_command_chaining(raw: &str) -> bool {
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
-        if c == '\'' && !in_double { in_single = !in_single; }
-        else if c == '"' && !in_single { in_double = !in_double; }
-        else if !in_single && !in_double {
-            if c == ';' { return true; }
-            if c == '&' && i + 1 < chars.len() && chars[i + 1] == '&' { return true; }
+        if c == '\'' && !in_double {
+            in_single = !in_single;
+        } else if c == '"' && !in_single {
+            in_double = !in_double;
+        } else if !in_single && !in_double {
+            if c == ';' {
+                return true;
+            }
+            if c == '&' && i + 1 < chars.len() && chars[i + 1] == '&' {
+                return true;
+            }
         }
         i += 1;
     }
@@ -361,8 +492,14 @@ fn elevation_is_destructive(args: &[String]) -> bool {
         Some(prog) if is_destructive_program(prog) => {
             let after: Vec<&String> = args.iter().skip_while(|a| *a != prog).skip(1).collect();
             // Check bare path targets.
-            let paths: Vec<String> = after.iter()
-                .filter(|a| a.starts_with('/') || a.starts_with('~') || a.starts_with("C:") || a.starts_with("c:"))
+            let paths: Vec<String> = after
+                .iter()
+                .filter(|a| {
+                    a.starts_with('/')
+                        || a.starts_with('~')
+                        || a.starts_with("C:")
+                        || a.starts_with("c:")
+                })
                 .map(|a| normalize_path(a))
                 .collect();
             if targets_system_paths(&paths) {
@@ -383,11 +520,16 @@ fn elevation_is_destructive(args: &[String]) -> bool {
 /// (e.g. `sudo rm -rf /`).
 fn elevation_is_blocked_root(args: &[String]) -> bool {
     let s = args.join(" ");
-    s.contains("rm -rf /") || s.contains("rm -rf --no-preserve-root /")
-        || s.contains("rm -fr /") || s.contains("rm -fr --no-preserve-root /")
+    s.contains("rm -rf /")
+        || s.contains("rm -rf --no-preserve-root /")
+        || s.contains("rm -fr /")
+        || s.contains("rm -fr --no-preserve-root /")
         || s.contains("dd if=") && s.contains("of=/dev")
-        || s.contains("chmod 0") || s.contains("chown 0:0")
-        || s.starts_with("format") || s.starts_with("mkfs") || s.starts_with("diskpart")
+        || s.contains("chmod 0")
+        || s.contains("chown 0:0")
+        || s.starts_with("format")
+        || s.starts_with("mkfs")
+        || s.starts_with("diskpart")
 }
 
 // ── Authority gate ──────────────────────────────────────────────────
@@ -433,11 +575,20 @@ impl AuthorityGate {
         match risk {
             Risk::Blocked => {
                 let reason = if cmd.has_chaining {
-                    format!("Chained command '{}' is permanently blocked (prevents parser bypass).", cmd.program)
+                    format!(
+                        "Chained command '{}' is permanently blocked (prevents parser bypass).",
+                        cmd.program
+                    )
                 } else if is_elevation_program(&cmd.program) {
-                    format!("Escalated command via '{}' is permanently blocked.", cmd.program)
+                    format!(
+                        "Escalated command via '{}' is permanently blocked.",
+                        cmd.program
+                    )
                 } else {
-                    format!("Operation '{}' targeting system paths is permanently blocked.", cmd.program)
+                    format!(
+                        "Operation '{}' targeting system paths is permanently blocked.",
+                        cmd.program
+                    )
                 };
                 CheckResult::Deny { reason }
             }
@@ -514,7 +665,7 @@ pub struct AuditLog {
 
 #[derive(Debug, Clone)]
 pub struct AuditEntry {
-    pub decision: String,   // ALLOW | BLOCK | GRANT | DENY
+    pub decision: String, // ALLOW | BLOCK | GRANT | DENY
     pub tool: String,
     pub program: String,
     pub command: String,
@@ -532,7 +683,8 @@ impl AuditLog {
     pub fn record(&self, entry: &AuditEntry) {
         let ts = timestamp();
         let reason = entry.reason.as_deref().unwrap_or("-");
-        let line = format!("{ts} {decision} {tool} {program} \"{command}\" {reason}\n",
+        let line = format!(
+            "{ts} {decision} {tool} {program} \"{command}\" {reason}\n",
             ts = ts,
             decision = entry.decision,
             tool = entry.tool,
@@ -540,7 +692,11 @@ impl AuditLog {
             command = entry.command,
             reason = reason,
         );
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&self.path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
             let _ = f.write_all(line.as_bytes());
         }
     }
@@ -562,10 +718,18 @@ static PENDING_AUTH: OnceLock<Mutex<Option<PendingRequest>>> = OnceLock::new();
 /// Full detail of a pending authorisation request (stored for UI display).
 #[derive(Debug, Clone)]
 pub struct PendingRequest {
+    pub id: String,
     pub tool: String,
     pub program: String,
     pub command: String,
     pub source: String,
+}
+
+fn generate_id() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("auth_{:x}_{:x}", now.as_secs(), now.subsec_nanos())
 }
 
 /// Initialise the global authority gate (called once at startup).
@@ -600,6 +764,7 @@ pub fn check_tool(tool: &str) -> CheckResult {
 pub fn set_pending(tool: &str, program: &str, command: &str, source: &str) {
     let cell = PENDING_AUTH.get_or_init(|| Mutex::new(None));
     *cell.lock().unwrap() = Some(PendingRequest {
+        id: generate_id(),
         tool: tool.to_string(),
         program: program.to_string(),
         command: command.to_string(),
@@ -633,17 +798,32 @@ pub fn take_pending() -> Option<PendingRequest> {
     cell.lock().unwrap().take()
 }
 
-/// Deny the last pending auth request (consume and discard).
-pub fn deny_pending() {
+/// Deny a pending auth request matching the given id.
+/// If the id does not match the current pending request, the request is left untouched.
+pub fn deny_pending(id: &str) {
     let cell = PENDING_AUTH.get_or_init(|| Mutex::new(None));
-    let _ = cell.lock().unwrap().take();
+    let mut guard = cell.lock().unwrap();
+    if let Some(ref req) = *guard {
+        if req.id == id {
+            let _ = guard.take();
+        } else {
+            tracing::debug!(expected = %id, actual = %req.id, "deny_pending: id mismatch");
+        }
+    }
 }
 
-/// Approve the last pending auth request (if any).
-pub fn approve_pending() {
+/// Approve a pending auth request matching the given id.
+/// If the id does not match, the pending request is left untouched.
+pub fn approve_pending(id: &str) {
     let cell = PENDING_AUTH.get_or_init(|| Mutex::new(None));
-    if let Some(req) = cell.lock().unwrap().take() {
-        approve(&req.tool, &req.program);
+    let mut guard = cell.lock().unwrap();
+    if let Some(req) = guard.take() {
+        if req.id == id {
+            approve(&req.tool, &req.program);
+        } else {
+            tracing::debug!(expected = %id, actual = %req.id, "approve_pending: id mismatch, restoring");
+            *guard = Some(req);
+        }
     }
 }
 
@@ -757,7 +937,10 @@ mod tests {
     #[test]
     fn gate_disabled_allows_all() {
         let mut gate = AuthorityGate::new(false, 1800);
-        assert!(matches!(gate.check("shell", "rm -rf /"), CheckResult::Allow));
+        assert!(matches!(
+            gate.check("shell", "rm -rf /"),
+            CheckResult::Allow
+        ));
     }
 
     // ── New safety boundary tests ────────────────────────────────
@@ -913,6 +1096,7 @@ mod tests {
         init(AuthorityGate::new(true, 1800));
         set_pending("shell", "rm", "rm -rf ~/temp", "test");
         let req = take_pending().expect("pending set should be retrievable");
+        assert!(!req.id.is_empty(), "pending request must have an id");
         assert_eq!(req.tool, "shell");
         assert_eq!(req.program, "rm");
         assert_eq!(req.command, "rm -rf ~/temp");
@@ -930,9 +1114,29 @@ mod tests {
             }
             _ => panic!("expected RequireAuth"),
         }
-        approve_pending();
+        let id = {
+            let cell = PENDING_AUTH.get_or_init(|| Mutex::new(None));
+            cell.lock().unwrap().as_ref().unwrap().id.clone()
+        };
+        approve_pending(&id);
         // After approval, the tool check passes (cached).
         assert!(matches!(check_tool("screenshot"), CheckResult::Allow));
+    }
+
+    #[test]
+    fn approve_pending_wrong_id_noop() {
+        init(AuthorityGate::new(true, 1800));
+        // Approve/deny with a wrong id must not consume the pending.
+        set_pending("shell", "rm", "rm -rf ~/temp", "test");
+        approve_pending("definitely-wrong-id-that-should-not-match");
+        assert!(is_pending(), "wrong-id approve must be no-op");
+        deny_pending("also-wrong-id");
+        assert!(is_pending(), "wrong-id deny must be no-op");
+        // Clean up with correct id.
+        if let Some(req) = take_pending() {
+            assert!(!req.id.is_empty(), "id must be non-empty");
+            deny_pending(&req.id);
+        }
     }
 
     #[test]

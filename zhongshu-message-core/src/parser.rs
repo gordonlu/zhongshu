@@ -251,9 +251,7 @@ pub fn parse(text: &str) -> BlockTree {
 }
 
 fn markdown_options() -> Options {
-    Options::ENABLE_TABLES
-        | Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_TASKLISTS
+    Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS
 }
 
 #[cfg(test)]
@@ -270,25 +268,37 @@ mod tests {
     #[test]
     fn test_parse_code_block() {
         let tree = parse("```rust\nfn main() {}\n```");
-        assert!(tree.blocks.iter().any(|b| matches!(b, MessageBlock::Code { .. })));
+        assert!(tree
+            .blocks
+            .iter()
+            .any(|b| matches!(b, MessageBlock::Code { .. })));
     }
 
     #[test]
     fn test_parse_heading() {
         let tree = parse("# Title");
-        assert!(matches!(tree.blocks[0], MessageBlock::Heading { level: 1, .. }));
+        assert!(matches!(
+            tree.blocks[0],
+            MessageBlock::Heading { level: 1, .. }
+        ));
     }
 
     #[test]
     fn test_parse_list() {
         let tree = parse("- a\n- b");
-        assert!(tree.blocks.iter().any(|b| matches!(b, MessageBlock::List { .. })));
+        assert!(tree
+            .blocks
+            .iter()
+            .any(|b| matches!(b, MessageBlock::List { .. })));
     }
 
     #[test]
     fn test_parse_blockquote() {
         let tree = parse("> quote");
-        assert!(tree.blocks.iter().any(|b| matches!(b, MessageBlock::Blockquote { .. })));
+        assert!(tree
+            .blocks
+            .iter()
+            .any(|b| matches!(b, MessageBlock::Blockquote { .. })));
     }
 
     #[test]
@@ -296,7 +306,9 @@ mod tests {
         // Without HTML blocks, `<observation>` should not consume
         // the rest of the content.
         let tree = parse("<observation tool=\"sys\">\n{json}\n</observation>\n\nAnswer.");
-        let text: String = tree.blocks.iter()
+        let text: String = tree
+            .blocks
+            .iter()
             .map(|b| match b {
                 MessageBlock::Paragraph { text } => text.clone(),
                 _ => String::new(),
@@ -316,7 +328,10 @@ mod tests {
     #[test]
     fn test_table() {
         let tree = parse("|a|b|\n|---|---|\n|1|2|");
-        assert!(tree.blocks.iter().any(|b| matches!(b, MessageBlock::Table { .. })));
+        assert!(tree
+            .blocks
+            .iter()
+            .any(|b| matches!(b, MessageBlock::Table { .. })));
     }
 
     #[test]
@@ -329,6 +344,9 @@ mod tests {
     fn test_html_does_not_consume() {
         // Without HTML blocks, <tag> should not eat following content
         let tree = parse("<example>hello</example>\n\n# heading");
-        assert!(tree.blocks.iter().any(|b| matches!(b, MessageBlock::Heading { .. })));
+        assert!(tree
+            .blocks
+            .iter()
+            .any(|b| matches!(b, MessageBlock::Heading { .. })));
     }
 }

@@ -2,10 +2,10 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use glib;
+use gtk::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use gtk::prelude::*;
-use glib;
 use wry::WebViewBuilderExtUnix;
 
 // ── Message types ────────────────────────────────────────────────────
@@ -38,6 +38,7 @@ pub enum EntryRole {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthRequest {
+    pub request_id: String,
     pub source: String,
     pub tool: String,
     pub command: String,
@@ -100,8 +101,13 @@ pub(crate) static GTK_TX: once_cell::sync::Lazy<crossbeam_channel::Sender<GtkCom
                                 tracing::warn!("webview eval error: {e}");
                             }
                         }
-                        GtkCommand::Show(w, h) => { window.set_default_size(w as i32, h as i32); window.show_all(); }
-                        GtkCommand::Hide => { window.hide(); }
+                        GtkCommand::Show(w, h) => {
+                            window.set_default_size(w as i32, h as i32);
+                            window.show_all();
+                        }
+                        GtkCommand::Hide => {
+                            window.hide();
+                        }
                     }
                 }
                 glib::ControlFlow::Continue
@@ -113,15 +119,16 @@ pub(crate) static GTK_TX: once_cell::sync::Lazy<crossbeam_channel::Sender<GtkCom
     });
 
 /// Thread-safe IPC handler set by the current OverlayHandle.
-static IPC_HANDLER: once_cell::sync::Lazy<Mutex<Option<Box<dyn Fn(http::Request<String>) + Send>>>> =
-    once_cell::sync::Lazy::new(|| Mutex::new(None));
+static IPC_HANDLER: once_cell::sync::Lazy<
+    Mutex<Option<Box<dyn Fn(http::Request<String>) + Send>>>,
+> = once_cell::sync::Lazy::new(|| Mutex::new(None));
 
 // ── Overlay handle ───────────────────────────────────────────────────
 
 pub struct OverlayHandle {
     pub pending_input: Arc<Mutex<VecDeque<String>>>,
-    pub pending_approve: Arc<Mutex<bool>>,
-    pub pending_deny: Arc<Mutex<bool>>,
+    pub pending_approve: Arc<Mutex<Option<String>>>,
+    pub pending_deny: Arc<Mutex<Option<String>>>,
     pub pending_personality: Arc<Mutex<Option<String>>>,
     pub pending_settings: Arc<Mutex<Option<SettingsConfig>>>,
     pub request_new_conversation: Arc<Mutex<bool>>,
@@ -147,7 +154,10 @@ impl OverlayHandle {
     pub fn send(&self, msg: &serde_json::Value) {
         // Build: window.handleIpc({"type":"delta","content":"..."})
         // serde_json::to_string gives {"type":"delta","content":"..."} which is valid JS object literal
-        let js = format!("window.handleIpc({})", serde_json::to_string(msg).unwrap_or_default());
+        let js = format!(
+            "window.handleIpc({})",
+            serde_json::to_string(msg).unwrap_or_default()
+        );
         self.eval(&js);
     }
 
@@ -202,12 +212,12 @@ impl OverlayHandle {
         self.pending_input.lock().unwrap().pop_front()
     }
 
-    pub fn take_approve(&self) -> bool {
-        std::mem::take(&mut *self.pending_approve.lock().unwrap())
+    pub fn take_approve(&self) -> Option<String> {
+        self.pending_approve.lock().unwrap().take()
     }
 
-    pub fn take_deny(&self) -> bool {
-        std::mem::take(&mut *self.pending_deny.lock().unwrap())
+    pub fn take_deny(&self) -> Option<String> {
+        self.pending_deny.lock().unwrap().take()
     }
 
     pub fn take_personality(&self) -> Option<String> {
@@ -263,8 +273,8 @@ pub fn show(width: f32, height: f32) -> OverlayHandle {
     let _ = *GTK_TX;
 
     let pending_input: Arc<Mutex<VecDeque<String>>> = Default::default();
-    let pending_approve: Arc<Mutex<bool>> = Default::default();
-    let pending_deny: Arc<Mutex<bool>> = Default::default();
+    let pending_approve: Arc<Mutex<Option<String>>> = Default::default();
+    let pending_deny: Arc<Mutex<Option<String>>> = Default::default();
     let pending_personality: Arc<Mutex<Option<String>>> = Default::default();
     let pending_settings: Arc<Mutex<Option<SettingsConfig>>> = Default::default();
     let request_new_conversation: Arc<Mutex<bool>> = Default::default();
@@ -298,30 +308,65 @@ pub fn show(width: f32, height: f32) -> OverlayHandle {
                         pi.lock().unwrap().push_back(text.to_string());
                     }
                 }
-                Some("stop") => { *rs.lock().unwrap() = true; }
-                Some("new_conversation") => { *rnc.lock().unwrap() = true; }
-                Some("approve") => { *pa.lock().unwrap() = true; }
-                Some("deny") => { *pd.lock().unwrap() = true; }
+                Some("stop") => {
+                    *rs.lock().unwrap() = true;
+                }
+                Some("new_conversation") => {
+                    *rnc.lock().unwrap() = true;
+                }
+                Some("approve") => {
+                    let rid = msg["request_id"].as_str().unwrap_or("").to_string();
+                    *pa.lock().unwrap() = Some(rid);
+                }
+                Some("deny") => {
+                    let rid = msg["request_id"].as_str().unwrap_or("").to_string();
+                    *pd.lock().unwrap() = Some(rid);
+                }
                 Some("pick_personality") => {
                     if let Some(p) = msg["personality"].as_str() {
                         *pp.lock().unwrap() = Some(p.to_string());
                     }
                 }
-                        Some("save_settings") => {
-                            if let Some(cfg) = msg["config"].as_object() {
-                                *ps.lock().unwrap() = Some(SettingsConfig {
-                                    api_key: cfg.get("api_key").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                    api_base: cfg.get("api_base").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                    model: cfg.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                    personality: cfg.get("personality").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                    proxy_port: cfg.get("proxy_port").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                                    bg_enabled: cfg.get("bg_enabled").and_then(|v| v.as_bool()),
-                                    bg_interval: cfg.get("bg_interval").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                                    bg_prompt: cfg.get("bg_prompt").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                                    auto_evolve: cfg.get("auto_evolve").and_then(|v| v.as_bool()),
-                                });
-                            }
-                        }
+                Some("save_settings") => {
+                    if let Some(cfg) = msg["config"].as_object() {
+                        *ps.lock().unwrap() = Some(SettingsConfig {
+                            api_key: cfg
+                                .get("api_key")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            api_base: cfg
+                                .get("api_base")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            model: cfg
+                                .get("model")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            personality: cfg
+                                .get("personality")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            proxy_port: cfg
+                                .get("proxy_port")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                            bg_enabled: cfg.get("bg_enabled").and_then(|v| v.as_bool()),
+                            bg_interval: cfg
+                                .get("bg_interval")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                            bg_prompt: cfg
+                                .get("bg_prompt")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                            auto_evolve: cfg.get("auto_evolve").and_then(|v| v.as_bool()),
+                        });
+                    }
+                }
                 Some("open_settings") => {
                     *pos.lock().unwrap() = true;
                 }

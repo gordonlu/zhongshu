@@ -28,7 +28,9 @@ fn run_cmd(cmd: &str, args: &[&str]) -> Result<String, String> {
 
 #[async_trait]
 impl Tool for SearchFilesTool {
-    fn name(&self) -> &str { "search_files" }
+    fn name(&self) -> &str {
+        "search_files"
+    }
     fn description(&self) -> &str {
         "Search for files on the local filesystem by name or pattern. Uses locate > fd > find."
     }
@@ -59,10 +61,16 @@ impl Tool for SearchFilesTool {
 
         if which("locate") {
             let mut args = vec!["-i", query];
-            if let Some(p) = path { args.push(p); }
+            if let Some(p) = path {
+                args.push(p);
+            }
             return match run_cmd("locate", &args) {
                 Ok(out) => {
-                    let results = if out.is_empty() { "未找到匹配文件".to_string() } else { out };
+                    let results = if out.is_empty() {
+                        "未找到匹配文件".to_string()
+                    } else {
+                        out
+                    };
                     ToolOutput::success(json!({ "tool": "locate", "results": results }))
                 }
                 Err(e) => ToolOutput::error(e),
@@ -70,10 +78,16 @@ impl Tool for SearchFilesTool {
         }
         if which("fd") {
             let mut args = vec!["-i", query];
-            if let Some(p) = path { args.push(p); }
+            if let Some(p) = path {
+                args.push(p);
+            }
             return match run_cmd("fd", &args) {
                 Ok(out) => {
-                    let results = if out.is_empty() { "未找到匹配文件".to_string() } else { out };
+                    let results = if out.is_empty() {
+                        "未找到匹配文件".to_string()
+                    } else {
+                        out
+                    };
                     ToolOutput::success(json!({ "tool": "fd", "results": results }))
                 }
                 Err(e) => ToolOutput::error(e),

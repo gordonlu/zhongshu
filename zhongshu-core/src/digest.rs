@@ -33,7 +33,11 @@ impl DigestBuilder {
 
         let worker_names: Vec<&str> = {
             let mut seen = std::collections::BTreeSet::new();
-            reports.iter().filter(|r| seen.insert(r.worker.as_str())).map(|r| r.worker.as_str()).collect()
+            reports
+                .iter()
+                .filter(|r| seen.insert(r.worker.as_str()))
+                .map(|r| r.worker.as_str())
+                .collect()
         };
         let total = reports.len();
 
@@ -52,10 +56,7 @@ impl DigestBuilder {
                 } else {
                     truncated
                 };
-                format!(
-                    "### [{}] {}\n{}\n",
-                    r.worker, r.summary, findings_display
-                )
+                format!("### [{}] {}\n{}\n", r.worker, r.summary, findings_display)
             })
             .collect::<Vec<_>>()
             .join("\n---\n");
@@ -69,16 +70,11 @@ impl DigestBuilder {
             attention: AttentionLevel::Notify,
         };
 
-        info!(
-            worker = "digest",
-            reports = total,
-            "sending digest report"
-        );
+        info!(worker = "digest", reports = total, "sending digest report");
 
-        self.eb
-            .publish(Event::Attention(AttentionEvent::Notify {
-                report: digest_report,
-            }));
+        self.eb.publish(Event::Attention(AttentionEvent::Notify {
+            report: digest_report,
+        }));
     }
 }
 

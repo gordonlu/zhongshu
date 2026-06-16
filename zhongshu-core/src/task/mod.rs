@@ -1,9 +1,9 @@
+use crate::tool::ToolRegistry;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
-use crate::tool::ToolRegistry;
 
 #[derive(Debug, Clone)]
 pub struct Task {
@@ -22,7 +22,10 @@ pub struct TaskQueue {
 impl TaskQueue {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        TaskQueue { tx, rx: Arc::new(tokio::sync::Mutex::new(rx)) }
+        TaskQueue {
+            tx,
+            rx: Arc::new(tokio::sync::Mutex::new(rx)),
+        }
     }
 
     pub fn sender(&self) -> mpsc::UnboundedSender<Task> {
@@ -66,7 +69,12 @@ impl TaskWorker {
             let mut rx = rx.lock().await;
             while let Some(task) = rx.recv().await {
                 info!(task = %task.id, tool = %task.tool, "worker executing task");
-                let output = registry.execute(&task.tool, &serde_json::to_string(&task.arguments).unwrap_or_default()).await;
+                let output = registry
+                    .execute(
+                        &task.tool,
+                        &serde_json::to_string(&task.arguments).unwrap_or_default(),
+                    )
+                    .await;
                 match output.status {
                     crate::tool::ToolStatus::Success => {
                         debug!(task = %task.id, "task succeeded");
@@ -134,21 +142,40 @@ pub struct ReminderTrigger {
 }
 
 impl ReminderTrigger {
-    pub fn new(id: impl Into<String>, message: impl Into<String>, at: chrono::DateTime<chrono::Utc>) -> Self {
-        ReminderTrigger { id: id.into(), message: message.into(), at, fired: false }
+    pub fn new(
+        id: impl Into<String>,
+        message: impl Into<String>,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        ReminderTrigger {
+            id: id.into(),
+            message: message.into(),
+            at,
+            fired: false,
+        }
     }
 
     /// Create a reminder from an RFC 3339 / ISO 8601 timestamp string.
     /// Returns `None` if the string cannot be parsed.
-    pub fn from_rfc3339(id: impl Into<String>, message: impl Into<String>, at: &str) -> Option<Self> {
+    pub fn from_rfc3339(
+        id: impl Into<String>,
+        message: impl Into<String>,
+        at: &str,
+    ) -> Option<Self> {
         let dt = chrono::DateTime::parse_from_rfc3339(at).ok()?;
-        Some(ReminderTrigger::new(id, message, dt.with_timezone(&chrono::Utc)))
+        Some(ReminderTrigger::new(
+            id,
+            message,
+            dt.with_timezone(&chrono::Utc),
+        ))
     }
 }
 
 impl Trigger for ReminderTrigger {
     fn poll(&mut self) -> Option<Task> {
-        if self.fired { return None; }
+        if self.fired {
+            return None;
+        }
         if chrono::Utc::now() >= self.at {
             self.fired = true;
             Some(Task {
@@ -175,15 +202,29 @@ pub struct IntervalTrigger {
 }
 
 impl IntervalTrigger {
-    pub fn new(id: impl Into<String>, tool: impl Into<String>, args: serde_json::Value, interval: Duration) -> Self {
-        IntervalTrigger { id: id.into(), tool: tool.into(), args, interval, last_fired: Some(tokio::time::Instant::now()) }
+    pub fn new(
+        id: impl Into<String>,
+        tool: impl Into<String>,
+        args: serde_json::Value,
+        interval: Duration,
+    ) -> Self {
+        IntervalTrigger {
+            id: id.into(),
+            tool: tool.into(),
+            args,
+            interval,
+            last_fired: Some(tokio::time::Instant::now()),
+        }
     }
 }
 
 impl Trigger for IntervalTrigger {
     fn poll(&mut self) -> Option<Task> {
         let now = tokio::time::Instant::now();
-        if self.last_fired.map_or(true, |last| now.duration_since(last) >= self.interval) {
+        if self
+            .last_fired
+            .map_or(true, |last| now.duration_since(last) >= self.interval)
+        {
             self.last_fired = Some(now);
             Some(Task {
                 id: self.id.clone(),
@@ -205,7 +246,11 @@ pub struct FileWatchTrigger {
 
 impl FileWatchTrigger {
     pub fn new(id: impl Into<String>, path: impl Into<PathBuf>) -> Self {
-        FileWatchTrigger { id: id.into(), path: path.into(), last_modified: None }
+        FileWatchTrigger {
+            id: id.into(),
+            path: path.into(),
+            last_modified: None,
+        }
     }
 
     fn check_modified(&self) -> Option<std::time::SystemTime> {
@@ -262,7 +307,12 @@ mod tests {
 
     #[test]
     fn interval_fires_at_expected_rate() {
-        let mut t = IntervalTrigger::new("tick", "agent", serde_json::json!({"k": "v"}), Duration::from_millis(1));
+        let mut t = IntervalTrigger::new(
+            "tick",
+            "agent",
+            serde_json::json!({"k": "v"}),
+            Duration::from_millis(1),
+        );
         std::thread::sleep(Duration::from_millis(50));
         let task = t.poll().expect("should fire after interval elapses");
         assert_eq!(task.id, "tick");

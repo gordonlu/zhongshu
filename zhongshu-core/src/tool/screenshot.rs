@@ -17,8 +17,12 @@ fn ensure_dir(path: &PathBuf) -> std::io::Result<()> {
 
 #[async_trait]
 impl Tool for ScreenshotTool {
-    fn name(&self) -> &str { "screenshot" }
-    fn description(&self) -> &str { "Capture a screenshot of the primary monitor, save as PNG, and return the file path." }
+    fn name(&self) -> &str {
+        "screenshot"
+    }
+    fn description(&self) -> &str {
+        "Capture a screenshot of the primary monitor, save as PNG, and return the file path."
+    }
 
     fn parameters(&self) -> serde_json::Value {
         json!({ "type": "object", "properties": {} })
@@ -26,7 +30,9 @@ impl Tool for ScreenshotTool {
 
     async fn execute(&self, _arguments: &serde_json::Value) -> ToolOutput {
         match authority::check_tool("screenshot") {
-            CheckResult::Deny { reason } => return ToolOutput::error(format!("[BLOCKED] {reason}")),
+            CheckResult::Deny { reason } => {
+                return ToolOutput::error(format!("[BLOCKED] {reason}"))
+            }
             CheckResult::RequireAuth { request } => {
                 authority::set_pending(&request.tool, &request.program, &request.command, "");
                 return ToolOutput::auth_required(&request.program, &request.command);
@@ -50,7 +56,10 @@ impl Tool for ScreenshotTool {
         };
 
         let mut png_bytes: Vec<u8> = Vec::new();
-        if let Err(e) = image.write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png) {
+        if let Err(e) = image.write_to(
+            &mut std::io::Cursor::new(&mut png_bytes),
+            image::ImageFormat::Png,
+        ) {
             return ToolOutput::error(format!("PNG 编码失败: {e}"));
         }
         let file_size = png_bytes.len();

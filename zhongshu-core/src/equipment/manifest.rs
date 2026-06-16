@@ -141,7 +141,10 @@ mod tests {
         let parsed: Manifest = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.name, "rust-release");
         assert_eq!(parsed.equipment_type, EquipmentType::Workflow);
-        assert_eq!(parsed.permissions.shell.allowed_commands, vec!["cargo", "git"]);
+        assert_eq!(
+            parsed.permissions.shell.allowed_commands,
+            vec!["cargo", "git"]
+        );
     }
 
     #[test]

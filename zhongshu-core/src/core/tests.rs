@@ -1,15 +1,53 @@
 #[cfg(test)]
 mod tests {
+    use crate::agent::llm::{
+        ChatCompletionRequest, ChatCompletionResponse, FinalChoice, LlmProvider, Message, Role,
+        StreamEvent,
+    };
     use crate::core::db::Database;
     use crate::core::goal::GoalRepository;
-    use crate::core::task::TaskRepository;
-    use crate::core::task::TaskPlanner;
-    use crate::core::observation::ObservationStore;
-    use crate::core::suggestion::SuggestionEngine;
-    use crate::core::memory::MemoryPolicy;
     use crate::core::memory::MemoryCandidateStore;
+    use crate::core::memory::MemoryPolicy;
     use crate::core::models::*;
+    use crate::core::observation::ObservationStore;
     use crate::core::scheduler::Scheduler;
+    use crate::core::suggestion::SuggestionEngine;
+    use crate::core::task::TaskPlanner;
+    use crate::core::task::TaskRepository;
+    use async_trait::async_trait;
+
+    struct MockPlannerProvider;
+    #[async_trait]
+    impl LlmProvider for MockPlannerProvider {
+        async fn chat(
+            &self,
+            _request: ChatCompletionRequest,
+        ) -> anyhow::Result<ChatCompletionResponse> {
+            Ok(ChatCompletionResponse {
+                choices: vec![FinalChoice {
+                    message: Message {
+                        role: Role::Assistant,
+                        content: r#"["收集项目数据","撰写报告大纲","编写详细内容","审阅和修改"]"#
+                            .into(),
+                        tool_calls: None,
+                        tool_call_id: None,
+                    },
+                    finish_reason: Some("stop".into()),
+                }],
+                usage: None,
+            })
+        }
+        async fn stream_chat(
+            &self,
+            _request: ChatCompletionRequest,
+            _on_event: Box<dyn FnMut(StreamEvent) + Send>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn model_name(&self) -> &str {
+            "mock"
+        }
+    }
 
     fn test_db() -> Database {
         let dir = std::env::temp_dir();
@@ -39,9 +77,19 @@ mod tests {
             .unwrap()
             .filter_map(|r| r.ok())
             .collect();
-        for t in &["observations", "suggestions", "goals", "tasks", "task_steps",
-                    "task_runs", "artifacts", "task_artifacts", "memory_candidates",
-                    "memories", "events"] {
+        for t in &[
+            "observations",
+            "suggestions",
+            "goals",
+            "tasks",
+            "task_steps",
+            "task_runs",
+            "artifacts",
+            "task_artifacts",
+            "memory_candidates",
+            "memories",
+            "events",
+        ] {
             assert!(tables.contains(&t.to_string()), "table {t} not found");
         }
     }
@@ -52,7 +100,13 @@ mod tests {
     fn goal_create_and_list() {
         let db = test_db();
         let repo = GoalRepository::new(db);
-        let g = repo.create("learn rust", Some("study rust this month"), GoalType::Ongoing).unwrap();
+        let g = repo
+            .create(
+                "learn rust",
+                Some("study rust this month"),
+                GoalType::Ongoing,
+            )
+            .unwrap();
         assert!(g.id.starts_with("goal-"));
         assert_eq!(g.title, "learn rust");
         assert_eq!(g.status, GoalStatus::Active);
@@ -81,7 +135,10 @@ mod tests {
         assert_eq!(repo.get(&g.id).unwrap().unwrap().status, GoalStatus::Paused);
 
         assert!(repo.update_status(&g.id, GoalStatus::Completed).unwrap());
-        assert_eq!(repo.get(&g.id).unwrap().unwrap().status, GoalStatus::Completed);
+        assert_eq!(
+            repo.get(&g.id).unwrap().unwrap().status,
+            GoalStatus::Completed
+        );
 
         assert_eq!(repo.list_active().unwrap().len(), 0);
     }
@@ -124,10 +181,16 @@ mod tests {
         let t = repo.create(None, "test").unwrap();
 
         assert!(repo.update_status(&t.id, TaskStatus::Running).unwrap());
-        assert_eq!(repo.get(&t.id).unwrap().unwrap().status, TaskStatus::Running);
+        assert_eq!(
+            repo.get(&t.id).unwrap().unwrap().status,
+            TaskStatus::Running
+        );
 
         assert!(repo.update_status(&t.id, TaskStatus::Completed).unwrap());
-        assert_eq!(repo.get(&t.id).unwrap().unwrap().status, TaskStatus::Completed);
+        assert_eq!(
+            repo.get(&t.id).unwrap().unwrap().status,
+            TaskStatus::Completed
+        );
     }
 
     #[test]
@@ -148,15 +211,18 @@ mod tests {
 
     // ── Task Planner ─────────────────────────────────────────────────
 
-    #[test]
-    fn planner_generates_steps() {
+    #[tokio::test]
+    async fn planner_generates_steps() {
         let db = test_db();
         let repo = TaskRepository::new(db.clone());
         let planner = TaskPlanner::new(db);
         let t = repo.create(None, "写项目总结报告").unwrap();
-        let steps = planner.plan(&t.id).unwrap();
+        let steps = planner.plan(&t.id, &MockPlannerProvider).await.unwrap();
         assert!(steps.len() >= 3, "expected >=3 steps, got {}", steps.len());
-        assert_eq!(repo.get(&t.id).unwrap().unwrap().status, TaskStatus::Planning);
+        assert_eq!(
+            repo.get(&t.id).unwrap().unwrap().status,
+            TaskStatus::Planning
+        );
     }
 
     // ── Observation Store ────────────────────────────────────────────
@@ -165,8 +231,12 @@ mod tests {
     fn observation_insert_and_recent() {
         let db = test_db();
         let store = ObservationStore::new(db);
-        store.insert(ObservationType::UserMessage, "hello", Some("test"), None).unwrap();
-        store.insert(ObservationType::ToolResult, "ok", None, None).unwrap();
+        store
+            .insert(ObservationType::UserMessage, "hello", Some("test"), None)
+            .unwrap();
+        store
+            .insert(ObservationType::ToolResult, "ok", None, None)
+            .unwrap();
 
         let recent = store.recent(10).unwrap();
         assert_eq!(recent.len(), 2);
@@ -180,8 +250,12 @@ mod tests {
     fn observation_by_type() {
         let db = test_db();
         let store = ObservationStore::new(db);
-        store.insert(ObservationType::UserMessage, "hi", None, None).unwrap();
-        store.insert(ObservationType::AgentAction, "thinking", None, None).unwrap();
+        store
+            .insert(ObservationType::UserMessage, "hi", None, None)
+            .unwrap();
+        store
+            .insert(ObservationType::AgentAction, "thinking", None, None)
+            .unwrap();
 
         let msgs = store.by_type("user_message", 10).unwrap();
         assert_eq!(msgs.len(), 1);
@@ -193,7 +267,9 @@ mod tests {
     fn suggestion_insert_and_list() {
         let db = test_db();
         let engine = SuggestionEngine::new(db);
-        engine.insert("suggest something", Some("goal"), 0.8, None).unwrap();
+        engine
+            .insert("suggest something", Some("goal"), 0.8, None)
+            .unwrap();
         let pending = engine.list_pending().unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].confidence, 0.8);
@@ -204,7 +280,9 @@ mod tests {
         let db = test_db();
         let engine = SuggestionEngine::new(db);
         let s = engine.insert("test", None, 0.5, None).unwrap();
-        assert!(engine.update_status(&s.id, &SuggestionStatus::Accepted).unwrap());
+        assert!(engine
+            .update_status(&s.id, &SuggestionStatus::Accepted)
+            .unwrap());
         assert!(engine.list_pending().unwrap().is_empty());
     }
 
@@ -216,9 +294,21 @@ mod tests {
         let candidates = MemoryCandidateStore::new(db.clone());
         let policy = MemoryPolicy::new(db);
 
-        candidates.insert("user likes dark mode", Some("preference"), 0.9, Some("agent"), None).unwrap();
+        candidates
+            .insert(
+                "user likes dark mode",
+                Some("preference"),
+                0.9,
+                Some("agent"),
+                None,
+            )
+            .unwrap();
         let accepted = policy.evaluate().unwrap();
-        assert_eq!(accepted.len(), 1, "should promote high-confidence candidate");
+        assert_eq!(
+            accepted.len(),
+            1,
+            "should promote high-confidence candidate"
+        );
         assert_eq!(accepted[0].content, "user likes dark mode");
     }
 
@@ -228,7 +318,15 @@ mod tests {
         let candidates = MemoryCandidateStore::new(db.clone());
         let policy = MemoryPolicy::new(db);
 
-        candidates.insert("maybe something", Some("preference"), 0.3, Some("agent"), None).unwrap();
+        candidates
+            .insert(
+                "maybe something",
+                Some("preference"),
+                0.3,
+                Some("agent"),
+                None,
+            )
+            .unwrap();
         let accepted = policy.evaluate().unwrap();
         assert_eq!(accepted.len(), 0, "low confidence should not be promoted");
     }
@@ -239,8 +337,12 @@ mod tests {
         let candidates = MemoryCandidateStore::new(db.clone());
         let policy = MemoryPolicy::new(db);
 
-        candidates.insert("user prefers terminal", Some("preference"), 0.9, None, None).unwrap();
-        candidates.insert("user likes vscode", Some("preference"), 0.9, None, None).unwrap();
+        candidates
+            .insert("user prefers terminal", Some("preference"), 0.9, None, None)
+            .unwrap();
+        candidates
+            .insert("user likes vscode", Some("preference"), 0.9, None, None)
+            .unwrap();
         policy.evaluate().unwrap();
 
         let results = policy.search("terminal", 10).unwrap();
@@ -260,7 +362,9 @@ mod tests {
         let _trepo = TaskRepository::new(db.clone());
         let scheduler = Scheduler::new(db);
 
-        grepo.create("write a script", None, GoalType::OneShot).unwrap();
+        grepo
+            .create("write a script", None, GoalType::OneShot)
+            .unwrap();
         let ids = scheduler.tick();
         assert_eq!(ids.len(), 1, "should create one task for one-shot goal");
     }

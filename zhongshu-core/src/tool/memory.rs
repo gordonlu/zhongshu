@@ -1,7 +1,7 @@
-use std::path::PathBuf;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::path::PathBuf;
 
 use crate::tool::{Tool, ToolOutput};
 
@@ -65,7 +65,10 @@ impl MemoryTool {
             _ => return Err("profile is not a JSON object".into()),
         };
 
-        raw.insert("long_term_memory".into(), serde_json::to_value(&view.long_term_memory).unwrap());
+        raw.insert(
+            "long_term_memory".into(),
+            serde_json::to_value(&view.long_term_memory).unwrap(),
+        );
 
         if let Some(parent) = self.profile_path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -122,14 +125,20 @@ impl Tool for MemoryTool {
         match operation {
             "read" => {
                 let view = self.load();
-                let texts: Vec<&str> = view.long_term_memory.iter().map(|e| e.text.as_str()).collect();
+                let texts: Vec<&str> = view
+                    .long_term_memory
+                    .iter()
+                    .map(|e| e.text.as_str())
+                    .collect();
                 let char_count: usize = texts.iter().map(|t| t.chars().count()).sum();
                 let content = if texts.is_empty() {
                     String::from("（暂无长期记忆）")
                 } else {
                     texts.join("\n")
                 };
-                ToolOutput::success(json!({"content": content, "count": texts.len(), "char_count": char_count, "char_limit": 2000}))
+                ToolOutput::success(
+                    json!({"content": content, "count": texts.len(), "char_count": char_count, "char_limit": 2000}),
+                )
             }
             "append" => {
                 let text = match arguments["text"].as_str() {

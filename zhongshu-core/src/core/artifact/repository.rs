@@ -13,7 +13,13 @@ impl ArtifactRepository {
         ArtifactRepository { db }
     }
 
-    pub fn insert(&self, artifact_type: ArtifactType, title: Option<&str>, uri: Option<&str>, summary: Option<&str>) -> rusqlite::Result<Artifact> {
+    pub fn insert(
+        &self,
+        artifact_type: ArtifactType,
+        title: Option<&str>,
+        uri: Option<&str>,
+        summary: Option<&str>,
+    ) -> rusqlite::Result<Artifact> {
         let conn = self.db.conn()?;
         let a = Artifact {
             id: id("art"),
@@ -40,4 +46,3 @@ impl ArtifactRepository {
         Ok(())
     }
 }
-

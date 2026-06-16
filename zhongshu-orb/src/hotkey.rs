@@ -1,8 +1,8 @@
 use crate::config::HotkeyConfig;
 use anyhow::Context;
 use global_hotkey::{
-    GlobalHotKeyManager, GlobalHotKeyEvent,
-    hotkey::{HotKey, Modifiers, Code},
+    hotkey::{Code, HotKey, Modifiers},
+    GlobalHotKeyEvent, GlobalHotKeyManager,
 };
 
 // ── HotkeyManager ───────────────────────────────────────────────────
@@ -17,8 +17,7 @@ pub struct HotkeyManager {
 
 impl HotkeyManager {
     pub fn new(config: &HotkeyConfig) -> anyhow::Result<Self> {
-        let manager = GlobalHotKeyManager::new()
-            .context("GlobalHotKeyManager::new failed")?;
+        let manager = GlobalHotKeyManager::new().context("GlobalHotKeyManager::new failed")?;
 
         let active = build_hotkey(config);
         if let Err(e) = manager.register(active) {
@@ -27,7 +26,11 @@ impl HotkeyManager {
 
         let events = GlobalHotKeyEvent::receiver().clone();
 
-        Ok(HotkeyManager { active, events, manager: Some(manager) })
+        Ok(HotkeyManager {
+            active,
+            events,
+            manager: Some(manager),
+        })
     }
 
     /// Create a no-op manager when hotkey registration is unavailable.
@@ -50,7 +53,10 @@ impl HotkeyManager {
 
 fn build_hotkey(cfg: &HotkeyConfig) -> HotKey {
     build_hotkey_safe(cfg).unwrap_or_else(|| {
-        tracing::warn!("Hotkey config unparseable ({:?}), using default Meta+Semicolon", cfg);
+        tracing::warn!(
+            "Hotkey config unparseable ({:?}), using default Meta+Semicolon",
+            cfg
+        );
         HotKey::new(Some(Modifiers::META), Code::Semicolon)
     })
 }
@@ -72,29 +78,79 @@ fn parse_modifiers(names: &[String]) -> Option<Modifiers> {
             unknown => tracing::warn!("Unknown modifier '{}', ignoring", unknown),
         }
     }
-    if result.is_empty() { None } else { Some(result) }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 fn parse_code(name: &str) -> Option<Code> {
     use Code::*;
     Some(match name {
-        "A" => KeyA, "B" => KeyB, "C" => KeyC, "D" => KeyD, "E" => KeyE,
-        "F" => KeyF, "G" => KeyG, "H" => KeyH, "I" => KeyI, "J" => KeyJ,
-        "K" => KeyK, "L" => KeyL, "M" => KeyM, "N" => KeyN, "O" => KeyO,
-        "P" => KeyP, "Q" => KeyQ, "R" => KeyR, "S" => KeyS, "T" => KeyT,
-        "U" => KeyU, "V" => KeyV, "W" => KeyW, "X" => KeyX, "Y" => KeyY,
+        "A" => KeyA,
+        "B" => KeyB,
+        "C" => KeyC,
+        "D" => KeyD,
+        "E" => KeyE,
+        "F" => KeyF,
+        "G" => KeyG,
+        "H" => KeyH,
+        "I" => KeyI,
+        "J" => KeyJ,
+        "K" => KeyK,
+        "L" => KeyL,
+        "M" => KeyM,
+        "N" => KeyN,
+        "O" => KeyO,
+        "P" => KeyP,
+        "Q" => KeyQ,
+        "R" => KeyR,
+        "S" => KeyS,
+        "T" => KeyT,
+        "U" => KeyU,
+        "V" => KeyV,
+        "W" => KeyW,
+        "X" => KeyX,
+        "Y" => KeyY,
         "Z" => KeyZ,
-        "0" => Digit0, "1" => Digit1, "2" => Digit2, "3" => Digit3, "4" => Digit4,
-        "5" => Digit5, "6" => Digit6, "7" => Digit7, "8" => Digit8, "9" => Digit9,
-        "F1" => F1, "F2" => F2, "F3" => F3, "F4" => F4, "F5" => F5,
-        "F6" => F6, "F7" => F7, "F8" => F8, "F9" => F9, "F10" => F10,
-        "F11" => F11, "F12" => F12,
-        "Space" => Space, "Enter" => Enter, "Tab" => Tab,
-        "Escape" => Escape, "Backspace" => Backspace, "Delete" => Delete,
-        "Semicolon" => Semicolon, "Comma" => Comma, "Period" => Period,
-        "Slash" => Slash, "Backslash" => Backslash,
-        "Quote" => Quote, "Backquote" => Backquote,
-        "Minus" => Minus, "Equal" => Equal,
+        "0" => Digit0,
+        "1" => Digit1,
+        "2" => Digit2,
+        "3" => Digit3,
+        "4" => Digit4,
+        "5" => Digit5,
+        "6" => Digit6,
+        "7" => Digit7,
+        "8" => Digit8,
+        "9" => Digit9,
+        "F1" => F1,
+        "F2" => F2,
+        "F3" => F3,
+        "F4" => F4,
+        "F5" => F5,
+        "F6" => F6,
+        "F7" => F7,
+        "F8" => F8,
+        "F9" => F9,
+        "F10" => F10,
+        "F11" => F11,
+        "F12" => F12,
+        "Space" => Space,
+        "Enter" => Enter,
+        "Tab" => Tab,
+        "Escape" => Escape,
+        "Backspace" => Backspace,
+        "Delete" => Delete,
+        "Semicolon" => Semicolon,
+        "Comma" => Comma,
+        "Period" => Period,
+        "Slash" => Slash,
+        "Backslash" => Backslash,
+        "Quote" => Quote,
+        "Backquote" => Backquote,
+        "Minus" => Minus,
+        "Equal" => Equal,
         _ => return None,
     })
 }

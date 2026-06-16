@@ -398,6 +398,7 @@ let streamingId = null;
 let streamingBuffer = '';
 let has_more = false;
 let loading_more = false;
+let currentAuthRequestId = '';
 
 function addMessage(role, content, toolCalls) {
   let id = 'msg-' + Date.now() + '-' + Math.random().toString(36).slice(2,6);
@@ -554,6 +555,7 @@ function handleIpc(message) {
         break;
 
       case 'auth':
+        currentAuthRequestId = msg.request.request_id || '';
         document.getElementById('auth-source').textContent = '来源：' + (msg.request.source || '');
         document.getElementById('auth-tool').textContent = '工具：' + (msg.request.tool || '');
         document.getElementById('auth-command').textContent = '指令：' + (msg.request.command || '');
@@ -705,11 +707,11 @@ function sendMessage() {
 // Auth buttons
 document.getElementById('auth-approve').addEventListener('click', function() {
   document.getElementById('auth-overlay').classList.remove('active');
-  sendIpc({type: 'approve'});
+  sendIpc({type: 'approve', request_id: currentAuthRequestId});
 });
 document.getElementById('auth-deny').addEventListener('click', function() {
   document.getElementById('auth-overlay').classList.remove('active');
-  sendIpc({type: 'deny'});
+  sendIpc({type: 'deny', request_id: currentAuthRequestId});
 });
 
 // Settings

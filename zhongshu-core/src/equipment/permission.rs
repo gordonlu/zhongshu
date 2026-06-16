@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use crate::agent::llm::ToolDef;
 use crate::tool::{Tool, ToolOutput};
+use async_trait::async_trait;
 
 use super::manifest::EquipmentPermissions;
 
@@ -16,7 +16,10 @@ pub struct PermissionGuard {
 
 impl PermissionGuard {
     pub fn new(tool: Arc<dyn Tool>, permissions: EquipmentPermissions) -> Self {
-        PermissionGuard { inner: tool, permissions }
+        PermissionGuard {
+            inner: tool,
+            permissions,
+        }
     }
 
     fn check_shell(&self, args: &serde_json::Value) -> Result<(), String> {

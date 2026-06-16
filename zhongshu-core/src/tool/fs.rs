@@ -7,8 +7,12 @@ pub struct ReadFileTool;
 
 #[async_trait]
 impl Tool for ReadFileTool {
-    fn name(&self) -> &str { "read_file" }
-    fn description(&self) -> &str { "Read the contents of a file at the specified path." }
+    fn name(&self) -> &str {
+        "read_file"
+    }
+    fn description(&self) -> &str {
+        "Read the contents of a file at the specified path."
+    }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
@@ -34,7 +38,10 @@ impl Tool for ReadFileTool {
         let total_lines = content.lines().count();
         let truncated = if total_lines > 500 {
             let short: String = content.lines().take(500).collect::<Vec<_>>().join("\n");
-            format!("{short}\n\n... (truncated, {} lines omitted)", total_lines - 500)
+            format!(
+                "{short}\n\n... (truncated, {} lines omitted)",
+                total_lines - 500
+            )
         } else {
             content
         };
@@ -51,8 +58,12 @@ pub struct WriteFileTool;
 
 #[async_trait]
 impl Tool for WriteFileTool {
-    fn name(&self) -> &str { "write_file" }
-    fn description(&self) -> &str { "Write content to a file. Creates parent directories if needed." }
+    fn name(&self) -> &str {
+        "write_file"
+    }
+    fn description(&self) -> &str {
+        "Write content to a file. Creates parent directories if needed."
+    }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
@@ -82,7 +93,9 @@ impl Tool for WriteFileTool {
         }
 
         match std::fs::write(&path, content) {
-            Ok(_) => ToolOutput::success(json!({ "path": path.display().to_string(), "written": true })),
+            Ok(_) => {
+                ToolOutput::success(json!({ "path": path.display().to_string(), "written": true }))
+            }
             Err(e) => ToolOutput::error(format!("写入 {path:?} 失败: {e}")),
         }
     }
@@ -92,8 +105,12 @@ pub struct ListDirTool;
 
 #[async_trait]
 impl Tool for ListDirTool {
-    fn name(&self) -> &str { "list_dir" }
-    fn description(&self) -> &str { "List files and directories at the specified path." }
+    fn name(&self) -> &str {
+        "list_dir"
+    }
+    fn description(&self) -> &str {
+        "List files and directories at the specified path."
+    }
 
     fn parameters(&self) -> serde_json::Value {
         json!({

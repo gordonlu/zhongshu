@@ -9,7 +9,9 @@ pub struct ShellTool;
 
 #[async_trait]
 impl Tool for ShellTool {
-    fn name(&self) -> &str { "shell" }
+    fn name(&self) -> &str {
+        "shell"
+    }
 
     fn description(&self) -> &str {
         "Execute a shell command and return stdout/stderr."

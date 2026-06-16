@@ -3,8 +3,8 @@ pub mod browser;
 pub mod fs;
 pub mod memory;
 pub mod screenshot;
-pub mod search_files;
 pub mod search;
+pub mod search_files;
 pub mod shell;
 pub mod system_info;
 pub mod webfetch;
@@ -38,11 +38,23 @@ pub enum ToolStatus {
 
 impl ToolOutput {
     pub fn success(data: serde_json::Value) -> Self {
-        ToolOutput { status: ToolStatus::Success, data: Some(data), error: None, auth_program: None, auth_command: None }
+        ToolOutput {
+            status: ToolStatus::Success,
+            data: Some(data),
+            error: None,
+            auth_program: None,
+            auth_command: None,
+        }
     }
 
     pub fn error(msg: impl Into<String>) -> Self {
-        ToolOutput { status: ToolStatus::Error, data: None, error: Some(msg.into()), auth_program: None, auth_command: None }
+        ToolOutput {
+            status: ToolStatus::Error,
+            data: None,
+            error: Some(msg.into()),
+            auth_program: None,
+            auth_command: None,
+        }
     }
 
     pub fn auth_required(program: &str, command: &str) -> Self {
@@ -60,7 +72,10 @@ impl ToolOutput {
     }
 
     pub fn render_observation(&self, tool_name: &str) -> String {
-        let mut lines = vec![format!("<observation tool=\"{tool_name}\" status=\"{}\">", self.status_str())];
+        let mut lines = vec![format!(
+            "<observation tool=\"{tool_name}\" status=\"{}\">",
+            self.status_str()
+        )];
         if let Some(ref data) = self.data {
             lines.push(serde_json::to_string_pretty(data).unwrap_or_else(|_| format!("{data:?}")));
         }
@@ -106,7 +121,9 @@ pub struct ToolRegistry {
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        ToolRegistry { tools: HashMap::new() }
+        ToolRegistry {
+            tools: HashMap::new(),
+        }
     }
 
     pub fn register(mut self, tool: impl Tool + 'static) -> Self {
@@ -149,7 +166,8 @@ impl ToolRegistry {
     /// Tools not in the registry are silently skipped.
     pub fn select(&self, names: &[&str]) -> Self {
         ToolRegistry {
-            tools: names.iter()
+            tools: names
+                .iter()
                 .filter_map(|n| self.tools.get(*n).map(|t| (n.to_string(), t.clone())))
                 .collect(),
         }

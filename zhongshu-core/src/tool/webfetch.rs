@@ -9,7 +9,9 @@ pub struct WebFetchTool;
 
 #[async_trait]
 impl Tool for WebFetchTool {
-    fn name(&self) -> &str { "webfetch" }
+    fn name(&self) -> &str {
+        "webfetch"
+    }
     fn description(&self) -> &str {
         "Fetch a URL and return the page text content (HTML stripped). Use this to read articles, check weather, or get structured data from web pages."
     }
@@ -32,16 +34,16 @@ impl Tool for WebFetchTool {
         };
         let max_len = arguments["max_length"].as_u64().unwrap_or(5000).min(20000) as usize;
 
-        let client = match reqwest::Client::builder()
-            .user_agent(BROWSER_UA)
-            .build()
-        {
+        let client = match reqwest::Client::builder().user_agent(BROWSER_UA).build() {
             Ok(c) => c,
             Err(e) => return ToolOutput::error(format!("HTTP 客户端创建失败: {e}")),
         };
 
         // Simulate human-like delay (500-2000ms) to avoid bot detection.
-        let ns = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
         let delay_ms = 500 + (ns % 1501) as u64;
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
 
@@ -55,7 +57,11 @@ impl Tool for WebFetchTool {
 
         let text = extract_text(&html);
         let truncated = if text.len() > max_len {
-            format!("{}...\n\n[页面过长，已截断至 {} 字符]", &text[..max_len], max_len)
+            format!(
+                "{}...\n\n[页面过长，已截断至 {} 字符]",
+                &text[..max_len],
+                max_len
+            )
         } else {
             text
         };
@@ -81,13 +87,25 @@ fn extract_text(html: &str) -> String {
         if bytes[i] == b'<' {
             // Check for script/style tags to skip their content
             let lower = html[i..].to_lowercase();
-            if lower.starts_with("<script") { in_script = true; }
-            if lower.starts_with("<style") { in_style = true; }
+            if lower.starts_with("<script") {
+                in_script = true;
+            }
+            if lower.starts_with("<style") {
+                in_style = true;
+            }
             // Find end of tag
-            while i < bytes.len() && bytes[i] != b'>' { i += 1; }
-            if i < bytes.len() { i += 1; } // skip '>'
-            if lower.starts_with("</script") { in_script = false; }
-            if lower.starts_with("</style") { in_style = false; }
+            while i < bytes.len() && bytes[i] != b'>' {
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1;
+            } // skip '>'
+            if lower.starts_with("</script") {
+                in_script = false;
+            }
+            if lower.starts_with("</style") {
+                in_style = false;
+            }
             continue;
         }
 
@@ -98,14 +116,20 @@ fn extract_text(html: &str) -> String {
 
         if bytes[i] == b'&' {
             let rest = &html[i..];
-            let (entity, skip) = if rest.starts_with("&amp;") { (Some("&"), 5) }
-                else if rest.starts_with("&lt;") { (Some("<"), 4) }
-                else if rest.starts_with("&gt;") { (Some(">"), 4) }
-                else if rest.starts_with("&quot;") { (Some("\""), 6) }
-                else if rest.starts_with("&#") {
-                    let end = rest.find(';').map(|p| p + 1).unwrap_or(rest.len());
-                    (Some(""), end)
-                } else { (None, 0) };
+            let (entity, skip) = if rest.starts_with("&amp;") {
+                (Some("&"), 5)
+            } else if rest.starts_with("&lt;") {
+                (Some("<"), 4)
+            } else if rest.starts_with("&gt;") {
+                (Some(">"), 4)
+            } else if rest.starts_with("&quot;") {
+                (Some("\""), 6)
+            } else if rest.starts_with("&#") {
+                let end = rest.find(';').map(|p| p + 1).unwrap_or(rest.len());
+                (Some(""), end)
+            } else {
+                (None, 0)
+            };
             if let Some(e) = entity {
                 result.push_str(e);
                 i += skip;
@@ -115,12 +139,16 @@ fn extract_text(html: &str) -> String {
 
         // Collapse multiple whitespace/newlines
         if bytes[i] == b'\n' || bytes[i] == b'\r' {
-            if !result.ends_with('\n') { result.push('\n'); }
+            if !result.ends_with('\n') {
+                result.push('\n');
+            }
             i += 1;
             continue;
         }
         if bytes[i].is_ascii_whitespace() {
-            if !result.ends_with(' ') { result.push(' '); }
+            if !result.ends_with(' ') {
+                result.push(' ');
+            }
             i += 1;
             continue;
         }
@@ -130,7 +158,11 @@ fn extract_text(html: &str) -> String {
     }
 
     // Remove excessive blank lines
-    let lines: Vec<&str> = result.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    let lines: Vec<&str> = result
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
     lines.join("\n")
 }
 
@@ -143,7 +175,10 @@ mod tests {
         let html = "<html><body><h1>Title</h1><p>Hello world</p></body></html>";
         let text = extract_text(html);
         assert!(text.contains("Title"), "expected Title in '{text}'");
-        assert!(text.contains("Hello world"), "expected Hello world in '{text}'");
+        assert!(
+            text.contains("Hello world"),
+            "expected Hello world in '{text}'"
+        );
     }
 
     #[test]

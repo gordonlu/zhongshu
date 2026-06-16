@@ -88,7 +88,10 @@ impl ObservationStore {
 
     /// Observations since a given unix timestamp.
     pub fn since(&self, since_ts: u64) -> Vec<&Observation> {
-        self.buffer.iter().filter(|o| o.timestamp >= since_ts).collect()
+        self.buffer
+            .iter()
+            .filter(|o| o.timestamp >= since_ts)
+            .collect()
     }
 
     /// Observations from the last N hours.
@@ -144,12 +147,47 @@ impl ObservationStore {
     /// Count user messages by simple category.
     fn message_categories(&self, window: &[&Observation]) -> Vec<(&str, u32)> {
         let keywords: [(&str, &[&str]); 6] = [
-            ("查询/搜索", &["查", "搜索", "找", "搜", "search", "find", "look up"]),
-            ("文件操作", &["文件", "创建", "编辑", "写", "读", "复制", "移动", "删除", "file", "write", "read"]),
-            ("开发/代码", &["代码", "编译", "测试", "git", "cargo", "rust", "python", "代码审查", "debug"]),
-            ("系统管理", &["安装", "配置", "设置", "进程", "磁盘", "内存", "cpu", "系统"]),
-            ("股价/比赛", &["股价", "股票", "行情", "比赛", "比分", "score", "stock", "price"]),
-            ("日常", &["天气", "新闻", "提醒", "定时", "每天早上", "每天晚上"]),
+            (
+                "查询/搜索",
+                &["查", "搜索", "找", "搜", "search", "find", "look up"],
+            ),
+            (
+                "文件操作",
+                &[
+                    "文件", "创建", "编辑", "写", "读", "复制", "移动", "删除", "file", "write",
+                    "read",
+                ],
+            ),
+            (
+                "开发/代码",
+                &[
+                    "代码",
+                    "编译",
+                    "测试",
+                    "git",
+                    "cargo",
+                    "rust",
+                    "python",
+                    "代码审查",
+                    "debug",
+                ],
+            ),
+            (
+                "系统管理",
+                &[
+                    "安装", "配置", "设置", "进程", "磁盘", "内存", "cpu", "系统",
+                ],
+            ),
+            (
+                "股价/比赛",
+                &[
+                    "股价", "股票", "行情", "比赛", "比分", "score", "stock", "price",
+                ],
+            ),
+            (
+                "日常",
+                &["天气", "新闻", "提醒", "定时", "每天早上", "每天晚上"],
+            ),
         ];
         let mut counts: HashMap<&str, u32> = HashMap::new();
         for o in window {
@@ -170,7 +208,10 @@ impl ObservationStore {
 }
 
 fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Strip common sensitive patterns from text before storing in observations.
@@ -179,10 +220,23 @@ fn scrub_message(text: &str) -> String {
     let mut s = text.to_string();
 
     // API keys: sk-... (OpenAI), ghp_... (GitHub PAT), github_pat_..., etc.
-    s = replace_pattern(&s, &["sk-", "sk-or-", "ghp_", "gho_", "github_pat_", "ghr_"], 10);
+    s = replace_pattern(
+        &s,
+        &["sk-", "sk-or-", "ghp_", "gho_", "github_pat_", "ghr_"],
+        10,
+    );
 
     // Token/secret patterns in text: "key=xxx", "token=xxx", "secret=xxx"
-    let kv_triggers = ["key=", "token=", "secret=", "password=", "passwd=", "apikey=", "api_key=", "api-key="];
+    let kv_triggers = [
+        "key=",
+        "token=",
+        "secret=",
+        "password=",
+        "passwd=",
+        "apikey=",
+        "api_key=",
+        "api-key=",
+    ];
     for trig in kv_triggers {
         s = replace_after(&s, trig, 6);
     }
@@ -210,7 +264,9 @@ fn replace_pattern(s: &str, prefixes: &[&str], min_trailing: usize) -> String {
         while let Some(pos) = result[start..].find(prefix) {
             let abs_pos = start + pos;
             let after = &result[abs_pos + prefix.len()..];
-            let end = after.find(|c: char| !c.is_alphanumeric() && c != '-' && c != '_').unwrap_or(after.len());
+            let end = after
+                .find(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
+                .unwrap_or(after.len());
             if end >= min_trailing {
                 let replacement = format!("{}[REDACTED]", prefix);
                 result.replace_range(abs_pos..abs_pos + prefix.len() + end, &replacement);
@@ -230,7 +286,9 @@ fn replace_after(s: &str, trigger: &str, min_val_len: usize) -> String {
     while let Some(pos) = result[start..].find(trigger) {
         let abs_pos = start + pos;
         let after = &result[abs_pos + trigger.len()..];
-        let end = after.find(|c: char| c.is_whitespace() || c == ',' || c == '"' || c == '\'').unwrap_or(after.len());
+        let end = after
+            .find(|c: char| c.is_whitespace() || c == ',' || c == '"' || c == '\'')
+            .unwrap_or(after.len());
         if end >= min_val_len {
             let replacement = format!("{}[REDACTED]", trigger);
             result.replace_range(abs_pos..abs_pos + trigger.len() + end, &replacement);
@@ -250,12 +308,15 @@ fn replace_email(s: &str) -> String {
     while let Some(pos) = result[start..].find('@') {
         let abs_pos = start + pos;
         // Look backwards for start of local part
-        let local_start = result[..abs_pos].rfind(|c: char| !c.is_alphanumeric() && c != '.' && c != '_' && c != '-')
+        let local_start = result[..abs_pos]
+            .rfind(|c: char| !c.is_alphanumeric() && c != '.' && c != '_' && c != '-')
             .map(|i| i + 1)
             .unwrap_or(0);
         // Look forward for end of domain
         let after = &result[abs_pos + 1..];
-        let domain_end = after.find(|c: char| !c.is_alphanumeric() && c != '.' && c != '-').unwrap_or(after.len());
+        let domain_end = after
+            .find(|c: char| !c.is_alphanumeric() && c != '.' && c != '-')
+            .unwrap_or(after.len());
         if domain_end >= 3 && abs_pos - local_start >= 1 {
             let email_end = abs_pos + 1 + domain_end;
             result.replace_range(local_start..email_end, "[EMAIL REDACTED]");
@@ -276,7 +337,9 @@ fn replace_ip(s: &str) -> String {
         let abs_pos = start + pos;
         // Find the end of this number sequence
         let rest = &result[abs_pos..];
-        let num_end = rest.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(rest.len());
+        let num_end = rest
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(rest.len());
         let candidate = &rest[..num_end];
         // Check if it looks like an IP (at least 7 chars, contains 3 dots)
         if candidate.len() >= 7 && candidate.matches('.').count() == 3 {
@@ -339,13 +402,19 @@ impl EquipmentObserver {
             Event::Tool(ToolEvent::Completed { name, success }) => {
                 self.store.push(Observation {
                     timestamp: ts,
-                    kind: ObservationKind::ToolCompleted { name: name.clone(), success: *success },
+                    kind: ObservationKind::ToolCompleted {
+                        name: name.clone(),
+                        success: *success,
+                    },
                 });
             }
             Event::Agent(crate::event::AgentEvent::StateChanged { from, to }) => {
                 self.store.push(Observation {
                     timestamp: ts,
-                    kind: ObservationKind::AgentStateChange { from: *from, to: *to },
+                    kind: ObservationKind::AgentStateChange {
+                        from: *from,
+                        to: *to,
+                    },
                 });
             }
             _ => {}
@@ -355,7 +424,13 @@ impl EquipmentObserver {
     /// Spawn a background task that subscribes to EventBus and observes.
     /// Returns an `Arc<Mutex<EquipmentObserver>>` for the orb layer to call
     /// `record_user_message()` on the main thread.
-    pub fn spawn(self, eb: &crate::event::EventBus) -> (tokio::task::JoinHandle<()>, std::sync::Arc<std::sync::Mutex<EquipmentObserver>>) {
+    pub fn spawn(
+        self,
+        eb: &crate::event::EventBus,
+    ) -> (
+        tokio::task::JoinHandle<()>,
+        std::sync::Arc<std::sync::Mutex<EquipmentObserver>>,
+    ) {
         let observer = std::sync::Arc::new(std::sync::Mutex::new(self));
         let clone = observer.clone();
         let mut rx = eb.subscribe();
@@ -390,9 +465,21 @@ impl EquipmentObserver {
         let mut sorted: Vec<_> = counts.iter().collect();
         sorted.sort_by(|a, b| b.1.cmp(a.1));
         for (name, count) in sorted.iter().take(10) {
-            let fail_info = fails.get(name.as_str()).map(|(f, t)| {
-                if *t > 0 { format!(" (失败 {}/{} = {:.0}%)", f, t, *f as f64 / *t as f64 * 100.0) } else { String::new() }
-            }).unwrap_or_default();
+            let fail_info = fails
+                .get(name.as_str())
+                .map(|(f, t)| {
+                    if *t > 0 {
+                        format!(
+                            " (失败 {}/{} = {:.0}%)",
+                            f,
+                            t,
+                            *f as f64 / *t as f64 * 100.0
+                        )
+                    } else {
+                        String::new()
+                    }
+                })
+                .unwrap_or_default();
             out.push_str(&format!("- {}: {} 次{}\n", name, count, fail_info));
         }
         out
@@ -400,7 +487,10 @@ impl EquipmentObserver {
 
     /// User message category summary for a given time window.
     fn user_patterns(&self, window: &[&Observation]) -> String {
-        let msgs: Vec<_> = window.iter().filter(|o| matches!(o.kind, ObservationKind::UserMessage { .. })).collect();
+        let msgs: Vec<_> = window
+            .iter()
+            .filter(|o| matches!(o.kind, ObservationKind::UserMessage { .. }))
+            .collect();
         if msgs.is_empty() {
             return String::new();
         }
@@ -482,11 +572,17 @@ impl EquipmentObserver {
         if all.len() < 30 {
             return false;
         }
-        let tool_starts = all.iter().filter(|o| matches!(o.kind, ObservationKind::ToolStarted { .. })).count();
+        let tool_starts = all
+            .iter()
+            .filter(|o| matches!(o.kind, ObservationKind::ToolStarted { .. }))
+            .count();
         if tool_starts < 10 {
             return false;
         }
-        let user_msgs = all.iter().filter(|o| matches!(o.kind, ObservationKind::UserMessage { .. })).count();
+        let user_msgs = all
+            .iter()
+            .filter(|o| matches!(o.kind, ObservationKind::UserMessage { .. }))
+            .count();
         if user_msgs < 5 {
             return false;
         }
@@ -589,7 +685,9 @@ mod tests {
         for i in 0..(MAX_OBSERVATIONS + 100) {
             store.push(Observation {
                 timestamp: i as u64,
-                kind: ObservationKind::ToolStarted { name: "test".into() },
+                kind: ObservationKind::ToolStarted {
+                    name: "test".into(),
+                },
             });
         }
         assert_eq!(store.len(), MAX_OBSERVATIONS);
@@ -601,7 +699,9 @@ mod tests {
         for i in 0..10 {
             store.push(Observation {
                 timestamp: i as u64,
-                kind: ObservationKind::ToolStarted { name: format!("t{i}") },
+                kind: ObservationKind::ToolStarted {
+                    name: format!("t{i}"),
+                },
             });
         }
         let recent = store.since(7);
@@ -620,20 +720,34 @@ mod tests {
         // now
         store.push(Observation {
             timestamp: now_ts,
-            kind: ObservationKind::ToolStarted { name: "recent".into() },
+            kind: ObservationKind::ToolStarted {
+                name: "recent".into(),
+            },
         });
         let last2h = store.last_hours(2);
         assert_eq!(last2h.len(), 1);
-        assert!(matches!(&last2h[0].kind, ObservationKind::ToolStarted { name } if name == "recent"));
+        assert!(
+            matches!(&last2h[0].kind, ObservationKind::ToolStarted { name } if name == "recent")
+        );
     }
 
     #[test]
     fn observer_records_tool_events() {
         let mut obs = EquipmentObserver::new();
-        obs.observe(&Event::Tool(ToolEvent::Started { name: "shell".into() }));
-        obs.observe(&Event::Tool(ToolEvent::Completed { name: "shell".into(), success: true }));
-        obs.observe(&Event::Tool(ToolEvent::Started { name: "read_file".into() }));
-        obs.observe(&Event::Tool(ToolEvent::Completed { name: "read_file".into(), success: false }));
+        obs.observe(&Event::Tool(ToolEvent::Started {
+            name: "shell".into(),
+        }));
+        obs.observe(&Event::Tool(ToolEvent::Completed {
+            name: "shell".into(),
+            success: true,
+        }));
+        obs.observe(&Event::Tool(ToolEvent::Started {
+            name: "read_file".into(),
+        }));
+        obs.observe(&Event::Tool(ToolEvent::Completed {
+            name: "read_file".into(),
+            success: false,
+        }));
         assert_eq!(obs.store.len(), 4);
         let report = obs.usage_report();
         assert!(report.contains("shell"));
@@ -670,10 +784,20 @@ mod tests {
         //
         // Add enough tool + user observations to clear thresholds.
         for i in 0..6 {
-            obs.observe(&Event::Tool(ToolEvent::Started { name: "shell".into() }));
-            obs.observe(&Event::Tool(ToolEvent::Completed { name: "shell".into(), success: true }));
-            obs.observe(&Event::Tool(ToolEvent::Started { name: "web_search".into() }));
-            obs.observe(&Event::Tool(ToolEvent::Completed { name: "web_search".into(), success: true }));
+            obs.observe(&Event::Tool(ToolEvent::Started {
+                name: "shell".into(),
+            }));
+            obs.observe(&Event::Tool(ToolEvent::Completed {
+                name: "shell".into(),
+                success: true,
+            }));
+            obs.observe(&Event::Tool(ToolEvent::Started {
+                name: "web_search".into(),
+            }));
+            obs.observe(&Event::Tool(ToolEvent::Completed {
+                name: "web_search".into(),
+                success: true,
+            }));
         }
         for i in 0..5 {
             obs.record_user_message(&format!("今天股价多少 session {}", i));
@@ -685,15 +809,23 @@ mod tests {
         for _ in 0..5 {
             obs.store_mut().push(Observation {
                 timestamp: two_days_ago,
-                kind: ObservationKind::ToolStarted { name: "read_file".into() },
+                kind: ObservationKind::ToolStarted {
+                    name: "read_file".into(),
+                },
             });
             obs.store_mut().push(Observation {
                 timestamp: yesterday,
-                kind: ObservationKind::UserMessage { content: "查股价".into() },
+                kind: ObservationKind::UserMessage {
+                    content: "查股价".into(),
+                },
             });
         }
         let prompt = obs.equipment_proposal_prompt();
-        assert!(prompt.is_some(), "should have sufficient data, got None. total={}", obs.store.len());
+        assert!(
+            prompt.is_some(),
+            "should have sufficient data, got None. total={}",
+            obs.store.len()
+        );
         let text = prompt.unwrap();
         assert!(text.contains("manifest.json"));
         assert!(text.contains("股价"));

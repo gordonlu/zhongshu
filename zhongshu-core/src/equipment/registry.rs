@@ -57,15 +57,21 @@ impl EquipmentRegistry {
                     Ok(manifest) => {
                         let id = manifest.id();
                         tracing::info!("equipment: loaded '{}' v{}", id, manifest.version);
-                        self.loaded.insert(id.clone(), Equipment {
-                            id,
-                            manifest,
-                            dir: path,
-                            status: EquipmentStatus::Active,
-                        });
+                        self.loaded.insert(
+                            id.clone(),
+                            Equipment {
+                                id,
+                                manifest,
+                                dir: path,
+                                status: EquipmentStatus::Active,
+                            },
+                        );
                     }
                     Err(e) => {
-                        tracing::warn!("equipment: invalid manifest at {}: {e}", manifest_path.display());
+                        tracing::warn!(
+                            "equipment: invalid manifest at {}: {e}",
+                            manifest_path.display()
+                        );
                     }
                 },
                 Err(e) => {
@@ -98,7 +104,9 @@ impl EquipmentRegistry {
             for rel_path in &eq.manifest.profiles {
                 let full = eq.dir.join(rel_path);
                 if full.exists() {
-                    let name = full.file_stem().map(|s| s.to_string_lossy().to_string())
+                    let name = full
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
                         .unwrap_or_else(|| rel_path.clone());
                     profiles.push((eq.id.clone(), name, full));
                 }
@@ -130,7 +138,11 @@ impl EquipmentRegistry {
         if manifest.version.trim().is_empty() {
             errors.push("version is required".into());
         }
-        if errors.is_empty() { Ok(()) } else { Err(errors) }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 
     /// Install equipment from a source directory into the equipment dir.
@@ -140,8 +152,8 @@ impl EquipmentRegistry {
         let manifest_path = src.join("manifest.json");
         let text = std::fs::read_to_string(&manifest_path)
             .map_err(|e| format!("cannot read manifest: {e}"))?;
-        let manifest: Manifest = serde_json::from_str(&text)
-            .map_err(|e| format!("invalid manifest: {e}"))?;
+        let manifest: Manifest =
+            serde_json::from_str(&text).map_err(|e| format!("invalid manifest: {e}"))?;
 
         Self::validate_manifest(&manifest).map_err(|errors| errors.join("; "))?;
 
@@ -156,7 +168,12 @@ impl EquipmentRegistry {
                     id, existing.manifest.version, manifest.version
                 ));
             }
-            tracing::info!("equipment: upgrading '{}' v{} → v{}", id, existing.manifest.version, manifest.version);
+            tracing::info!(
+                "equipment: upgrading '{}' v{} → v{}",
+                id,
+                existing.manifest.version,
+                manifest.version
+            );
             // Remove old directory before installing new version.
             if existing.dir.exists() {
                 std::fs::remove_dir_all(&existing.dir)
@@ -171,12 +188,15 @@ impl EquipmentRegistry {
         // Recursively copy.
         copy_dir(src, &dest).map_err(|e| format!("install failed: {e}"))?;
 
-        self.loaded.insert(id.clone(), Equipment {
-            id: id.clone(),
-            manifest,
-            dir: dest,
-            status: EquipmentStatus::Active,
-        });
+        self.loaded.insert(
+            id.clone(),
+            Equipment {
+                id: id.clone(),
+                manifest,
+                dir: dest,
+                status: EquipmentStatus::Active,
+            },
+        );
 
         tracing::info!("equipment: installed '{}'", id);
         Ok(id)
@@ -184,7 +204,10 @@ impl EquipmentRegistry {
 
     /// Remove installed equipment (disables + deletes directory).
     pub fn remove(&mut self, id: &str) -> Result<(), String> {
-        let eq = self.loaded.remove(id).ok_or_else(|| format!("equipment '{}' not found", id))?;
+        let eq = self
+            .loaded
+            .remove(id)
+            .ok_or_else(|| format!("equipment '{}' not found", id))?;
         self.set_status(id, EquipmentStatus::Disabled);
         if eq.dir.exists() {
             std::fs::remove_dir_all(&eq.dir)
@@ -202,7 +225,8 @@ impl EquipmentRegistry {
 
     /// Write built-in equipment to disk if not already installed.
     pub fn install_defaults(&mut self) {
-        for (name, _version, manifest_json, prompt_md) in crate::equipment::builtin::all_builtins() {
+        for (name, _version, manifest_json, prompt_md) in crate::equipment::builtin::all_builtins()
+        {
             let dest = self.base_dir.join(name);
             if dest.exists() {
                 continue; // already installed, skip
@@ -222,7 +246,10 @@ impl EquipmentRegistry {
             if eq.status != EquipmentStatus::Active {
                 continue;
             }
-            if !matches!(eq.manifest.equipment_type, crate::equipment::EquipmentType::Skill) {
+            if !matches!(
+                eq.manifest.equipment_type,
+                crate::equipment::EquipmentType::Skill
+            ) {
                 continue;
             }
             let prompt_path = eq.dir.join("prompt.md");
@@ -258,17 +285,19 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// Treats unparseable versions as equal (conservative — don't downgrade by accident).
 fn is_newer_version(new: &str, old: &str) -> bool {
     fn parse(v: &str) -> Vec<u32> {
-        v.split('.')
-            .filter_map(|s| s.parse::<u32>().ok())
-            .collect()
+        v.split('.').filter_map(|s| s.parse::<u32>().ok()).collect()
     }
     let a = parse(new);
     let b = parse(old);
     for i in 0..a.len().max(b.len()) {
         let av = a.get(i).copied().unwrap_or(0);
         let bv = b.get(i).copied().unwrap_or(0);
-        if av > bv { return true; }
-        if av < bv { return false; }
+        if av > bv {
+            return true;
+        }
+        if av < bv {
+            return false;
+        }
     }
     false // equal
 }

@@ -54,6 +54,23 @@ impl TaskRepository {
         rows.collect()
     }
 
+    /// Find pending tasks that have been waiting longer than `older_than_secs`.
+    /// These may have missed their TaskEvent::Triggered due to EventBus lag/drop.
+    pub fn list_stale_pending(&self, older_than_secs: i64) -> rusqlite::Result<Vec<Task>> {
+        let cutoff = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+            - older_than_secs;
+        let conn = self.db.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, goal_id, title, status, input, output, error, created_at, started_at, finished_at \
+             FROM tasks WHERE status IN ('pending', 'planning') AND created_at <= ?1 ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![cutoff], Self::row_to_task)?;
+        rows.collect()
+    }
+
     pub fn list_recent(&self, limit: i64) -> rusqlite::Result<Vec<Task>> {
         let conn = self.db.conn()?;
         let mut stmt = conn.prepare(
@@ -83,7 +100,12 @@ impl TaskRepository {
         Ok(n > 0)
     }
 
-    pub fn set_output(&self, id: &str, output: &str, error: Option<&str>) -> rusqlite::Result<bool> {
+    pub fn set_output(
+        &self,
+        id: &str,
+        output: &str,
+        error: Option<&str>,
+    ) -> rusqlite::Result<bool> {
         let conn = self.db.conn()?;
         let n = conn.execute(
             "UPDATE tasks SET output = ?1, error = ?2 WHERE id = ?3",
@@ -136,13 +158,32 @@ impl TaskRepository {
                 task_id: row.get(1)?,
                 step_order: row.get(2)?,
                 action: row.get(3)?,
-                status: StepStatus::from_str(&row.get::<_, String>(4)?).unwrap_or(StepStatus::Pending),
+                status: StepStatus::from_str(&row.get::<_, String>(4)?)
+                    .unwrap_or(StepStatus::Pending),
                 input: row.get(5)?,
                 output: row.get(6)?,
                 created_at: row.get(7)?,
             })
         })?;
         rows.collect()
+    }
+
+    pub fn update_step_status(&self, id: &str, status: StepStatus) -> rusqlite::Result<bool> {
+        let conn = self.db.conn()?;
+        let n = conn.execute(
+            "UPDATE task_steps SET status = ?1 WHERE id = ?2",
+            params![status.as_str(), id],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn set_step_output(&self, id: &str, output: &str) -> rusqlite::Result<bool> {
+        let conn = self.db.conn()?;
+        let n = conn.execute(
+            "UPDATE task_steps SET output = ?1 WHERE id = ?2",
+            params![output, id],
+        )?;
+        Ok(n > 0)
     }
 
     fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {

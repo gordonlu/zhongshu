@@ -1,25 +1,38 @@
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::core::memory::policy::MemoryPolicy;
+use crate::agent::llm::OpenAiProvider;
 use crate::core::memory::candidate::MemoryCandidateStore;
+use crate::core::memory::policy::MemoryPolicy;
 use crate::tool::{Tool, ToolOutput};
 
 #[derive(Clone)]
 pub struct MemoryQueryTool {
     policy: MemoryPolicy,
     candidates: MemoryCandidateStore,
+    provider: Option<OpenAiProvider>,
 }
 
 impl MemoryQueryTool {
     pub fn new(policy: MemoryPolicy, candidates: MemoryCandidateStore) -> Self {
-        MemoryQueryTool { policy, candidates }
+        MemoryQueryTool {
+            policy,
+            candidates,
+            provider: None,
+        }
+    }
+
+    pub fn with_provider(mut self, provider: OpenAiProvider) -> Self {
+        self.provider = Some(provider);
+        self
     }
 }
 
 #[async_trait]
 impl Tool for MemoryQueryTool {
-    fn name(&self) -> &str { "memory_query" }
+    fn name(&self) -> &str {
+        "memory_query"
+    }
 
     fn description(&self) -> &str {
         "搜索已有记忆，或提议新的记忆。\
@@ -64,38 +77,52 @@ impl Tool for MemoryQueryTool {
                     Some(k) => k,
                     None => return ToolOutput::error("search 需要 keyword"),
                 };
-                match self.policy.search(kw, 20) {
-                    Ok(mems) => {
-                        let items: Vec<serde_json::Value> = mems.iter().map(|m| json!({
+                let results = if let Some(ref provider) = self.provider {
+                    self.policy
+                        .search_with(kw, provider, 20)
+                        .await
+                        .unwrap_or_else(|_| self.policy.search(kw, 20).unwrap_or_default())
+                } else {
+                    self.policy.search(kw, 20).unwrap_or_default()
+                };
+                let items: Vec<serde_json::Value> = results
+                    .iter()
+                    .map(|m| {
+                        json!({
                             "id": m.id, "type": m.memory_type.as_str(), "content": m.content
-                        })).collect();
-                        if items.is_empty() {
-                            ToolOutput::success(json!({"memories": [], "note": "未找到匹配记忆"}))
-                        } else {
-                            ToolOutput::success(json!({"memories": items}))
-                        }
-                    }
-                    Err(e) => ToolOutput::error(&format!("搜索记忆失败: {e}")),
+                        })
+                    })
+                    .collect();
+                if items.is_empty() {
+                    ToolOutput::success(json!({"memories": [], "note": "未找到匹配记忆"}))
+                } else {
+                    ToolOutput::success(json!({"memories": items}))
                 }
             }
-            "list" => {
-                match self.policy.list_memories(50) {
-                    Ok(mems) => {
-                        let items: Vec<serde_json::Value> = mems.iter().map(|m| json!({
-                            "id": m.id, "type": m.memory_type.as_str(), "content": m.content
-                        })).collect();
-                        ToolOutput::success(json!({"memories": items}))
-                    }
-                    Err(e) => ToolOutput::error(&format!("读取记忆失败: {e}")),
+            "list" => match self.policy.list_memories(50) {
+                Ok(mems) => {
+                    let items: Vec<serde_json::Value> = mems
+                        .iter()
+                        .map(|m| {
+                            json!({
+                                "id": m.id, "type": m.memory_type.as_str(), "content": m.content
+                            })
+                        })
+                        .collect();
+                    ToolOutput::success(json!({"memories": items}))
                 }
-            }
+                Err(e) => ToolOutput::error(&format!("读取记忆失败: {e}")),
+            },
             "propose" => {
                 let content = match arguments["content"].as_str() {
                     Some(c) => c,
                     None => return ToolOutput::error("propose 需要 content"),
                 };
                 let mem_type = arguments["memory_type"].as_str();
-                match self.candidates.insert(content, mem_type, 0.8, Some("agent"), None) {
+                match self
+                    .candidates
+                    .insert(content, mem_type, 0.8, Some("agent"), None)
+                {
                     Ok(mc) => ToolOutput::success(json!({
                         "status": "proposed",
                         "candidate_id": mc.id,

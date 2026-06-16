@@ -7,7 +7,9 @@ pub struct WebSearchTool;
 
 #[async_trait]
 impl Tool for WebSearchTool {
-    fn name(&self) -> &str { "web_search" }
+    fn name(&self) -> &str {
+        "web_search"
+    }
     fn description(&self) -> &str {
         "Search the web via DuckDuckGo and return results."
     }
@@ -42,7 +44,11 @@ impl Tool for WebSearchTool {
             Err(e) => return ToolOutput::error(format!("创建 HTTP 客户端失败: {e}")),
         };
 
-        let url = format!("https://html.duckduckgo.com/html/?q={}&kl={}", urlencoding(query), urlencoding(region));
+        let url = format!(
+            "https://html.duckduckgo.com/html/?q={}&kl={}",
+            urlencoding(query),
+            urlencoding(region)
+        );
 
         let html = match client.get(&url).send().await {
             Ok(r) => match r.text().await {
@@ -66,23 +72,54 @@ fn urlencoding(s: &str) -> String {
     let mut result = String::with_capacity(s.len() * 3);
     for byte in s.bytes() {
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => result.push(byte as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                result.push(byte as char)
+            }
             b' ' => result.push('+'),
-            other => { result.push('%'); result.push(hex_char(other >> 4)); result.push(hex_char(other & 0x0f)); }
+            other => {
+                result.push('%');
+                result.push(hex_char(other >> 4));
+                result.push(hex_char(other & 0x0f));
+            }
         }
     }
     result
 }
 
-fn hex_char(b: u8) -> char { match b { 0..=9 => (b'0' + b) as char, _ => (b'A' + (b - 10)) as char } }
+fn hex_char(b: u8) -> char {
+    match b {
+        0..=9 => (b'0' + b) as char,
+        _ => (b'A' + (b - 10)) as char,
+    }
+}
 
 fn parse_duckduckgo(html: &str, max: usize) -> Vec<serde_json::Value> {
     let mut results = Vec::new();
     let snippets: Vec<&str> = html.split("class=\"result__snippet\"").skip(1).collect();
     for snippet in snippets.iter().take(max) {
-        let text = snippet.split("</a>").nth(1).unwrap_or("").split('<').next().unwrap_or("").trim().to_string();
-        let href = snippet.split("href=\"").nth(1).and_then(|s| s.split('"').next()).unwrap_or("").to_string();
-        let title = snippet.split("class=\"result__a\"").nth(1).and_then(|s| s.split('>').nth(1)).and_then(|s| s.split('<').next()).unwrap_or("").trim().to_string();
+        let text = snippet
+            .split("</a>")
+            .nth(1)
+            .unwrap_or("")
+            .split('<')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let href = snippet
+            .split("href=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or("")
+            .to_string();
+        let title = snippet
+            .split("class=\"result__a\"")
+            .nth(1)
+            .and_then(|s| s.split('>').nth(1))
+            .and_then(|s| s.split('<').next())
+            .unwrap_or("")
+            .trim()
+            .to_string();
         if !text.is_empty() {
             results.push(json!({ "title": title, "url": href, "snippet": text }));
         }

@@ -1,9 +1,9 @@
-use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::json;
+use std::sync::Arc;
 
-use crate::core::suggestion::SuggestionEngine;
 use crate::core::models::SuggestionStatus;
+use crate::core::suggestion::SuggestionEngine;
 use crate::event::{Event, SuggestionEvent};
 use crate::tool::{Tool, ToolOutput};
 
@@ -26,7 +26,9 @@ impl SuggestionTool {
 
 #[async_trait]
 impl Tool for SuggestionTool {
-    fn name(&self) -> &str { "suggestion" }
+    fn name(&self) -> &str {
+        "suggestion"
+    }
 
     fn description(&self) -> &str {
         "查看和处理系统建议。系统会从观察中自动发现可能值得做的事情。\
@@ -56,28 +58,37 @@ impl Tool for SuggestionTool {
     async fn execute(&self, arguments: &serde_json::Value) -> ToolOutput {
         let action = arguments["action"].as_str().unwrap_or("");
         match action {
-            "list" => {
-                match self.engine.list_pending() {
-                    Ok(sugs) => {
-                        let items: Vec<serde_json::Value> = sugs.iter().map(|s| json!({
-                            "id": s.id, "type": s.type_, "content": s.content,
-                            "confidence": s.confidence, "created_at": s.created_at,
-                        })).collect();
-                        if items.is_empty() {
-                            ToolOutput::success(json!({"suggestions": [], "note": "暂无待处理建议"}))
-                        } else {
-                            ToolOutput::success(json!({"suggestions": items}))
-                        }
+            "list" => match self.engine.list_pending() {
+                Ok(sugs) => {
+                    let items: Vec<serde_json::Value> = sugs
+                        .iter()
+                        .map(|s| {
+                            json!({
+                                "id": s.id, "type": s.type_, "content": s.content,
+                                "confidence": s.confidence, "created_at": s.created_at,
+                            })
+                        })
+                        .collect();
+                    if items.is_empty() {
+                        ToolOutput::success(json!({"suggestions": [], "note": "暂无待处理建议"}))
+                    } else {
+                        ToolOutput::success(json!({"suggestions": items}))
                     }
-                    Err(e) => ToolOutput::error(&format!("读取建议失败: {e}")),
                 }
-            }
+                Err(e) => ToolOutput::error(&format!("读取建议失败: {e}")),
+            },
             "accept" => {
                 let id = match arguments["suggestion_id"].as_str() {
                     Some(i) => i,
                     None => return ToolOutput::error("accept 需要 suggestion_id"),
                 };
-                let content = self.engine.get_content(id).unwrap_or_default();
+                let content = match self.engine.get_content(id) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!("suggestion: get_content failed for id={id}: {e}");
+                        return ToolOutput::error(&format!("读取建议失败: {e}"));
+                    }
+                };
                 match self.engine.update_status(id, &SuggestionStatus::Accepted) {
                     Ok(true) => {
                         if let Some(eb) = &self.eb {

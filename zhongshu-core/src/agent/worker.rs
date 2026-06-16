@@ -1,6 +1,6 @@
 use crate::agent::attention::AttentionLevel;
-use crate::agent::loop_::{run_agent, AgentCallbacks};
 use crate::agent::llm::Message;
+use crate::agent::loop_::{run_agent, AgentCallbacks};
 use crate::agent::profile::AgentProfile;
 use crate::agent::report::Report;
 use crate::agent::runtime::AgentRuntime;
@@ -76,7 +76,13 @@ impl Worker {
         let scoped_registry = if profile.tool_names.is_empty() {
             runtime.registry.clone()
         } else {
-            runtime.registry.select(&profile.tool_names.iter().map(String::as_str).collect::<Vec<_>>())
+            runtime.registry.select(
+                &profile
+                    .tool_names
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+            )
         };
 
         AgentRuntime {

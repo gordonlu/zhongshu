@@ -89,7 +89,11 @@ impl RuleEngine {
             if let Some(source) = rule.matches(event) {
                 info!(rule = %rule.id, event = %event.type_name(), "rule matched");
                 self.task_queue.submit(Task {
-                    id: format!("{}-{}", rule.id, NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed)),
+                    id: format!(
+                        "{}-{}",
+                        rule.id,
+                        NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed)
+                    ),
                     source,
                     tool: rule.task.tool.clone(),
                     arguments: rule.task.arguments.clone(),
@@ -181,7 +185,10 @@ mod tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let task = rt.block_on(async {
-            tokio::time::timeout(std::time::Duration::from_millis(100), queue.recv()).await.ok().flatten()
+            tokio::time::timeout(std::time::Duration::from_millis(100), queue.recv())
+                .await
+                .ok()
+                .flatten()
         });
         assert!(task.is_some());
         if let Some(t) = task {
@@ -213,7 +220,10 @@ mod tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let task = rt.block_on(async {
-            tokio::time::timeout(std::time::Duration::from_millis(100), queue.recv()).await.ok().flatten()
+            tokio::time::timeout(std::time::Duration::from_millis(100), queue.recv())
+                .await
+                .ok()
+                .flatten()
         });
         assert!(task.is_none());
     }

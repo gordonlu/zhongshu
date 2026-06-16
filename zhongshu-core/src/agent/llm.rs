@@ -47,19 +47,44 @@ pub struct FunctionCall {
 
 impl Message {
     pub fn system(content: impl Into<String>) -> Self {
-        Message { role: Role::System, content: content.into(), tool_calls: None, tool_call_id: None }
+        Message {
+            role: Role::System,
+            content: content.into(),
+            tool_calls: None,
+            tool_call_id: None,
+        }
     }
     pub fn user(content: impl Into<String>) -> Self {
-        Message { role: Role::User, content: content.into(), tool_calls: None, tool_call_id: None }
+        Message {
+            role: Role::User,
+            content: content.into(),
+            tool_calls: None,
+            tool_call_id: None,
+        }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
-        Message { role: Role::Assistant, content: content.into(), tool_calls: None, tool_call_id: None }
+        Message {
+            role: Role::Assistant,
+            content: content.into(),
+            tool_calls: None,
+            tool_call_id: None,
+        }
     }
     pub fn assistant_with_tools(content: impl Into<String>, calls: Vec<ToolCall>) -> Self {
-        Message { role: Role::Assistant, content: content.into(), tool_calls: Some(calls), tool_call_id: None }
+        Message {
+            role: Role::Assistant,
+            content: content.into(),
+            tool_calls: Some(calls),
+            tool_call_id: None,
+        }
     }
     pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
-        Message { role: Role::Tool, content: content.into(), tool_calls: None, tool_call_id: Some(tool_call_id.into()) }
+        Message {
+            role: Role::Tool,
+            content: content.into(),
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.into()),
+        }
     }
 }
 
@@ -145,6 +170,12 @@ pub trait LlmProvider: Send + Sync {
         mut on_event: Box<dyn FnMut(StreamEvent) + Send>,
     ) -> anyhow::Result<()>;
     fn model_name(&self) -> &str;
+
+    /// Generate an embedding vector for the given input text.
+    /// Returns `Err` if the provider does not support embeddings.
+    async fn embed(&self, _input: &str) -> anyhow::Result<Vec<f32>> {
+        Err(anyhow::anyhow!("embedding not supported by this provider"))
+    }
 }
 
 mod openai;

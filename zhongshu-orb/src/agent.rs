@@ -316,9 +316,18 @@ mod tests {
     use super::*;
 
     fn test_memory() -> AgentMemory {
-        let path = std::env::temp_dir().join("zhongshu_test_goal.json");
-        let _ = std::fs::remove_file(&path);
+        let dir = std::env::temp_dir().join(format!("zhongshu_test_goal_{}", rand_id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("agent.json");
         AgentMemory::load(&path)
+    }
+
+    fn rand_id() -> u64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64
     }
 
     #[test]

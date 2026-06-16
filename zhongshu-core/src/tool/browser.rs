@@ -105,7 +105,13 @@ fn extract_text(html: &str) -> String {
     let bytes = html.as_bytes();
 
     while i < bytes.len() {
-        if bytes[i] == b'<' {
+        let ch = match html[i..].chars().next() {
+            Some(c) => c,
+            None => break,
+        };
+        let ch_len = ch.len_utf8();
+
+        if ch == '<' {
             let lower = html[i..].to_lowercase();
             if lower.starts_with("<script") {
                 in_script = true;
@@ -113,6 +119,7 @@ fn extract_text(html: &str) -> String {
             if lower.starts_with("<style") {
                 in_style = true;
             }
+            i += 1;
             while i < bytes.len() && bytes[i] != b'>' {
                 i += 1;
             }
@@ -129,11 +136,11 @@ fn extract_text(html: &str) -> String {
         }
 
         if in_script || in_style {
-            i += 1;
+            i += ch_len;
             continue;
         }
 
-        if bytes[i] == b'&' {
+        if ch == '&' {
             let rest = &html[i..];
             let (entity, skip) = if rest.starts_with("&amp;") {
                 (Some("&"), 5)
@@ -156,23 +163,23 @@ fn extract_text(html: &str) -> String {
             }
         }
 
-        if bytes[i] == b'\n' || bytes[i] == b'\r' {
+        if ch == '\n' || ch == '\r' {
             if !result.ends_with('\n') {
                 result.push('\n');
             }
-            i += 1;
+            i += ch_len;
             continue;
         }
-        if bytes[i].is_ascii_whitespace() {
+        if ch.is_ascii_whitespace() {
             if !result.ends_with(' ') {
                 result.push(' ');
             }
-            i += 1;
+            i += ch_len;
             continue;
         }
 
-        result.push(bytes[i] as char);
-        i += 1;
+        result.push(ch);
+        i += ch_len;
     }
 
     let lines: Vec<&str> = result

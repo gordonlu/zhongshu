@@ -86,6 +86,8 @@ impl Tool for WebFetchTool {
 }
 
 /// Simple HTML-to-text extraction: strip tags, extract meaningful content.
+/// Iterates by UTF-8 character, not byte, so CJK and other multi-byte
+/// characters survive intact.
 fn extract_text(html: &str) -> String {
     let mut result = String::new();
     let mut in_script = false;
@@ -95,7 +97,14 @@ fn extract_text(html: &str) -> String {
     let bytes = html.as_bytes();
 
     while i < bytes.len() {
-        if bytes[i] == b'<' {
+        // Decode one UTF-8 character at the current position.
+        let ch = match html[i..].chars().next() {
+            Some(c) => c,
+            None => break,
+        };
+        let ch_len = ch.len_utf8();
+
+        if ch == '<' {
             // Check for script/style tags to skip their content
             let lower = html[i..].to_lowercase();
             if lower.starts_with("<script") {
@@ -104,13 +113,16 @@ fn extract_text(html: &str) -> String {
             if lower.starts_with("<style") {
                 in_style = true;
             }
+            // Advance past the '<'
+            i += 1;
             // Find end of tag
-            while i < bytes.len() && bytes[i] != b'>' {
+            while i < bytes.len() {
+                if bytes[i] == b'>' {
+                    i += 1;
+                    break;
+                }
                 i += 1;
             }
-            if i < bytes.len() {
-                i += 1;
-            } // skip '>'
             if lower.starts_with("</script") {
                 in_script = false;
             }
@@ -121,11 +133,11 @@ fn extract_text(html: &str) -> String {
         }
 
         if in_script || in_style {
-            i += 1;
+            i += ch_len;
             continue;
         }
 
-        if bytes[i] == b'&' {
+        if ch == '&' {
             let rest = &html[i..];
             let (entity, skip) = if rest.starts_with("&amp;") {
                 (Some("&"), 5)
@@ -149,23 +161,23 @@ fn extract_text(html: &str) -> String {
         }
 
         // Collapse multiple whitespace/newlines
-        if bytes[i] == b'\n' || bytes[i] == b'\r' {
+        if ch == '\n' || ch == '\r' {
             if !result.ends_with('\n') {
                 result.push('\n');
             }
-            i += 1;
+            i += ch_len;
             continue;
         }
-        if bytes[i].is_ascii_whitespace() {
+        if ch.is_ascii_whitespace() {
             if !result.ends_with(' ') {
                 result.push(' ');
             }
-            i += 1;
+            i += ch_len;
             continue;
         }
 
-        result.push(bytes[i] as char);
-        i += 1;
+        result.push(ch);
+        i += ch_len;
     }
 
     // Remove excessive blank lines

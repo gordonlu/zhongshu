@@ -260,7 +260,27 @@ impl DeeplosslessProxy {
     }
 
     /// Permanently delete the most recent conversation from lcm.db.
+    fn our_session_id(&self) -> Option<String> {
+        let expanded = self.db_path.replacen(
+            "~",
+            &std::env::var("HOME").unwrap_or_else(|_| ".".into()),
+            1,
+        );
+        rusqlite::Connection::open(&expanded).ok().and_then(|conn| {
+            conn.query_row(
+                "SELECT session_id FROM conversations ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+        })
+    }
+
     pub async fn delete_chat_history(&self) {
+        let sid = match self.our_session_id() {
+            Some(s) => s,
+            None => return,
+        };
         let guard = self.coordinator.lock().await;
         let coordinator = match guard.as_ref() {
             Some(c) => c,
@@ -274,10 +294,10 @@ impl DeeplosslessProxy {
         );
         if let Ok(conn) = rusqlite::Connection::open(&expanded) {
             let conv_ids: Vec<i64> = conn
-                .prepare("SELECT id FROM conversations")
+                .prepare("SELECT id FROM conversations WHERE session_id = ?1")
                 .ok()
                 .map(|mut stmt| {
-                    stmt.query_map([], |row| row.get::<_, i64>(0))
+                    stmt.query_map(rusqlite::params![&sid], |row| row.get::<_, i64>(0))
                         .ok()
                         .map(|rows| rows.filter_map(|r| r.ok()).collect())
                 })

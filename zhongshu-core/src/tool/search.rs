@@ -1,4 +1,4 @@
-use crate::tool::{build_browser_client, human_delay, Tool, ToolOutput};
+use crate::tool::{acquire_http_permit, build_browser_client, human_delay, Tool, ToolOutput};
 use async_trait::async_trait;
 use serde_json::json;
 use tracing::info;
@@ -48,6 +48,7 @@ impl Tool for WebSearchTool {
         );
 
         human_delay().await;
+        let _permit = acquire_http_permit().await;
 
         let html = match client.get(&url).send().await {
             Ok(r) => match r.text().await {

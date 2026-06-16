@@ -1,5 +1,6 @@
 use crate::tool::{
-    build_browser_client, decode_html, detect_security_page, human_delay, Tool, ToolOutput,
+    acquire_http_permit, build_browser_client, decode_html, detect_security_page, human_delay,
+    Tool, ToolOutput,
 };
 use async_trait::async_trait;
 use serde_json::json;
@@ -41,6 +42,7 @@ impl Tool for BrowserTool {
         };
 
         human_delay().await;
+        let _permit = acquire_http_permit().await;
 
         let html = match client.get(url).send().await {
             Ok(r) => {

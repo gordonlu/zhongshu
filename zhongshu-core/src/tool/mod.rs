@@ -213,11 +213,26 @@ pub async fn human_delay() {
     tokio::time::sleep(Duration::from_millis(ms)).await;
 }
 
+/// Global cookie jar shared across all HTTP clients.
+fn global_cookie_jar() -> Arc<reqwest::cookie::Jar> {
+    static JAR: std::sync::OnceLock<Arc<reqwest::cookie::Jar>> = std::sync::OnceLock::new();
+    JAR.get_or_init(|| Arc::new(reqwest::cookie::Jar::default()))
+        .clone()
+}
+
+/// Limit concurrent HTTP requests (apply backpressure on the LLM).
+pub async fn acquire_http_permit() -> tokio::sync::OwnedSemaphorePermit {
+    static SEM: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    let sem = SEM.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(3)));
+    sem.clone().acquire_owned().await.unwrap()
+}
+
 /// Build an HTTP client with realistic browser headers to reduce
 /// the chance of being blocked by anti-bot detection.
 pub fn build_browser_client() -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+        .cookie_provider(global_cookie_jar())
+        .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7827.102 Safari/537.36")
         .default_headers(
             vec![
                 ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),

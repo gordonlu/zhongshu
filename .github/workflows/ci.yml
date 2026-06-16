@@ -22,19 +22,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup component add clippy
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev
       - run: cargo clippy --workspace --all-targets
 
   check:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev
       - run: cargo check --workspace
 
   test-core:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: cargo test -p zhongshu-core
+      # Authority tests use global OnceLock singletons and must run
+      # sequentially; run them separately in test-core-auth.
+      - run: cargo test -p zhongshu-core -- --skip authority
+
+  test-core-auth:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test -p zhongshu-core -- authority --test-threads=1
 
   test-orb:
     runs-on: ubuntu-24.04

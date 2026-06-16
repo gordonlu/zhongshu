@@ -60,7 +60,7 @@ impl ZhongshuApp {
         event_rx: EventRx,
         response_tx: ResponseTx,
         response_rx: ResponseRx,
-        proxy: DeeplosslessProxy,
+        proxy: Arc<tokio::sync::Mutex<DeeplosslessProxy>>,
         runtime: tokio::runtime::Runtime,
         task_repo: zhongshu_core::core::TaskRepository,
     ) -> anyhow::Result<Self> {
@@ -74,7 +74,7 @@ impl ZhongshuApp {
             inbox,
             indicator: None,
             indicator_state: AgentState::Idle,
-            proxy: Arc::new(tokio::sync::Mutex::new(proxy)),
+            proxy,
             runtime,
             overlay: None,
             event_bus,
@@ -161,6 +161,12 @@ impl ZhongshuApp {
             if let Some(evolve) = settings.auto_evolve {
                 cfg.agent.auto_evolve = evolve;
             }
+            if let Some(ctx) = settings.max_context_tokens {
+                if ctx >= 100_000 && ctx <= 1_000_000 {
+                    cfg.llm.max_context_tokens = ctx;
+                    self.controller.set_max_context_tokens(ctx);
+                }
+            }
             if settings.personality != "默认" && !settings.personality.is_empty() {
                 cfg.agent.personality = settings.personality;
                 cfg.agent.personality_selected = true;
@@ -181,6 +187,7 @@ impl ZhongshuApp {
                 api_key: cfg.llm.api_key(),
                 api_base: cfg.llm.api_base.clone(),
                 model: cfg.llm.model.clone(),
+                max_context_tokens: Some(cfg.llm.max_context_tokens),
                 personality: cfg.agent.personality.clone(),
                 proxy_port: Some(cfg.deeplossless.proxy_port.to_string()),
                 bg_enabled: Some(cfg.agent.background.enabled),

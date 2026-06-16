@@ -50,6 +50,7 @@ impl TaskPlanner {
             stream: false,
             temperature: Some(0.3),
             max_tokens: Some(1500),
+            reasoning_effort: None,
         };
 
         let response = provider.chat(req).await?;

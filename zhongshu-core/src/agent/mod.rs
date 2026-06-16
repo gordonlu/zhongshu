@@ -5,6 +5,7 @@ pub mod llm;
 pub mod loop_;
 pub mod profile;
 pub mod report;
+pub mod router;
 pub mod runtime;
 pub mod worker;
 
@@ -14,5 +15,6 @@ pub use dispatcher::AttentionDispatcher;
 pub use loop_::{run_agent, AgentBudget, AgentCallbacks, LoopResult, StopReason};
 pub use profile::AgentProfile;
 pub use report::Report;
+pub use router::{Complexity, ModelRouter};
 pub use runtime::AgentRuntime;
 pub use worker::{Worker, WorkerProfile};

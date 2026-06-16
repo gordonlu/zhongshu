@@ -55,6 +55,7 @@ pub struct SettingsConfig {
     pub bg_interval: Option<String>,
     pub bg_prompt: Option<String>,
     pub auto_evolve: Option<bool>,
+    pub max_context_tokens: Option<u32>,
 }
 
 // ── Global GTK thread state ─────────────────────────────────────────
@@ -364,6 +365,10 @@ pub fn show(width: f32, height: f32) -> OverlayHandle {
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string()),
                             auto_evolve: cfg.get("auto_evolve").and_then(|v| v.as_bool()),
+                            max_context_tokens: cfg
+                                .get("max_context_tokens")
+                                .and_then(|v| v.as_u64())
+                                .map(|n| n as u32),
                         });
                     }
                 }

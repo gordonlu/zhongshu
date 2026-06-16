@@ -57,6 +57,12 @@ pub struct LlmConfig {
     pub model: String,
     #[serde(default = "default_api_base")]
     pub api_base: String,
+    /// Model routing for DeepSeek V4 flash/pro.
+    #[serde(default)]
+    pub model_routing: ModelRoutingConfig,
+    /// Max context tokens before triggering compression (0 = unlimited).
+    #[serde(default = "default_max_context_tokens")]
+    pub max_context_tokens: u32,
 }
 
 impl Default for LlmConfig {
@@ -65,6 +71,8 @@ impl Default for LlmConfig {
             api_key_env: default_api_key_env(),
             model: default_model(),
             api_base: default_api_base(),
+            model_routing: ModelRoutingConfig::default(),
+            max_context_tokens: default_max_context_tokens(),
         }
     }
 }
@@ -84,6 +92,58 @@ fn default_model() -> String {
 }
 fn default_api_base() -> String {
     "https://api.deepseek.com".into()
+}
+fn default_max_context_tokens() -> u32 {
+    500_000
+}
+
+// ── Model Routing ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelRoutingConfig {
+    /// Enable automatic model routing based on complexity heuristics.
+    #[serde(default = "default_routing_enabled")]
+    pub enabled: bool,
+    /// Model name for simple queries.
+    #[serde(default = "default_flash_model")]
+    pub flash_model: String,
+    /// Model name for complex / agent queries.
+    #[serde(default = "default_pro_model")]
+    pub pro_model: String,
+    /// Reasoning effort for complex queries.
+    #[serde(default = "default_reasoning_complex")]
+    pub reasoning_complex: String,
+    /// Reasoning effort for agent (multi-tool) queries.
+    #[serde(default = "default_reasoning_agent")]
+    pub reasoning_agent: String,
+}
+
+impl Default for ModelRoutingConfig {
+    fn default() -> Self {
+        ModelRoutingConfig {
+            enabled: default_routing_enabled(),
+            flash_model: default_flash_model(),
+            pro_model: default_pro_model(),
+            reasoning_complex: default_reasoning_complex(),
+            reasoning_agent: default_reasoning_agent(),
+        }
+    }
+}
+
+fn default_routing_enabled() -> bool {
+    true
+}
+fn default_flash_model() -> String {
+    "deepseek-v4-flash".into()
+}
+fn default_pro_model() -> String {
+    "deepseek-v4-pro".into()
+}
+fn default_reasoning_complex() -> String {
+    "high".into()
+}
+fn default_reasoning_agent() -> String {
+    "max".into()
 }
 
 // ── Hotkey ──────────────────────────────────────────────────────────
@@ -834,5 +894,85 @@ mod tests {
     fn deeplossless_section_explicit_zero() {
         let section: DeeplosslessSection = serde_json::from_str(r#"{"proxy_port":0}"#).unwrap();
         assert_eq!(section.proxy_port, 0);
+    }
+
+    // ── model routing + context threshold ──
+
+    #[test]
+    fn max_context_tokens_default_500k() {
+        let cfg = LlmConfig::default();
+        assert_eq!(cfg.max_context_tokens, 500_000);
+    }
+
+    #[test]
+    fn model_routing_defaults() {
+        let r = ModelRoutingConfig::default();
+        assert!(r.enabled);
+        assert_eq!(r.flash_model, "deepseek-v4-flash");
+        assert_eq!(r.pro_model, "deepseek-v4-pro");
+        assert_eq!(r.reasoning_complex, "high");
+        assert_eq!(r.reasoning_agent, "max");
+    }
+
+    #[test]
+    fn full_config_with_model_routing_roundtrips() {
+        let json = r#"{
+            "llm": {
+                "model": "deepseek-v4-flash",
+                "model_routing": {
+                    "enabled": true,
+                    "flash_model": "flash",
+                    "pro_model": "pro",
+                    "reasoning_complex": "high",
+                    "reasoning_agent": "max"
+                },
+                "max_context_tokens": 800000
+            }
+        }"#;
+        let cfg: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.llm.max_context_tokens, 800_000);
+        assert_eq!(cfg.llm.model_routing.flash_model, "flash");
+        assert_eq!(cfg.llm.model_routing.pro_model, "pro");
+    }
+
+    #[test]
+    fn partial_config_uses_model_routing_defaults() {
+        let json = r#"{"llm": {"model": "deepseek-v4-pro"}}"#;
+        let cfg: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.llm.max_context_tokens, 500_000);
+        assert!(cfg.llm.model_routing.enabled);
+        assert_eq!(cfg.llm.model_routing.flash_model, "deepseek-v4-flash");
+        assert_eq!(cfg.llm.model_routing.reasoning_agent, "max");
+    }
+
+    #[test]
+    fn compression_threshold_80_percent() {
+        // Threshold logic in spawn_task():
+        //   let trigger = (max_ctx as f64 * 0.8) as usize;
+        //   if estimated > max_ctx as usize { hard cap }
+        //   else if estimated > trigger { compression trigger }
+
+        // 500k default
+        let max: u32 = 500_000;
+        let trigger = (max as f64 * 0.8) as usize;
+        assert_eq!(trigger, 400_000);
+        assert!(400_001 > trigger);   // just above → triggers
+        assert!(!(400_000 > trigger)); // at trigger → does not trigger
+        assert!(500_001 > max as usize); // over hard cap
+
+        // 1M
+        let max: u32 = 1_000_000;
+        let trigger = (max as f64 * 0.8) as usize;
+        assert_eq!(trigger, 800_000);
+        assert!(800_001 > trigger);
+        assert!(!(800_000 > trigger));
+        assert!(1_000_001 > max as usize);
+
+        // 700k (mid value)
+        let max: u32 = 700_000;
+        let trigger = (max as f64 * 0.8) as usize;
+        assert_eq!(trigger, 560_000);
+        assert!(560_001 > trigger);
+        assert!(700_001 > max as usize);
     }
 }

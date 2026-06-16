@@ -33,6 +33,16 @@ impl OpenAiProvider {
         self
     }
 
+    pub fn with_model(&self, model: impl Into<String>) -> Self {
+        Self {
+            client: self.client.clone(),
+            api_key: self.api_key.clone(),
+            base_url: self.base_url.clone(),
+            model: model.into(),
+            embedding_model: self.embedding_model.clone(),
+        }
+    }
+
     fn build_body(&self, mut request: ChatCompletionRequest) -> serde_json::Value {
         request.model = self.model.clone();
         request.stream = false;
@@ -65,6 +75,10 @@ impl OpenAiProvider {
         }
         if let Some(mt) = request.max_tokens {
             body["max_tokens"] = serde_json::Value::from(mt);
+        }
+        if let Some(ref re) = request.reasoning_effort {
+            body["reasoning_effort"] = serde_json::Value::String(re.clone());
+            body["thinking"] = serde_json::json!({"type": "enabled"});
         }
         body
     }
@@ -100,6 +114,10 @@ impl OpenAiProvider {
         }
         if let Some(mt) = request.max_tokens {
             body["max_tokens"] = serde_json::Value::from(mt);
+        }
+        if let Some(ref re) = request.reasoning_effort {
+            body["reasoning_effort"] = serde_json::Value::String(re.clone());
+            body["thinking"] = serde_json::json!({"type": "enabled"});
         }
         body
     }

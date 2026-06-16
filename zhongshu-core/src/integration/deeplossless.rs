@@ -116,6 +116,91 @@ impl DeeplosslessProxy {
         }
     }
 
+    /// Get the current (most recent) conversation ID from deeplossless.
+    pub async fn current_conv_id(&self) -> Option<i64> {
+        let expanded = self.db_path.replacen(
+            "~",
+            &std::env::var("HOME").unwrap_or_else(|_| ".".into()),
+            1,
+        );
+        let conn = rusqlite::Connection::open(&expanded).ok()?;
+        conn.query_row(
+            "SELECT id FROM conversations ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .ok()
+    }
+
+    /// Compress the oldest `count` DAG leaves in the current conversation
+    /// by POSTing to the local `/v1/lcm/compress` endpoint.
+    ///
+    /// Returns the number of leaf nodes compressed (0 if none, 0 if
+    /// proxy not yet started).
+    pub async fn compress_oldest_leaves(&self, count: usize) -> anyhow::Result<usize> {
+        if self.base_url.is_empty() || count < 2 {
+            return Ok(0);
+        }
+        let conv_id = match self.current_conv_id().await {
+            Some(id) => id,
+            None => return Ok(0),
+        };
+
+        // Query oldest leaf IDs directly from the SQLite db.
+        let expanded = self.db_path.replacen(
+            "~",
+            &std::env::var("HOME").unwrap_or_else(|_| ".".into()),
+            1,
+        );
+        let conn = match rusqlite::Connection::open(&expanded) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("compress: cannot open lcm.db: {e}");
+                return Ok(0);
+            }
+        };
+        let ids: Vec<i64> = match conn.prepare(
+            "SELECT id FROM dag_nodes WHERE conversation_id = ?1 AND is_leaf = 1 AND deleted = 0 ORDER BY id ASC LIMIT ?2",
+        ) {
+            Ok(mut stmt) => stmt
+                .query_map(rusqlite::params![conv_id, count as i64], |row| row.get::<_, i64>(0))
+                .ok()
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default(),
+            Err(e) => {
+                tracing::warn!("compress: cannot query dag leaves: {e}");
+                return Ok(0);
+            }
+        };
+
+        if ids.len() < 2 {
+            return Ok(0);
+        }
+
+        let from = ids[0];
+        let to = ids[ids.len() - 1];
+        let url = format!("{}lcm/compress", self.base_url);
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(&url)
+            .json(&serde_json::json!({"conv_id": conv_id, "from": from, "to": to}))
+            .send()
+            .await?;
+
+        if resp.status().is_success() {
+            tracing::info!(
+                "compressed {} DAG leaves [{from}..{to}] in conv {conv_id}",
+                ids.len()
+            );
+            Ok(ids.len())
+        } else {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            tracing::warn!("compress endpoint returned {status}: {text}");
+            Ok(0)
+        }
+    }
+
     /// Load recent chat history with correct roles from the messages table.
     /// Opens a direct read-only SQLite connection to lcm.db.
     /// Returns a list of (role, content) pairs from the most recent conversation.

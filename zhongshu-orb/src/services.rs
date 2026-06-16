@@ -205,6 +205,7 @@ pub fn spawn_task_executor(eb: Arc<EventBus>, provider: OpenAiProvider, core_db_
                     stream: false,
                     temperature: None,
                     max_tokens: Some(2000),
+                    reasoning_effort: None,
                 };
                 let step_output = match p.chat(req).await {
                     Ok(r) => r
@@ -335,6 +336,7 @@ pub fn spawn_llm_suggestion_engine(provider: OpenAiProvider, core_db_path: PathB
                 stream: false,
                 temperature: Some(0.3),
                 max_tokens: Some(1000),
+                reasoning_effort: None,
             };
             let response = match p.chat(req).await {
                 Ok(r) => r

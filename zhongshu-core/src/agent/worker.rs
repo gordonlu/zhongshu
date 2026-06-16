@@ -90,6 +90,7 @@ impl Worker {
             budget: profile.to_worker_budget(),
             provider: runtime.provider.clone(),
             model: runtime.model.clone(),
+            reasoning_effort: None,
         }
     }
 

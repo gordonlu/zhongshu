@@ -14,7 +14,7 @@ use winit::event_loop::EventLoop;
 
 use zhongshu_core::agent::llm::OpenAiProvider;
 use zhongshu_core::agent::{
-    AgentBudget, AgentProfile, AgentRuntime, AttentionDispatcher, AttentionManager,
+    AgentBudget, AgentProfile, AgentRuntime, AttentionDispatcher, AttentionManager, ModelRouter,
 };
 use zhongshu_core::authority::{self, AuthorityGate};
 use zhongshu_core::core::{
@@ -206,6 +206,7 @@ fn main() {
         .expect("deeplossless proxy failed to start");
     let base_url = format!("http://127.0.0.1:{actual_port}/v1");
     tracing::info!("deeplossless proxy at {base_url}");
+    let proxy = Arc::new(tokio::sync::Mutex::new(proxy));
 
     let eb = Arc::new(EventBus::new(4096));
     let (response_tx, response_rx) = mpsc::channel::<ResponseEvent>(cfg.agent.response_capacity);
@@ -278,6 +279,11 @@ fn main() {
     let memory_tool =
         zhongshu_core::tool::memory::MemoryTool::new(config::config_dir().join("agent.json"));
 
+    // Create model router from config.
+    let model_router = ModelRouter::new(
+        &cfg.llm.model_routing.flash_model,
+        &cfg.llm.model_routing.pro_model,
+    );
     let controller = Arc::new(AgentController::new(
         eb.clone(),
         response_tx.clone(),
@@ -297,6 +303,11 @@ fn main() {
         app::SessionState::new(),
         system_prompt,
         config::config_dir().join("agent.json"),
+        proxy.clone(),
+        model_router,
+        cfg.llm.model_routing.reasoning_complex.clone(),
+        cfg.llm.model_routing.reasoning_agent.clone(),
+        cfg.llm.max_context_tokens,
     ));
     let inbox = Arc::new(AgentInbox::new(controller.clone()));
     inbox.start();

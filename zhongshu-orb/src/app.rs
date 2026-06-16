@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -12,12 +13,13 @@ use crate::config;
 use tokio::sync::RwLock;
 use zhongshu_core::agent::llm::{Message, OpenAiProvider};
 use zhongshu_core::agent::{
-    run_agent, AgentBudget, AgentCallbacks, AgentProfile, AgentRuntime, Worker,
+    run_agent, AgentBudget, AgentCallbacks, AgentProfile, AgentRuntime, ModelRouter, Worker,
 };
 use zhongshu_core::event::{
     AgentEvent, AgentState, Event, EventBus, MessageId, ResponseEvent, ResponseRole, ResponseTx,
     ToolEvent,
 };
+use zhongshu_core::integration::DeeplosslessProxy;
 use zhongshu_core::task::TaskQueue;
 use zhongshu_core::tool::ToolRegistry;
 
@@ -52,6 +54,11 @@ pub struct AgentController {
     state: Arc<RwLock<AgentState>>,
     memory: AgentMemory,
     current_task: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    proxy: Arc<tokio::sync::Mutex<DeeplosslessProxy>>,
+    router: ModelRouter,
+    reasoning_complex: String,
+    reasoning_agent: String,
+    max_context_tokens: AtomicU32,
 }
 
 impl AgentController {
@@ -64,6 +71,11 @@ impl AgentController {
         #[allow(dead_code)] session: SessionState,
         system_prompt: String,
         profile_path: PathBuf,
+        proxy: Arc<tokio::sync::Mutex<DeeplosslessProxy>>,
+        router: ModelRouter,
+        reasoning_complex: String,
+        reasoning_agent: String,
+        max_context_tokens: u32,
     ) -> Self {
         let memory = AgentMemory::load(&profile_path);
         AgentController {
@@ -78,6 +90,11 @@ impl AgentController {
             state: Arc::new(RwLock::new(AgentState::Idle)),
             memory,
             current_task: Arc::new(tokio::sync::Mutex::new(None)),
+            proxy,
+            router,
+            reasoning_complex,
+            reasoning_agent,
+            max_context_tokens: AtomicU32::new(max_context_tokens),
         }
     }
 
@@ -89,6 +106,11 @@ impl AgentController {
 
     pub fn set_system_prompt(&self, prompt: String) {
         *self.system_prompt.lock().unwrap() = prompt;
+    }
+
+    pub fn set_max_context_tokens(&self, val: u32) {
+        self.max_context_tokens.store(val, Ordering::Relaxed);
+        tracing::info!("max_context_tokens updated to {val}");
     }
 
     pub fn set_chat_history(&self, history: Vec<(String, String)>) {
@@ -174,13 +196,27 @@ impl AgentController {
     fn spawn_task(&self, input: String) {
         let eb = self.event_bus.clone();
         let tx = self.response_tx.clone();
-        let p = self.provider.clone();
         let t = self.tools.clone();
-        let m = self.model.clone();
         let sys = self.system_prompt.lock().unwrap().clone();
         let history_arc = self.history.clone();
         let memory = self.memory.clone();
         let state_arc = self.state.clone();
+
+        // Determine routed model + reasoning effort.
+        let (routed_model, routed_effort) = self.router.route(&input);
+        let reasoning_str: Option<String> = match routed_effort {
+            Some("high") => Some(self.reasoning_complex.clone()),
+            Some("max") => Some(self.reasoning_agent.clone()),
+            _ => None,
+        };
+        let p = if routed_model != self.model {
+            self.provider.with_model(&routed_model)
+        } else {
+            self.provider.clone()
+        };
+        let m = routed_model;
+        let max_ctx = self.max_context_tokens.load(Ordering::Relaxed);
+        let proxy = self.proxy.clone();
 
         // Snapshot profile for the prompt — non‑blocking read.
         let profile_ctx = memory.prompt_context();
@@ -193,6 +229,36 @@ impl AgentController {
                     role: ResponseRole::Assistant,
                 })
                 .await;
+
+            // Context compression: drop oldest history pairs when over 80%.
+            if max_ctx > 0 {
+                let trigger = (max_ctx as f64 * 0.8) as usize;
+                let base_est = (sys.len() / 4) + 1 + (input.len() / 4) + 1
+                    + if !profile_ctx.is_empty() { (profile_ctx.len() / 4) + 1 } else { 0 };
+
+                // Compute how many to drop — history lock is scoped so it's
+                // released before the async proxy lock below.
+                let dropped = {
+                    let mut history = history_arc.lock().unwrap();
+                    compress_history(&mut history, base_est, trigger)
+                };
+                if dropped > 0 {
+                    let _ = tx.send(ResponseEvent::MessageDelta {
+                        id: aid,
+                        delta: format!("\n——压缩中(已归档{dropped}条)——\n\n"),
+                    }).await;
+                    // Best-effort deeplossless DAG compression before discarding.
+                    let proxy_guard = proxy.lock().await;
+                    let compressed = proxy_guard.compress_oldest_leaves(dropped).await.unwrap_or(0);
+                    if compressed > 0 {
+                        tracing::info!(
+                            "deeplossless compressed {compressed} leaves, dropped {dropped} from history"
+                        );
+                    } else {
+                        tracing::info!("compressed context: dropped {dropped} messages (deeplossless unavailable)");
+                    }
+                }
+            }
 
             let mut msgs = vec![Message::system(&sys)];
             if !profile_ctx.is_empty() {
@@ -209,7 +275,9 @@ impl AgentController {
                 }
             }
             msgs.push(Message::user(input.clone()));
-            let runtime = AgentRuntime::new(p, t, m, AgentBudget::default());
+
+            let mut runtime = AgentRuntime::new(p, t, m, AgentBudget::default());
+            runtime.reasoning_effort = reasoning_str;
 
             let callbacks = AgentCallbacks {
                 on_text: {
@@ -471,5 +539,156 @@ impl TaskWorkerDispatcher {
             }
             tracing::info!("worker dispatcher stopped (queue closed)");
         })
+    }
+}
+
+/// Drop oldest history pairs until estimated tokens ≤ trigger.
+/// Returns number of messages dropped.
+pub(crate) fn compress_history(
+    history: &mut Vec<(String, String)>,
+    base_est: usize,
+    trigger: usize,
+) -> usize {
+    if history.is_empty() || history.len() < 2 {
+        return 0;
+    }
+    let costs: Vec<usize> = history.iter().map(|(_, c)| (c.len() / 4) + 1).collect();
+    let total: usize = costs.iter().sum::<usize>() + base_est;
+    if total <= trigger {
+        return 0;
+    }
+    let mut running = total;
+    let mut to_drop = 0;
+    while running > trigger && to_drop + 2 <= history.len() {
+        running -= costs[to_drop] + costs[to_drop + 1];
+        to_drop += 2;
+    }
+    if to_drop > 0 {
+        history.drain(..to_drop);
+    }
+    to_drop
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compress_empty_history() {
+        let mut h = vec![];
+        assert_eq!(compress_history(&mut h, 100, 80), 0);
+        assert!(h.is_empty());
+    }
+
+    #[test]
+    fn compress_under_threshold_no_op() {
+        let mut h = vec![("user".into(), "hi".into()), ("assistant".into(), "hello".into())];
+        // base_est=1, trigger=1000: 1 + (2/4+1)+(5/4+1) = 1+1+2 = 4 << 1000
+        assert_eq!(compress_history(&mut h, 1, 1000), 0);
+        assert_eq!(h.len(), 2);
+    }
+
+    #[test]
+    fn compress_drops_oldest_pair() {
+        let mut h = vec![
+            ("user".into(), "old msg".into()),
+            ("assistant".into(), "old reply".into()),
+            ("user".into(), "new msg".into()),
+            ("assistant".into(), "new reply".into()),
+        ];
+        // Costs: old msg=(8/4+1)=3, old reply=(9/4+1)=3, new msg=(7/4+1)=2, new reply=(9/4+1)=3
+        // base_est=1 → total = 1+3+3+2+3 = 12
+        // trigger=8 → total>trigger, drop first pair: running=12-3-3=6 ≤ 8 → drop 2
+        let dropped = compress_history(&mut h, 1, 8);
+        assert_eq!(dropped, 2, "should drop the oldest pair");
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0].1, "new msg");
+        assert_eq!(h[1].1, "new reply");
+    }
+
+    #[test]
+    fn compress_drops_multiple_pairs_when_needed() {
+        let mut h = vec![
+            ("user".into(), "a".repeat(100)),       // 100/4+1 = 26
+            ("assistant".into(), "b".repeat(100)),   // 26
+            ("user".into(), "c".repeat(100)),        // 26
+            ("assistant".into(), "d".repeat(100)),   // 26
+            ("user".into(), "e".repeat(50)),         // 50/4+1 = 13
+            ("assistant".into(), "f".repeat(50)),    // 13
+        ];
+        // total = base + 26+26+26+26+13+13 = base + 130
+        let base = 10;
+        let trigger = 70;
+        // total = 140, need running ≤ 70
+        // drop pair 1: 140-26-26=88 > 70
+        // drop pair 2: 88-26-26=36 ≤ 70 → drop 4 messages (2 pairs)
+        let dropped = compress_history(&mut h, base, trigger);
+        assert_eq!(dropped, 4);
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0].1, "e".repeat(50));
+        assert_eq!(h[1].1, "f".repeat(50));
+    }
+
+    /// Smoke test: realistic message sizes (~100–1000 chars) with a
+    /// typical system prompt base estimate (800 tokens).
+    #[test]
+    fn compress_smoke_realistic_sizes() {
+        let n_pairs = 50; // 100 messages
+        let mut h: Vec<(String, String)> = (0..n_pairs)
+            .flat_map(|i| {
+                let user = format!(
+                    "用户第{}条消息：{}",
+                    i,
+                    "请帮我分析一下这个数据，看看有什么值得注意的趋势和模式。我们需要重点关注异常值。".repeat(6)
+                );
+                let assistant = format!(
+                    "这是第{}次回复：{}",
+                    i,
+                    "好的，我来分析这些数据。从整体趋势来看，数据呈现出明显的周期性波动。\
+                     具体来说，第1-3周处于上升期，第4周达到峰值后开始回落，\
+                     第5-8周处于低位盘整阶段。建议关注以下几个关键指标：\
+                     日均活跃用户数、转化率、留存率和平均会话时长。\
+                     异常值出现在第4周周三，可能是由于促销活动导致的短期波动。"
+                        .repeat(4)
+                );
+                vec![(user, assistant)]
+            })
+            .collect();
+        // base ~800 tokens for system prompt, trigger ~3000
+        let base = 800;
+        let trigger = 3000;
+        let total_before = h.len();
+        let dropped = compress_history(&mut h, base, trigger);
+        assert!(dropped > 0, "should drop some messages when over trigger");
+        assert!(
+            dropped % 2 == 0,
+            "should only drop complete user/assistant pairs"
+        );
+        assert_eq!(h.len() + dropped, total_before, "total messages conserved");
+        // Verify the most recent pair is always preserved
+        assert_eq!(h.last().unwrap().0, format!("用户第{}条消息：{}", n_pairs - 1, "请帮我分析一下这个数据，看看有什么值得注意的趋势和模式。我们需要重点关注异常值。".repeat(6)));
+        // Token estimate must be below (or very close to) trigger after compression
+        let costs: Vec<usize> = h.iter().map(|(_, c)| (c.len() / 4) + 1).collect();
+        let remain_est: usize = costs.iter().sum::<usize>() + base;
+        assert!(
+            remain_est <= trigger + 50,
+            "after compression estimated tokens {remain_est} should be near trigger {trigger}"
+        );
+    }
+
+    #[test]
+    fn compress_odd_history_does_not_drop_last_single() {
+        let mut h = vec![
+            ("user".into(), "x".repeat(200)),        // 51
+            ("assistant".into(), "y".repeat(200)),   // 51
+            ("user".into(), "z".repeat(50)),         // 13
+        ];
+        // base=5, total = 5+51+51+13 = 120, trigger=10
+        // drop pair 1: 120-51-51=18 > 10
+        // remaining = 1 entry (not a pair), stop
+        let dropped = compress_history(&mut h, 5, 10);
+        assert_eq!(dropped, 2, "drops the complete pair, leaves lone user");
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].1, "z".repeat(50));
     }
 }

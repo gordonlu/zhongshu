@@ -150,6 +150,9 @@ body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMac
 #settings-card input[type=number]::-webkit-outer-spin-button,
 #settings-card input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
 #settings-card input[type=number]{-moz-appearance:textfield;appearance:textfield}
+#set-context-size::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:14px;height:14px;border-radius:50%;background:var(--accent);cursor:pointer;border:none;transition:transform 120ms}
+#set-context-size::-webkit-slider-thumb:hover{transform:scale(1.15)}
+#set-context-size::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:var(--accent);cursor:pointer;border:none}
 #settings-card input[type=checkbox]{width:15px;height:15px;accent-color:var(--accent);cursor:pointer}
 #settings-save{width:100%;background:var(--accent);border:none;border-radius:var(--radius-sm);padding:9px;color:#fff;font-weight:500;cursor:pointer;margin-top:14px;transition:all 120ms;font-size:12.5px}
 #settings-save:hover{background:var(--accent-hover)}
@@ -242,6 +245,18 @@ body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMac
     <input id="set-bg-interval" type="number" placeholder="600">
     <label>检查提示词</label>
     <textarea id="set-bg-prompt" rows="2" style="width:100%;background:var(--input-bg);border:1px solid var(--border);border-radius:8px;padding:8px 11px;color:var(--text);font:13px system-ui,sans-serif;outline:none;resize:vertical;transition:border-color 120ms">[定时检查] 使用 system_info 工具收集系统信息并检查异常</textarea>
+    <label>上下文窗口</label>
+    <div style="display:flex;align-items:center;gap:10px;margin-top:4px">
+      <input id="set-context-size" type="range" min="500000" max="1000000" step="100000" value="500000"
+        style="flex:1;height:4px;border-radius:2px;background:var(--border);outline:none;-webkit-appearance:none;appearance:none;cursor:pointer;accent-color:var(--accent)">
+      <span id="ctx-size-label" style="font-size:13px;color:var(--text);min-width:52px;text-align:right;font-variant-numeric:tabular-nums">500k</span>
+    </div>
+    <span style="font-size:11px;color:var(--text-muted);display:block;margin-top:4px;line-height:1.4">
+      ⚠ 上下文越大，信息越完整，但代价也越高：<br>
+      · 每轮对话都携带全部历史，token 消耗随轮数线性增长<br>
+      · 达到上限的 80% 时自动触发压缩，丢弃早期对话<br>
+      · 1M 适合需要长期上下文的深度工作流，日常 500k 更经济
+    </span>
     <div style="margin-top:8px">
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text);letter-spacing:0">
         <input id="set-auto-evolve" type="checkbox" style="width:auto"> 自动进化
@@ -576,6 +591,8 @@ function handleIpc(message) {
         document.getElementById('set-bg-enabled').checked = msg.config.bg_enabled || false;
         document.getElementById('set-bg-interval').value = msg.config.bg_interval || '600';
         document.getElementById('set-bg-prompt').value = msg.config.bg_prompt || '';
+        document.getElementById('set-context-size').value = String(msg.config.max_context_tokens || 500000);
+        updateCtxSizeLabel();
         document.getElementById('set-auto-evolve').checked = msg.config.auto_evolve || false;
         document.getElementById('settings-overlay').classList.add('active');
         break;
@@ -594,6 +611,12 @@ function handleIpc(message) {
   } catch(e) {
     console.error('IPC error:', e);
   }
+}
+
+function updateCtxSizeLabel() {
+  var s = document.getElementById('set-context-size');
+  var v = parseInt(s.value) / 1000;
+  document.getElementById('ctx-size-label').textContent = (v >= 1000 ? '1M' : v + 'k');
 }
 
 function showToast(text) {
@@ -687,6 +710,7 @@ document.getElementById('btn-settings').addEventListener('click', function() {
 document.getElementById('settings-close').addEventListener('click', function() {
   document.getElementById('settings-overlay').classList.remove('active');
 });
+document.getElementById('set-context-size').addEventListener('input', updateCtxSizeLabel);
 document.getElementById('input').addEventListener('keydown', function(e) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
@@ -726,6 +750,7 @@ document.getElementById('settings-save').addEventListener('click', function() {
     bg_interval: document.getElementById('set-bg-interval').value,
     bg_prompt: document.getElementById('set-bg-prompt').value,
     auto_evolve: document.getElementById('set-auto-evolve').checked,
+    max_context_tokens: parseInt(document.getElementById('set-context-size').value) || 500000,
   }});
   document.getElementById('settings-overlay').classList.remove('active');
 });

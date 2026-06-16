@@ -338,6 +338,7 @@ fn build_request(
         stream: false,
         temperature: None,
         max_tokens: None,
+        reasoning_effort: runtime.reasoning_effort.clone(),
     }
 }
 

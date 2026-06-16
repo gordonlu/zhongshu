@@ -18,6 +18,7 @@ pub struct AgentRuntime {
     pub registry: ToolRegistry,
     pub model: String,
     pub budget: AgentBudget,
+    pub reasoning_effort: Option<String>,
 }
 
 impl AgentRuntime {
@@ -32,6 +33,7 @@ impl AgentRuntime {
             registry,
             model: model.into(),
             budget,
+            reasoning_effort: None,
         }
     }
 }

@@ -1,7 +1,8 @@
-use crate::tool::{build_browser_client, decode_html, detect_security_page, Tool, ToolOutput};
+use crate::tool::{
+    build_browser_client, decode_html, detect_security_page, human_delay, Tool, ToolOutput,
+};
 use async_trait::async_trait;
 use serde_json::json;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub struct WebFetchTool;
 
@@ -37,13 +38,7 @@ impl Tool for WebFetchTool {
             Err(e) => return ToolOutput::error(format!("HTTP 客户端创建失败: {e}")),
         };
 
-        // Simulate human-like delay (500-2000ms) to avoid bot detection.
-        let ns = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let delay_ms = 500 + (ns % 1501) as u64;
-        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        human_delay().await;
 
         let html = match client.get(url).send().await {
             Ok(r) => {

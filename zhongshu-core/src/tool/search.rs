@@ -1,4 +1,4 @@
-use crate::tool::{build_browser_client, Tool, ToolOutput};
+use crate::tool::{build_browser_client, human_delay, Tool, ToolOutput};
 use async_trait::async_trait;
 use serde_json::json;
 use tracing::info;
@@ -46,6 +46,8 @@ impl Tool for WebSearchTool {
             urlencoding(query),
             urlencoding(region)
         );
+
+        human_delay().await;
 
         let html = match client.get(&url).send().await {
             Ok(r) => match r.text().await {

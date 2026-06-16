@@ -207,6 +207,12 @@ pub fn decode_html(bytes: &[u8], content_type: Option<&str>) -> String {
     text.into_owned()
 }
 
+/// Simulate human reading / typing delay: 1000–3000ms.
+pub async fn human_delay() {
+    let ms = 1000 + rand::random::<u64>() % 2001;
+    tokio::time::sleep(Duration::from_millis(ms)).await;
+}
+
 /// Build an HTTP client with realistic browser headers to reduce
 /// the chance of being blocked by anti-bot detection.
 pub fn build_browser_client() -> Result<reqwest::Client, reqwest::Error> {

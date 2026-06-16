@@ -6,15 +6,11 @@ use crate::core::models::*;
 #[derive(Clone)]
 pub struct SuggestionEngine {
     db: Database,
-    min_confidence: f64,
 }
 
 impl SuggestionEngine {
     pub fn new(db: Database) -> Self {
-        SuggestionEngine {
-            db,
-            min_confidence: 0.5,
-        }
+        SuggestionEngine { db }
     }
 
     pub fn insert(

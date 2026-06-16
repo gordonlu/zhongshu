@@ -59,7 +59,7 @@ impl Tool for WebFetchTool {
         let truncated = if text.len() > max_len {
             format!(
                 "{}...\n\n[页面过长，已截断至 {} 字符]",
-                &text[..max_len],
+                &text[..text.floor_char_boundary(max_len)],
                 max_len
             )
         } else {

@@ -266,41 +266,39 @@ impl DeeplosslessProxy {
             Some(c) => c,
             None => return,
         };
+        // Soft-delete DAG nodes across ALL conversations.
         let db = &coordinator.state.storage.db;
-        let conv_id = match db.last_conversation_id() {
-            Ok(Some(id)) => id,
-            _ => return,
-        };
-        // Soft-delete all DAG nodes in this conversation
-        let all = match db.get_all_dag_nodes(conv_id) {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::warn!("failed to load dag nodes for deletion: {e}");
-                return;
-            }
-        };
-        for node in &all {
-            if !node.deleted {
-                if let Err(e) = db.delete_dag_node(node.id) {
-                    tracing::warn!("failed to delete dag node {}: {e}", node.id);
-                }
-            }
-        }
-        tracing::info!("deleted {} nodes from conversation {conv_id}", all.len());
-
-        // Also delete from the messages table so history doesn't reappear on restart.
-        if let Ok(conn) = rusqlite::Connection::open(&self.db_path.replacen(
+        let expanded = self.db_path.replacen(
             "~",
             &std::env::var("HOME").unwrap_or_else(|_| ".".into()),
             1,
-        )) {
-            if let Err(e) = conn.execute(
-                "DELETE FROM messages WHERE conversation_id = ?1",
-                rusqlite::params![conv_id],
-            ) {
-                tracing::warn!("failed to delete messages for conversation {conv_id}: {e}");
+        );
+        if let Ok(conn) = rusqlite::Connection::open(&expanded) {
+            let conv_ids: Vec<i64> = conn
+                .prepare("SELECT id FROM conversations")
+                .ok()
+                .map(|mut stmt| {
+                    stmt.query_map([], |row| row.get::<_, i64>(0))
+                        .ok()
+                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                })
+                .flatten()
+                .unwrap_or_default();
+            for cid in &conv_ids {
+                if let Ok(nodes) = db.get_all_dag_nodes(*cid) {
+                    for node in &nodes {
+                        if !node.deleted {
+                            let _ = db.delete_dag_node(node.id);
+                        }
+                    }
+                    tracing::info!("deleted {} nodes from conversation {cid}", nodes.len());
+                }
+            }
+            // Nuke ALL messages regardless of conversation.
+            if let Err(e) = conn.execute("DELETE FROM messages", []) {
+                tracing::warn!("failed to delete messages: {e}");
             } else {
-                tracing::info!("deleted all messages for conversation {conv_id}");
+                tracing::info!("deleted all messages");
             }
         }
     }

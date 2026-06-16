@@ -86,6 +86,7 @@ pub(crate) static GTK_TX: once_cell::sync::Lazy<crossbeam_channel::Sender<GtkCom
 
             let webview = wry::WebViewBuilder::new()
                 .with_html(html)
+                .with_user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7827.102 Safari/537.36")
                 .with_ipc_handler(move |request: http::Request<String>| {
                     IPC_HANDLER.lock().unwrap().as_ref().map(|h| h(request));
                 })

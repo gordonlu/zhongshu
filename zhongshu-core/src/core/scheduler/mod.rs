@@ -42,7 +42,7 @@ impl Scheduler {
         for goal in &goals {
             let task = match goal.goal_type {
                 GoalType::OneShot => {
-                    if self.has_pending_task(&goal.id) {
+                    if self.has_any_task(&goal.id) {
                         continue;
                     }
                     self.task_repo.create(Some(&goal.id), &goal.title)

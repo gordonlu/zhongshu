@@ -310,6 +310,7 @@ fn main() {
         cfg.llm.model_routing.reasoning_complex.clone(),
         cfg.llm.model_routing.reasoning_agent.clone(),
         cfg.llm.max_context_tokens,
+        equipment.clone(),
     ));
     let inbox = Arc::new(AgentInbox::new(controller.clone()));
     inbox.start();

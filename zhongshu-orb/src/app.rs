@@ -49,7 +49,7 @@ pub struct AgentController {
     model: String,
     #[allow(dead_code)]
     session: SessionState,
-    base_system_prompt: String,
+    base_system_prompt: Mutex<String>,
     system_prompt: Mutex<String>,
     history: Arc<Mutex<Vec<(String, String)>>>,
     state: Arc<RwLock<AgentState>>,
@@ -59,6 +59,7 @@ pub struct AgentController {
     router: ModelRouter,
     reasoning_complex: String,
     reasoning_agent: String,
+    equipment: Arc<Mutex<zhongshu_core::equipment::EquipmentRegistry>>,
     max_context_tokens: AtomicU32,
     pub auto_evolve_enabled: AtomicBool,
 }
@@ -79,6 +80,7 @@ impl AgentController {
         reasoning_complex: String,
         reasoning_agent: String,
         max_context_tokens: u32,
+        equipment: Arc<Mutex<zhongshu_core::equipment::EquipmentRegistry>>,
     ) -> Self {
         let memory = AgentMemory::load(&profile_path);
         AgentController {
@@ -88,7 +90,7 @@ impl AgentController {
             tools,
             model,
             session,
-            base_system_prompt,
+            base_system_prompt: Mutex::new(base_system_prompt),
             system_prompt: Mutex::new(system_prompt),
             history: Arc::new(Mutex::new(Vec::new())),
             state: Arc::new(RwLock::new(AgentState::Idle)),
@@ -100,6 +102,7 @@ impl AgentController {
             reasoning_agent,
             max_context_tokens: AtomicU32::new(max_context_tokens),
             auto_evolve_enabled: AtomicBool::new(false),
+            equipment,
         }
     }
 
@@ -109,27 +112,24 @@ impl AgentController {
         self.state.clone()
     }
 
+    /// Update the base system prompt (e.g. after personality change).
+    /// Skill prompts are automatically re-applied.
     pub fn set_system_prompt(&self, prompt: String) {
-        *self.system_prompt.lock().unwrap() = prompt;
+        *self.base_system_prompt.lock().unwrap() = prompt;
+        self.refresh_skill_prompts();
     }
 
     /// Rebuild system prompt by appending current skill prompts.
-    pub fn refresh_skill_prompts(&self, equipment: &zhongshu_core::equipment::EquipmentRegistry) {
-        let base = &self.base_system_prompt;
-        let skill_prompts = equipment.skill_prompts();
-        if skill_prompts.is_empty() {
-            return;
-        }
-        let mut full = base.clone();
-        for (_id, prompt) in &skill_prompts {
-            full.push_str("\n\n");
-            full.push_str(prompt);
+    pub fn refresh_skill_prompts(&self) {
+        let base = self.base_system_prompt.lock().unwrap().clone();
+        let mut full = base;
+        if let Ok(reg) = self.equipment.lock() {
+            for (_id, prompt) in &reg.skill_prompts() {
+                full.push_str("\n\n");
+                full.push_str(prompt);
+            }
         }
         *self.system_prompt.lock().unwrap() = full;
-        tracing::info!(
-            "refreshed system prompt with {} skill(s)",
-            skill_prompts.len()
-        );
     }
 
     pub fn set_max_context_tokens(&self, val: u32) {

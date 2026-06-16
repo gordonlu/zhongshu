@@ -510,7 +510,7 @@ pub fn spawn_auto_evolution(
             match equipment.lock().unwrap().install_from(&tmp) {
                 Ok(id) => {
                     tracing::info!("auto_evolve: installed '{}'", id);
-                    controller.refresh_skill_prompts(&equipment.lock().unwrap());
+                    controller.refresh_skill_prompts();
                 }
                 Err(e) => {
                     tracing::warn!("auto_evolve: install failed for '{name}': {e}");

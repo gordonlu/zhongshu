@@ -178,25 +178,45 @@ impl ToolRegistry {
 /// Decode HTML bytes with correct encoding, respecting Content-Type
 /// header and HTML `<meta charset="...">` declarations.
 pub fn decode_html(bytes: &[u8], content_type: Option<&str>) -> String {
-    // 1. Try charset from Content-Type header.
+    // 1. Try charset from Content-Type header:
+    //    `text/html; charset=utf-8` or `text/html; charset="utf-8"`
     let mut encoding = None;
     if let Some(ct) = content_type {
         if let Some(pos) = ct.to_lowercase().find("charset=") {
-            let cs = ct[pos + 8..].split(';').next().unwrap_or("").trim();
+            let cs = ct[pos + 8..]
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
             encoding = encoding_rs::Encoding::for_label(cs.as_bytes());
         }
     }
-    // 2. Try `<meta charset="...">` in the first 4096 bytes.
+    // 2. Try `<meta charset="...">` or `<meta ... charset=utf-8">`
+    //    in the first 4096 bytes.  Handles:
+    //      charset=utf-8     charset="utf-8"     charset='utf-8'
+    //      content="text/html; charset=utf-8"
     if encoding.is_none() {
         let head = bytes.len().min(4096);
         let prefix = &bytes[..head];
-        if let Ok(html) = std::str::from_utf8(prefix) {
-            if let Some(pos) = html.find("charset=") {
-                let after = &html[pos + 8..];
-                let cs = after
-                    .split(&['"', '\'', '>', ' ', '/'][..])
-                    .next()
-                    .unwrap_or("");
+        // Use lossy decode so partial multi‑byte bytes at the cut
+        // boundary don't make us miss the charset declaration.
+        let html = String::from_utf8_lossy(prefix);
+        // Find the last occurrence (more likely the real one).
+        if let Some(pos) = html.rfind("charset=") {
+            let after = &html[pos + 8..];
+            // Skip past an optional opening quote.
+            let start = after
+                .find(|c| c != '"' && c != '\'' && c != '=')
+                .unwrap_or(0);
+            let cs: String = after[start..]
+                .chars()
+                .take_while(|&c| {
+                    c != '"' && c != '\'' && c != '>' && c != ' ' && c != '/' && c != ';'
+                })
+                .collect();
+            if !cs.is_empty() {
                 encoding = encoding_rs::Encoding::for_label(cs.as_bytes());
             }
         }

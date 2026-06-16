@@ -98,6 +98,7 @@ impl AgentProfile {
         AgentBudget {
             max_steps: self.budget.max_steps,
             max_tool_calls: self.budget.max_tool_calls,
+            per_tool_limit: self.budget.per_tool_limit,
             token_limit: self.budget.token_limit,
         }
     }
@@ -112,6 +113,8 @@ pub struct AgentBudgetProfile {
     pub max_steps: usize,
     #[serde(default = "default_max_tool_calls")]
     pub max_tool_calls: usize,
+    #[serde(default = "default_per_tool_limit")]
+    pub per_tool_limit: usize,
     #[serde(default = "default_token_limit")]
     pub token_limit: usize,
 }
@@ -122,6 +125,9 @@ fn default_max_steps() -> usize {
 fn default_max_tool_calls() -> usize {
     5
 }
+fn default_per_tool_limit() -> usize {
+    20
+}
 fn default_token_limit() -> usize {
     32_000
 }
@@ -131,6 +137,7 @@ impl AgentBudgetProfile {
         let mut p = AgentBudgetProfile {
             max_steps: budget.max_steps,
             max_tool_calls: budget.max_tool_calls,
+            per_tool_limit: budget.per_tool_limit,
             token_limit: budget.token_limit,
         };
         p.validate("from_budget");
@@ -180,6 +187,7 @@ impl Default for AgentBudgetProfile {
         AgentBudgetProfile {
             max_steps: default_max_steps(),
             max_tool_calls: default_max_tool_calls(),
+            per_tool_limit: default_per_tool_limit(),
             token_limit: default_token_limit(),
         }
     }
@@ -217,6 +225,7 @@ mod tests {
             AgentBudget {
                 max_steps: 5,
                 max_tool_calls: 3,
+                per_tool_limit: 3,
                 token_limit: 10_000,
             },
         );
@@ -268,6 +277,7 @@ mod tests {
             AgentBudget {
                 max_steps: 3,
                 max_tool_calls: 2,
+                per_tool_limit: 2,
                 token_limit: 5000,
             },
         );

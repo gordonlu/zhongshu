@@ -359,6 +359,7 @@ fn main() {
         AgentBudget {
             max_steps: 10,
             max_tool_calls: 5,
+            per_tool_limit: 10,
             token_limit: 32_000,
         },
     ));

@@ -9,6 +9,7 @@ use tracing::{debug, info, warn};
 
 const DEFAULT_MAX_STEPS: usize = 30;
 const DEFAULT_MAX_TOOL_CALLS: usize = 20;
+const DEFAULT_PER_TOOL_LIMIT: usize = 20;
 const DEFAULT_TOKEN_LIMIT: usize = 128_000;
 
 /// Per-agent resource budget.
@@ -16,6 +17,7 @@ const DEFAULT_TOKEN_LIMIT: usize = 128_000;
 pub struct AgentBudget {
     pub max_steps: usize,
     pub max_tool_calls: usize,
+    pub per_tool_limit: usize,
     pub token_limit: usize,
 }
 
@@ -24,6 +26,7 @@ impl Default for AgentBudget {
         AgentBudget {
             max_steps: DEFAULT_MAX_STEPS,
             max_tool_calls: DEFAULT_MAX_TOOL_CALLS,
+            per_tool_limit: DEFAULT_PER_TOOL_LIMIT,
             token_limit: DEFAULT_TOKEN_LIMIT,
         }
     }
@@ -136,22 +139,15 @@ pub async fn run_agent(
                 .entry(tc.function.name.clone())
                 .or_insert(0);
             *count += 1;
-            if *count >= 5 {
-                warn!(tool = %tc.function.name, total = *count, "tool called too many times, stopping");
+            if *count >= runtime.budget.per_tool_limit as u32 {
+                warn!(tool = %tc.function.name, total = *count, "tool called too many times, skipping");
                 let msg = format!(
-                    "[系统：已搜索天气多次但未能获取到结果的。可能需要使用专门的天气服务。]"
+                    "[系统：工具 {tool} 已被调用 {count} 次，跳过本次调用，请换用其他方法。]",
+                    tool = tc.function.name,
+                    count = *count
                 );
-                if let Some(ref cb) = callbacks {
-                    (cb.on_text)(&msg);
-                }
                 messages.push(Message::assistant(msg));
-                let tokens = estimate_total_tokens(&messages);
-                return Ok(LoopResult {
-                    messages: std::mem::take(&mut messages),
-                    stop_reason: StopReason::MaxToolCallsReached,
-                    tool_calls_made,
-                    estimated_tokens: tokens,
-                });
+                continue;
             }
 
             let output = runtime

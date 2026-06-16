@@ -70,6 +70,7 @@ async fn main() -> anyhow::Result<()> {
     let budget = AgentBudget {
         max_steps: 30,
         max_tool_calls: 20,
+        per_tool_limit: 10,
         token_limit: 128_000,
     };
 

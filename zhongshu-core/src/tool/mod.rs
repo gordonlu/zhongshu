@@ -175,6 +175,38 @@ impl ToolRegistry {
     }
 }
 
+/// Decode HTML bytes with correct encoding, respecting Content-Type
+/// header and HTML `<meta charset="...">` declarations.
+pub fn decode_html(bytes: &[u8], content_type: Option<&str>) -> String {
+    // 1. Try charset from Content-Type header.
+    let mut encoding = None;
+    if let Some(ct) = content_type {
+        if let Some(pos) = ct.to_lowercase().find("charset=") {
+            let cs = ct[pos + 8..].split(';').next().unwrap_or("").trim();
+            encoding = encoding_rs::Encoding::for_label(cs.as_bytes());
+        }
+    }
+    // 2. Try `<meta charset="...">` in the first 4096 bytes.
+    if encoding.is_none() {
+        let head = bytes.len().min(4096);
+        let prefix = &bytes[..head];
+        if let Ok(html) = std::str::from_utf8(prefix) {
+            if let Some(pos) = html.find("charset=") {
+                let after = &html[pos + 8..];
+                let cs = after
+                    .split(&['"', '\'', '>', ' ', '/'][..])
+                    .next()
+                    .unwrap_or("");
+                encoding = encoding_rs::Encoding::for_label(cs.as_bytes());
+            }
+        }
+    }
+    // 3. Default to UTF-8.
+    let enc = encoding.unwrap_or(encoding_rs::UTF_8);
+    let (text, _) = enc.decode_without_bom_handling(bytes);
+    text.into_owned()
+}
+
 /// Build an HTTP client with realistic browser headers to reduce
 /// the chance of being blocked by anti-bot detection.
 pub fn build_browser_client() -> Result<reqwest::Client, reqwest::Error> {

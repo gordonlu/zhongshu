@@ -1,4 +1,4 @@
-use crate::tool::{build_browser_client, detect_security_page, Tool, ToolOutput};
+use crate::tool::{build_browser_client, decode_html, detect_security_page, Tool, ToolOutput};
 use async_trait::async_trait;
 use serde_json::json;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -48,10 +48,17 @@ impl Tool for BrowserTool {
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
 
         let html = match client.get(url).send().await {
-            Ok(r) => match r.text().await {
-                Ok(t) => t,
-                Err(e) => return ToolOutput::error(format!("读取响应失败: {e}")),
-            },
+            Ok(r) => {
+                let ct = r
+                    .headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok().map(|s| s.to_owned()));
+                let bytes = match r.bytes().await {
+                    Ok(b) => b,
+                    Err(e) => return ToolOutput::error(format!("读取响应失败: {e}")),
+                };
+                decode_html(&bytes, ct.as_deref())
+            }
             Err(e) => return ToolOutput::error(format!("请求失败: {e}")),
         };
 

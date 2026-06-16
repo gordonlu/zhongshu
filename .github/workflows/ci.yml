@@ -61,22 +61,7 @@ jobs:
             libdbus-1-dev \
             libxcb-shape0-dev \
             libxcb-xfixes0-dev
-      # Authority tests use global OnceLock singletons and must run
-      # sequentially; run them separately in test-core-auth.
-      - run: cargo test -p zhongshu-core -- --skip authority
-
-  test-core-auth:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            libdbus-1-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev
-      - run: cargo test -p zhongshu-core -- authority --test-threads=1
+      - run: cargo test -p zhongshu-core
 
   test-orb:
     runs-on: ubuntu-24.04

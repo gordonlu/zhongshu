@@ -507,6 +507,10 @@ function render() {
 // Throttle renders to at most every 50ms during streaming.
 let renderPending = false;
 let renderTimer = null;
+function cancelPendingRender() {
+  if (renderTimer) clearTimeout(renderTimer);
+  renderPending = false;
+}
 function scheduleRender() {
   if (renderPending) return;
   renderPending = true;
@@ -561,6 +565,7 @@ function handleIpc(message) {
         break;
 
       case 'history':
+        cancelPendingRender();
         messages = [];
         streamingId = null;
         has_more = msg.has_more || false;
@@ -578,6 +583,7 @@ function handleIpc(message) {
         break;
 
       case 'prepend_history':
+        cancelPendingRender();
         {
           let chat = document.getElementById('chat');
           let prevScrollHeight = chat.scrollHeight;
@@ -629,6 +635,7 @@ function handleIpc(message) {
         break;
 
       case 'clear':
+        cancelPendingRender();
         messages = [];
         streamingId = null;
         streamingBuffer = '';

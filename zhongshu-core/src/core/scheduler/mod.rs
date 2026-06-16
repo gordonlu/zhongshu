@@ -59,7 +59,9 @@ impl Scheduler {
                     self.task_repo.create(Some(&goal.id), &title)
                 }
                 GoalType::Ongoing => {
-                    if self.has_pending_task(&goal.id) {
+                    // Only create a new task if there is no task at all
+                    // (pending, running OR completed) for this goal.
+                    if self.has_any_task(&goal.id) {
                         continue;
                     }
                     self.task_repo.create(Some(&goal.id), &goal.title)
@@ -95,6 +97,13 @@ impl Scheduler {
                     )
                 })
             })
+    }
+
+    fn has_any_task(&self, goal_id: &str) -> bool {
+        self.task_repo
+            .list_by_goal(goal_id)
+            .ok()
+            .map_or(false, |tasks| !tasks.is_empty())
     }
 
     fn has_active_or_pending_task(&self, goal_id: &str) -> bool {

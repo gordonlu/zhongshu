@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::PathBuf;
+use tracing::info;
 
 use crate::tool::{Tool, ToolOutput};
 
@@ -121,6 +122,7 @@ impl Tool for MemoryTool {
             Some(op) => op,
             None => return ToolOutput::error("'operation' 必须是 read/append"),
         };
+        info!(operation, text = ?arguments["text"].as_str(), "memory");
 
         match operation {
             "read" => {

@@ -642,6 +642,16 @@ function handleIpc(message) {
         render();
         break;
 
+      case 'tool_call':
+        if (streamingId) {
+          let sm = messages.find(m => m.id === streamingId);
+          if (sm) {
+            if (!sm.toolCalls) sm.toolCalls = [];
+            sm.toolCalls.push({name: msg.name});
+            scheduleRender();
+          }
+        }
+        break;
       case 'model':
         document.getElementById('header-model').textContent = msg.label || '';
         break;

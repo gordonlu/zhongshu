@@ -345,7 +345,7 @@ impl ZhongshuApp {
                                 ind.set_state(AgentState::Executing);
                             }
                             if let Some(ref ov) = self.overlay {
-                                ov.toast(&format!("工具调用: {name}"));
+                                ov.send(&serde_json::json!({"type":"tool_call","name":name}));
                             }
                         }
                         Event::Tool(ToolEvent::Completed { name, success }) => {

@@ -266,7 +266,6 @@ impl DeeplosslessProxy {
             Some(c) => c,
             None => return,
         };
-        // Soft-delete DAG nodes across ALL conversations.
         let db = &coordinator.state.storage.db;
         let expanded = self.db_path.replacen(
             "~",
@@ -285,6 +284,7 @@ impl DeeplosslessProxy {
                 .flatten()
                 .unwrap_or_default();
             for cid in &conv_ids {
+                // Delete DAG nodes via deeplossless API.
                 if let Ok(nodes) = db.get_all_dag_nodes(*cid) {
                     for node in &nodes {
                         if !node.deleted {
@@ -293,12 +293,15 @@ impl DeeplosslessProxy {
                     }
                     tracing::info!("deleted {} nodes from conversation {cid}", nodes.len());
                 }
-            }
-            // Nuke ALL messages regardless of conversation.
-            if let Err(e) = conn.execute("DELETE FROM messages", []) {
-                tracing::warn!("failed to delete messages: {e}");
-            } else {
-                tracing::info!("deleted all messages");
+                // Delete messages scoped to this conversation.
+                if let Err(e) = conn.execute(
+                    "DELETE FROM messages WHERE conversation_id = ?1",
+                    rusqlite::params![cid],
+                ) {
+                    tracing::warn!("failed to delete messages for conv {cid}: {e}");
+                } else {
+                    tracing::info!("deleted messages for conversation {cid}");
+                }
             }
         }
     }

@@ -266,14 +266,27 @@ impl DeeplosslessProxy {
             &std::env::var("HOME").unwrap_or_else(|_| ".".into()),
             1,
         );
-        rusqlite::Connection::open(&expanded).ok().and_then(|conn| {
-            conn.query_row(
-                "SELECT session_id FROM conversations ORDER BY id DESC LIMIT 1",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .ok()
-        })
+        let sid_path = std::path::Path::new(&expanded).with_extension("sid");
+        let sid = if sid_path.exists() {
+            std::fs::read_to_string(&sid_path)
+                .ok()
+                .map(|s| s.trim().to_string())
+        } else {
+            None
+        };
+        let sid = sid.unwrap_or_else(|| {
+            let id = uuid::Uuid::new_v4().to_string();
+            let _ = std::fs::write(&sid_path, &id);
+            id
+        });
+        // Rewrite all conversations to use our persistent session_id.
+        if let Ok(conn) = rusqlite::Connection::open(&expanded) {
+            let _ = conn.execute(
+                "UPDATE conversations SET session_id = ?1 WHERE session_id != ?1",
+                rusqlite::params![&sid],
+            );
+        }
+        Some(sid)
     }
 
     pub async fn delete_chat_history(&self) {

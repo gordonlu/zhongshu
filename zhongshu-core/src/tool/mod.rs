@@ -274,10 +274,39 @@ pub fn build_browser_client() -> Result<reqwest::Client, reqwest::Error> {
 
 /// Strip common prompt injection patterns from external content.
 /// This is a best-effort defense — the system prompt is the primary protection.
+/// Also detects garbled/binary content and replaces it cleanly.
 pub fn sanitize_web_content(text: &str) -> String {
     let mut result = text.to_string();
+
     // Remove zero-width characters often used to smuggle injection.
     result.retain(|c| c != '\u{200B}' && c != '\u{200C}' && c != '\u{200D}' && c != '\u{FEFF}');
+
+    // Strip null bytes and other ASCII control chars (except \t \n \r).
+    result.retain(|c| c == '\t' || c == '\n' || c == '\r' || c >= ' ');
+
+    // Detect garbled content: if >10% of chars are replacement characters
+    // (U+FFFD / ￼) it means the encoding was wrong.
+    let total = result.chars().count();
+    if total > 20 {
+        let replacement_count = result.chars().filter(|&c| c == '\u{FFFD}').count();
+        if replacement_count > total / 10 {
+            return "[该网页内容编码异常，无法正常显示]".into();
+        }
+    }
+
+    // Catch mis-decoded CJK: GBK/Shift-JIS bytes decoded as Latin-1
+    // land in Unicode private use area (U+E000..U+F8FF) and adjacent
+    // control-like blocks.
+    if total > 20 {
+        let garbage = result
+            .chars()
+            .filter(|&c| matches!(c, '\u{E000}'..='\u{F8FF}' | '\u{FFFD}'))
+            .count();
+        if garbage > total / 20 {
+            return "[该网页内容编码异常，无法正常显示]".into();
+        }
+    }
+
     result
 }
 

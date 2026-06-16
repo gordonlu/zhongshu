@@ -85,20 +85,6 @@ impl Scheduler {
         created
     }
 
-    fn has_pending_task(&self, goal_id: &str) -> bool {
-        self.task_repo
-            .list_by_goal(goal_id)
-            .ok()
-            .map_or(false, |tasks| {
-                tasks.iter().any(|t| {
-                    matches!(
-                        t.status,
-                        TaskStatus::Pending | TaskStatus::Planning | TaskStatus::Running
-                    )
-                })
-            })
-    }
-
     fn has_any_task(&self, goal_id: &str) -> bool {
         self.task_repo
             .list_by_goal(goal_id)

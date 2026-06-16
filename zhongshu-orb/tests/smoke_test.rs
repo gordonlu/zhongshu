@@ -113,8 +113,17 @@ fn test_chat_html_renders_messages() {
         "JSON.stringify({len:messages.length, last:messages[messages.length-1].content.substring(0,20)})",
         move |r| { tx4.send(r).ok(); },
     ).expect("check3 eval failed");
-    pump_gtk(2000);
-    let final_state = rx4.try_recv().unwrap_or_default();
+    let pump_start = std::time::Instant::now();
+    let final_state = loop {
+        pump_gtk(50);
+        if let Ok(r) = rx4.try_recv() {
+            break r;
+        }
+        if pump_start.elapsed() > Duration::from_secs(5) {
+            println!("waiting for JS callback timed out");
+            break String::new();
+        }
+    };
     println!("Final: {final_state}");
     let final_parsed: serde_json::Value = serde_json::from_str(&final_state).unwrap_or_default();
     assert_eq!(final_parsed["len"], 4, "should now have 4 messages total");

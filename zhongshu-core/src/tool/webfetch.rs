@@ -21,7 +21,8 @@ impl Tool for WebFetchTool {
             "type": "object",
             "properties": {
                 "url": {"type": "string", "description": "The URL to fetch"},
-                "max_length": {"type": "integer", "description": "Max characters to return (default 5000)", "default": 5000}
+                "max_length": {"type": "integer", "description": "Max characters to return (default 5000)", "default": 5000},
+                "raw": {"type": "boolean", "description": "Return raw HTML source instead of stripped text (default false)", "default": false}
             },
             "required": ["url"]
         })
@@ -66,7 +67,12 @@ impl Tool for WebFetchTool {
             }));
         }
 
-        let text = sanitize_web_content(&extract_text(&html));
+        let raw = arguments["raw"].as_bool().unwrap_or(false);
+        let text = if raw {
+            sanitize_web_content(&html)
+        } else {
+            sanitize_web_content(&extract_text(&html))
+        };
         let truncated = if text.len() > max_len {
             format!(
                 "{}...\n\n[页面过长，已截断至 {} 字符]",

@@ -252,6 +252,15 @@ pub fn build_browser_client() -> Result<reqwest::Client, reqwest::Error> {
         .build()
 }
 
+/// Strip common prompt injection patterns from external content.
+/// This is a best-effort defense — the system prompt is the primary protection.
+pub fn sanitize_web_content(text: &str) -> String {
+    let mut result = text.to_string();
+    // Remove zero-width characters often used to smuggle injection.
+    result.retain(|c| c != '\u{200B}' && c != '\u{200C}' && c != '\u{200D}' && c != '\u{FEFF}');
+    result
+}
+
 /// Check if page content indicates a security/anti-bot/captcha page.
 /// Returns the first reason if detected, or None if the content looks normal.
 pub fn detect_security_page(text: &str) -> Option<&'static str> {

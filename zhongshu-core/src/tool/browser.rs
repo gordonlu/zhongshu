@@ -1,6 +1,6 @@
 use crate::tool::{
     acquire_http_permit, build_browser_client, decode_html, detect_security_page, human_delay,
-    Tool, ToolOutput,
+    sanitize_web_content, Tool, ToolOutput,
 };
 use async_trait::async_trait;
 use serde_json::json;
@@ -72,7 +72,7 @@ impl Tool for BrowserTool {
             }));
         }
 
-        let text = extract_text(&html);
+        let text = sanitize_web_content(&extract_text(&html));
         let truncated = if text.len() > max_len {
             format!(
                 "{}...\n\n[页面过长，已截断至 {} 字符]",

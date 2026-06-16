@@ -20,6 +20,8 @@ const CONTROL_PREFIXES: &[&str] = &[
     "</final-answer",
     "<observation",
     "</observation",
+    "<lcm_context",
+    "</lcm_context",
 ];
 
 /// Filters agent protocol control tokens from the raw LLM stream
@@ -69,7 +71,9 @@ impl ControlTokenFilter {
                 || lower.starts_with("<final-answer")
                 || lower.starts_with("</final-answer")
                 || lower.starts_with("<observation")
-                || lower.starts_with("</observation");
+                || lower.starts_with("</observation")
+                || lower.starts_with("<lcm_context")
+                || lower.starts_with("</lcm_context");
 
             if !is_control {
                 // Check if this `<` could be the start of an incomplete

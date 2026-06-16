@@ -41,10 +41,13 @@ zhongshu-core       Rust lib — 纯逻辑，无 UI 依赖
 zhongshu-orb         Desktop UI (wry + GTK WebView)
 ├── app.rs              AgentController (lifecycle) + spawn_task + AgentInbox
 ├── agent.rs            AgentMemory (goals + todos + long_term_memory)
-├── config.rs           统一配置 (llm/hotkey/ui/agent)
+├── config.rs           统一配置 (llm/hotkey/ui/agent/equipment)
+├── handler.rs          winit ApplicationHandler + overlay management
 ├── main.rs             入口 + winit event loop + EventBus wiring
 ├── overlay.rs          WebView IPC + task UI + auth dialog
 ├── indicator.rs        Linux tray / Windows orb
+├── render.rs           Windows orb 纯数学渲染（softbuffer）
+├── services.rs         后台服务 (scheduler/memory/suggestion/evolve)
 ├── hotkey.rs           全局快捷键
 └── assets/chat.html    HTML/CSS/JS 前端
 ```
@@ -141,18 +144,35 @@ Header 📋 按钮 → 弹出任务列表，支持完成/取消
 
 ---
 
-# Phase 4 — Intelligence
+# Phase 4 — Intelligence ✅
 
-* **LLM Planner** — TaskPlanner 从硬编码模板升级为 LLM 生成执行计划
-* **Task Step 执行** — 按步骤逐步执行，更新 step status
-* **Suggestion→Goal 自动转化** — 高置信度建议自动创建目标
-* **Memory 向量检索** — embedding 列 + 语义搜索
-* **Event log 持久化** — EventBus 事件入库，支持 replay/debug
-* **Scheduler 配置化** — 通过 UI 配置 goal trigger 规则
+* ✅ **LLM Planner** — TaskPlanner 从硬编码模板升级为 LLM 生成执行计划
+* ✅ **Task Step 执行** — 按步骤逐步执行，更新 step status
+* ✅ **Suggestion→Goal 自动转化** — 高置信度建议自动创建目标（compensation service）
+* ✅ **Memory 向量检索** — embedding 列 + 语义搜索（cosine similarity，fallback LIKE）
+* ✅ **Event log 持久化** — EventBus 事件入库，支持 replay/debug，10MB 自动截断
+* ✅ **DeepSeek V4 优化** — model routing（Flash/Pro）、reasoning_effort、thinking mode
+* ✅ **上下文压缩** — 500k threshold、80% 触发、deeplossless DAG compress
+* ✅ **Auto-evolve（装备自动进化）** — observer → LLM proposal → 安装 → 热刷新 system prompt
+* ✅ **Human delay** — web 工具统一 1-3s 随机延迟
+* ✅ **Cookie 持久化 + 并发控制** — 跨请求共享 cookie jar，max 3 并发
+* ✅ **安全页面检测** — 验证码/反爬页面识别，返回警告而非乱码
+* ✅ **防注入** — sanitize_web_content 过滤零宽字符 + 控制字符 + 乱码检测
+* ✅ **编码修复** — decode_html 自动检测 charset，extract_text 逐字符解码
 
 ---
 
-# Phase 5 — Multi-Agent
+# Phase 5 — Platform
+
+* ✅ **CI 流水线** — fmt/clippy/check/cross-platform test
+* ✅ **Wayland 兼容** — desktop 工具 ydotool/wtype fallback
+* ✅ **Windows orb** — 纯数学渲染的 Siri 风格球体，softbuffer + wry
+* ✅ **Tray 优化** — 自适应呼吸频率（idle 2Hz / active 20Hz）
+* ⬜ **Chrome CDP 集成** — 通过 DevTools Protocol 控制浏览器
+
+---
+
+# Phase 6 — Multi-Agent
 
 * Planner: 拆任务
 * Researcher: 搜索
@@ -162,7 +182,7 @@ Header 📋 按钮 → 弹出任务列表，支持完成/取消
 
 ---
 
-# Phase 6 — Knowledge Operating System
+# Phase 7 — Knowledge Operating System
 
 * Personal Knowledge Graph（自动构建实体/关系图谱）
 * Memory Compaction v2（对话压缩 → 知识提取）

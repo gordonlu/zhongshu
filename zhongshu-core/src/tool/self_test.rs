@@ -1,3 +1,7 @@
+use crate::core::goal::{GoalRepository, GoalTool};
+use crate::core::suggestion::{SuggestionEngine, SuggestionTool};
+use crate::core::task::{TaskRepository, TaskTool};
+use crate::core::Database;
 use crate::tool::{Tool, ToolOutput};
 use async_trait::async_trait;
 use serde_json::json;
@@ -41,7 +45,8 @@ impl Tool for SelfTestTool {
                         },
                         "required": ["name", "tool", "args"]
                     }
-                }
+                },
+                "db_path": {"type": "string", "description": "core.db 路径（可选，测试 goal/task/suggestion 时需要）"}
             },
             "required": ["steps"]
         })
@@ -57,7 +62,7 @@ impl Tool for SelfTestTool {
             return ToolOutput::error("至少需要一个测试步骤");
         }
 
-        let registry = crate::tool::default_registry()
+        let mut registry = crate::tool::default_registry()
             .register(crate::tool::fs::ReadFileTool)
             .register(crate::tool::fs::WriteFileTool)
             .register(crate::tool::shell::ShellTool)
@@ -70,6 +75,20 @@ impl Tool for SelfTestTool {
                     .unwrap_or_default(),
             ))
             .register(crate::tool::search::WebSearchTool);
+
+        // Core DB tools (for goal/task/suggestion tests).
+        if let Some(db_path) = arguments.get("db_path").and_then(|v| v.as_str()) {
+            let db = Database::new(std::path::PathBuf::from(db_path));
+            registry.register_ref(std::sync::Arc::new(GoalTool::new(GoalRepository::new(
+                db.clone(),
+            ))));
+            registry.register_ref(std::sync::Arc::new(TaskTool::new(TaskRepository::new(
+                db.clone(),
+            ))));
+            registry.register_ref(std::sync::Arc::new(SuggestionTool::new(
+                SuggestionEngine::new(db),
+            )));
+        }
 
         let mut results = Vec::new();
         let mut passed = 0u32;

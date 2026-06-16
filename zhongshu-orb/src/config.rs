@@ -956,7 +956,7 @@ mod tests {
         let max: u32 = 500_000;
         let trigger = (max as f64 * 0.8) as usize;
         assert_eq!(trigger, 400_000);
-        assert!(400_001 > trigger);   // just above → triggers
+        assert!(400_001 > trigger); // just above → triggers
         assert!(!(400_000 > trigger)); // at trigger → does not trigger
         assert!(500_001 > max as usize); // over hard cap
 

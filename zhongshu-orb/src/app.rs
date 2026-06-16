@@ -233,8 +233,15 @@ impl AgentController {
             // Context compression: drop oldest history pairs when over 80%.
             if max_ctx > 0 {
                 let trigger = (max_ctx as f64 * 0.8) as usize;
-                let base_est = (sys.len() / 4) + 1 + (input.len() / 4) + 1
-                    + if !profile_ctx.is_empty() { (profile_ctx.len() / 4) + 1 } else { 0 };
+                let base_est = (sys.len() / 4)
+                    + 1
+                    + (input.len() / 4)
+                    + 1
+                    + if !profile_ctx.is_empty() {
+                        (profile_ctx.len() / 4) + 1
+                    } else {
+                        0
+                    };
 
                 // Compute how many to drop — history lock is scoped so it's
                 // released before the async proxy lock below.
@@ -243,13 +250,18 @@ impl AgentController {
                     compress_history(&mut history, base_est, trigger)
                 };
                 if dropped > 0 {
-                    let _ = tx.send(ResponseEvent::MessageDelta {
-                        id: aid,
-                        delta: format!("\n——压缩中(已归档{dropped}条)——\n\n"),
-                    }).await;
+                    let _ = tx
+                        .send(ResponseEvent::MessageDelta {
+                            id: aid,
+                            delta: format!("\n——压缩中(已归档{dropped}条)——\n\n"),
+                        })
+                        .await;
                     // Best-effort deeplossless DAG compression before discarding.
                     let proxy_guard = proxy.lock().await;
-                    let compressed = proxy_guard.compress_oldest_leaves(dropped).await.unwrap_or(0);
+                    let compressed = proxy_guard
+                        .compress_oldest_leaves(dropped)
+                        .await
+                        .unwrap_or(0);
                     if compressed > 0 {
                         tracing::info!(
                             "deeplossless compressed {compressed} leaves, dropped {dropped} from history"
@@ -582,7 +594,10 @@ mod tests {
 
     #[test]
     fn compress_under_threshold_no_op() {
-        let mut h = vec![("user".into(), "hi".into()), ("assistant".into(), "hello".into())];
+        let mut h = vec![
+            ("user".into(), "hi".into()),
+            ("assistant".into(), "hello".into()),
+        ];
         // base_est=1, trigger=1000: 1 + (2/4+1)+(5/4+1) = 1+1+2 = 4 << 1000
         assert_eq!(compress_history(&mut h, 1, 1000), 0);
         assert_eq!(h.len(), 2);
@@ -609,12 +624,12 @@ mod tests {
     #[test]
     fn compress_drops_multiple_pairs_when_needed() {
         let mut h = vec![
-            ("user".into(), "a".repeat(100)),       // 100/4+1 = 26
-            ("assistant".into(), "b".repeat(100)),   // 26
-            ("user".into(), "c".repeat(100)),        // 26
-            ("assistant".into(), "d".repeat(100)),   // 26
-            ("user".into(), "e".repeat(50)),         // 50/4+1 = 13
-            ("assistant".into(), "f".repeat(50)),    // 13
+            ("user".into(), "a".repeat(100)),      // 100/4+1 = 26
+            ("assistant".into(), "b".repeat(100)), // 26
+            ("user".into(), "c".repeat(100)),      // 26
+            ("assistant".into(), "d".repeat(100)), // 26
+            ("user".into(), "e".repeat(50)),       // 50/4+1 = 13
+            ("assistant".into(), "f".repeat(50)),  // 13
         ];
         // total = base + 26+26+26+26+13+13 = base + 130
         let base = 10;
@@ -666,7 +681,15 @@ mod tests {
         );
         assert_eq!(h.len() + dropped, total_before, "total messages conserved");
         // Verify the most recent pair is always preserved
-        assert_eq!(h.last().unwrap().0, format!("用户第{}条消息：{}", n_pairs - 1, "请帮我分析一下这个数据，看看有什么值得注意的趋势和模式。我们需要重点关注异常值。".repeat(6)));
+        assert_eq!(
+            h.last().unwrap().0,
+            format!(
+                "用户第{}条消息：{}",
+                n_pairs - 1,
+                "请帮我分析一下这个数据，看看有什么值得注意的趋势和模式。我们需要重点关注异常值。"
+                    .repeat(6)
+            )
+        );
         // Token estimate must be below (or very close to) trigger after compression
         let costs: Vec<usize> = h.iter().map(|(_, c)| (c.len() / 4) + 1).collect();
         let remain_est: usize = costs.iter().sum::<usize>() + base;
@@ -679,9 +702,9 @@ mod tests {
     #[test]
     fn compress_odd_history_does_not_drop_last_single() {
         let mut h = vec![
-            ("user".into(), "x".repeat(200)),        // 51
-            ("assistant".into(), "y".repeat(200)),   // 51
-            ("user".into(), "z".repeat(50)),         // 13
+            ("user".into(), "x".repeat(200)),      // 51
+            ("assistant".into(), "y".repeat(200)), // 51
+            ("user".into(), "z".repeat(50)),       // 13
         ];
         // base=5, total = 5+51+51+13 = 120, trigger=10
         // drop pair 1: 120-51-51=18 > 10

@@ -133,4 +133,104 @@ mod tests {
         assert_eq!(model, "pro");
         assert_eq!(effort, Some("high"));
     }
+
+    #[test]
+    fn test_empty_input_is_simple() {
+        let router = ModelRouter::new("flash", "pro");
+        assert_eq!(router.route(""), ("flash".to_string(), None));
+    }
+
+    #[test]
+    fn test_whitespace_input_is_simple() {
+        let router = ModelRouter::new("flash", "pro");
+        assert_eq!(router.route("   "), ("flash".to_string(), None));
+    }
+
+    #[test]
+    fn test_numbers_and_symbols_are_simple() {
+        let router = ModelRouter::new("flash", "pro");
+        assert_eq!(router.route("12345 + 67890"), ("flash".to_string(), None));
+    }
+
+    #[test]
+    fn test_agent_priority_over_complex() {
+        // Both agent and complex keywords present → agent wins.
+        let router = ModelRouter::new("flash", "pro");
+        let (model, effort) = router.route("搜索并分析最新的 Rust 性能调优资料");
+        assert_eq!(model, "pro");
+        assert_eq!(
+            effort,
+            Some("max"),
+            "agent keyword should take priority over complex"
+        );
+    }
+
+    #[test]
+    fn test_complex_priority_over_simple() {
+        // Complex keyword present → complex (even if also short).
+        let router = ModelRouter::new("flash", "pro");
+        let (model, effort) = router.route("分析");
+        assert_eq!(model, "pro");
+        assert_eq!(effort, Some("high"));
+    }
+
+    #[test]
+    fn test_boundary_200_chars_is_simple() {
+        let router = ModelRouter::new("flash", "pro");
+        let s = "a".repeat(200);
+        assert_eq!(router.route(&s), ("flash".to_string(), None));
+    }
+
+    #[test]
+    fn test_boundary_200_chars_with_agent_keyword() {
+        // 200 chars with agent keyword → agent, not complex-by-length.
+        let router = ModelRouter::new("flash", "pro");
+        let s = format!("{}{}", "a".repeat(190), "搜索");
+        let (model, effort) = router.route(&s);
+        assert_eq!(model, "pro");
+        assert_eq!(effort, Some("max"));
+    }
+
+    #[test]
+    fn test_short_agent_query_without_complex() {
+        let router = ModelRouter::new("flash", "pro");
+        let (model, effort) = router.route("搜索天气");
+        assert_eq!(model, "pro");
+        assert_eq!(effort, Some("max"));
+    }
+
+    #[test]
+    fn test_url_like_input_is_complex() {
+        let router = ModelRouter::new("flash", "pro");
+        // No agent/complex keywords → simple (URL is just text).
+        assert_eq!(
+            router.route("https://example.com"),
+            ("flash".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn test_code_review_prompt_is_complex() {
+        let router = ModelRouter::new("flash", "pro");
+        let (model, effort) = router.route("review this pull request for security issues");
+        assert_eq!(model, "pro");
+        assert_eq!(effort, Some("high"));
+    }
+
+    #[test]
+    fn test_mixed_case_keyword_trigger() {
+        let router = ModelRouter::new("flash", "pro");
+        // Keywords are checked case-insensitively via to_lowercase.
+        let (model, effort) = router.route("REFACTOR the auth module");
+        assert_eq!(model, "pro");
+        assert_eq!(effort, Some("high"));
+    }
+
+    #[test]
+    fn test_multi_word_agent_prompt() {
+        let router = ModelRouter::new("flash", "pro");
+        let (model, effort) = router.route("automate the deployment pipeline");
+        assert_eq!(model, "pro");
+        assert_eq!(effort, Some("max"));
+    }
 }

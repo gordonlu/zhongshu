@@ -392,6 +392,7 @@ impl ZhongshuApp {
                         self.assistant_id = Some(id);
                         if let Some(ref ov) = self.overlay {
                             ov.set_state("thinking");
+                            ov.send(&serde_json::json!({"type":"model","label": self.controller.model_name()}));
                         }
                     } else {
                         self.assistant_id = None;

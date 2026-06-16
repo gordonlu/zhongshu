@@ -30,6 +30,7 @@ body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMac
 /* ── Header ── */
 #header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px 6px;flex-shrink:0;user-select:none;border-bottom:1px solid var(--border);background:var(--bg)}
 #header-title{font-size:12px;font-weight:500;color:var(--text-muted);letter-spacing:0.06em;text-transform:uppercase}
+#header-model{font-size:10px;color:var(--text-muted);margin-left:6px;font-variant-numeric:tabular-nums;opacity:0.6}
 #header-btns{display:flex;gap:2px}
 #header-btns button{background:transparent;border:none;border-radius:var(--radius-sm);color:var(--text-muted);cursor:pointer;padding:4px 6px;font-size:13px;line-height:1;transition:all 120ms;opacity:0.6}
 #header-btns button:hover{opacity:1;color:var(--text-dim);background:var(--surface)}
@@ -176,6 +177,7 @@ body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMac
 
 <div id="header">
   <span id="header-title">中书</span>
+  <span id="header-model" class="header-model"></span>
   <div id="header-btns">
     <button id="btn-tasks" title="任务">📋<span id="tasks-count"></span></button>
     <button id="btn-settings" title="设置">⚙</button>
@@ -622,6 +624,9 @@ function handleIpc(message) {
         render();
         break;
 
+      case 'model':
+        document.getElementById('header-model').textContent = msg.label || '';
+        break;
       case 'toast':
         showToast(msg.text);
         break;

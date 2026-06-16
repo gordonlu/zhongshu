@@ -145,6 +145,10 @@ impl AgentController {
         );
     }
 
+    pub fn model_name(&self) -> String {
+        self.model.clone()
+    }
+
     pub fn set_chat_history(&self, history: Vec<(String, String)>) {
         *self.history.lock().unwrap() = history;
     }

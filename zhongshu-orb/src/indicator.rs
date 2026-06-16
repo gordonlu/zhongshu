@@ -188,7 +188,7 @@ mod orb {
 pub mod tray {
     use crossbeam_channel::{self, Receiver, Sender};
     use ksni::TrayMethods;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
     use winit::event_loop::ActiveEventLoop;
@@ -213,6 +213,7 @@ pub mod tray {
         state: Arc<std::sync::Mutex<AgentState>>,
         tx: Sender<TrayEvent>,
         breath_phase: Arc<AtomicU32>,
+        active: Arc<AtomicBool>,
     }
 
     impl ksni::Tray for KsniTray {
@@ -350,24 +351,32 @@ pub mod tray {
             let (tx, rx) = crossbeam_channel::unbounded();
             let state = Arc::new(std::sync::Mutex::new(AgentState::Idle));
             let breath_phase = Arc::new(AtomicU32::new(0));
+            let active = Arc::new(AtomicBool::new(false));
             let tray = KsniTray {
                 state: state.clone(),
                 tx,
                 breath_phase: breath_phase.clone(),
+                active: active.clone(),
             };
 
             let handle = tokio::runtime::Handle::current()
                 .block_on(async { tray.spawn().await })
                 .expect("ksni tray spawn");
 
-            // Spawn breathing timer: tick at 50ms, update icon phase continuously.
+            // Breathing timer: phase from real time, adaptive frequency.
             let bp = breath_phase.clone();
             let h = handle.clone();
+            let act = active.clone();
             tokio::runtime::Handle::current().spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_millis(50));
+                let start = tokio::time::Instant::now();
                 loop {
-                    interval.tick().await;
-                    bp.fetch_add(1, Ordering::Relaxed);
+                    let is_active = act.load(Ordering::Relaxed);
+                    // Idle: 2 Hz (barely visible pulse), active: 20 Hz.
+                    let ms = if is_active { 50 } else { 500 };
+                    tokio::time::sleep(Duration::from_millis(ms)).await;
+
+                    let elapsed = start.elapsed().as_secs_f64();
+                    bp.store((elapsed * 50.0) as u32, Ordering::Relaxed);
                     let _ = h.update(|_: &mut KsniTray| {}).await;
                 }
             });
@@ -388,6 +397,8 @@ pub mod tray {
                     handle
                         .update(|tray: &mut KsniTray| {
                             *tray.state.lock().unwrap() = state;
+                            tray.active
+                                .store(!matches!(state, AgentState::Idle), Ordering::Relaxed);
                         })
                         .await
                 });

@@ -1,22 +1,13 @@
 use crate::tool::{Tool, ToolOutput};
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TestManifest {
-    steps: Vec<TestStep>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 struct TestStep {
     name: String,
     tool: String,
-    args: HashMap<String, serde_json::Value>,
-    /// Optional substring expected in stdout/data content.
+    args: serde_json::Value,
     expect_contains: Option<String>,
-    /// If true, step failure is non-fatal.
     optional: Option<bool>,
 }
 
@@ -29,52 +20,42 @@ impl Tool for SelfTestTool {
     }
 
     fn description(&self) -> &str {
-        "Run a self-test suite from a manifest JSON file. Each step calls a real tool and checks the result. Reports pass/fail per step."
+        "Run a list of integration tests. Each step calls a real tool and checks the result. Reports pass/fail per step."
     }
 
     fn parameters(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "manifest": {
-                    "type": "string",
-                    "description": "Path to the test manifest JSON file (default /tmp/zhongshu_self_test.json)"
+                "steps": {
+                    "type": "array",
+                    "description": "测试步骤列表",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "步骤名称"},
+                            "tool": {"type": "string", "description": "工具名"},
+                            "args": {"type": "object", "description": "工具参数"},
+                            "expect_contains": {"type": "string", "description": "预期输出包含的文本（可选）"},
+                            "optional": {"type": "boolean", "description": "失败是否不影响结果（可选）"}
+                        },
+                        "required": ["name", "tool", "args"]
+                    }
                 }
             },
-            "required": []
+            "required": ["steps"]
         })
     }
 
     async fn execute(&self, arguments: &serde_json::Value) -> ToolOutput {
-        let path = arguments
-            .get("manifest")
-            .and_then(|v| v.as_str())
-            .unwrap_or("/tmp/zhongshu_self_test.json");
-
-        let text = match std::fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(_) => {
-                // Generate default manifest if file doesn't exist.
-                let default = serde_json::json!({
-                    "steps": [
-                        {"name":"读取文件","tool":"read_file","args":{"path":"/etc/hostname"}},
-                        {"name":"写入文件","tool":"write_file","args":{"path":"/tmp/zhongshu_self_test.txt","content":"ok"},"expect_contains":"ok"},
-                        {"name":"Shell命令","tool":"shell","args":{"command":"echo hello"},"expect_contains":"hello"},
-                        {"name":"搜索文件","tool":"search_files","args":{"pattern":"hostname","path":"/etc"}},
-                        {"name":"系统信息","tool":"system_info","args":{}},
-                    ]
-                });
-                return ToolOutput::success(json!({
-                    "warning": format!("清单文件 {path} 不存在，已生成默认测试清单。请编辑该文件后重新调用。"),
-                    "default_manifest": default,
-                }));
-            }
+        let steps: Vec<TestStep> = match serde_json::from_value(arguments["steps"].clone()) {
+            Ok(s) => s,
+            Err(e) => return ToolOutput::error(format!("steps 参数格式错误: {e}")),
         };
 
-        let manifest: TestManifest = match serde_json::from_str(&text) {
-            Ok(m) => m,
-            Err(e) => return ToolOutput::error(format!("清单格式错误: {e}")),
-        };
+        if steps.is_empty() {
+            return ToolOutput::error("至少需要一个测试步骤");
+        }
 
         let registry = crate::tool::default_registry()
             .register(crate::tool::fs::ReadFileTool)
@@ -94,14 +75,9 @@ impl Tool for SelfTestTool {
         let mut passed = 0u32;
         let mut failed = 0u32;
 
-        for step in &manifest.steps {
-            let optional = step.optional.unwrap_or(false);
-            let output = registry
-                .execute(
-                    &step.tool,
-                    &serde_json::to_string(&step.args).unwrap_or_default(),
-                )
-                .await;
+        for step in &steps {
+            let args_str = serde_json::to_string(&step.args).unwrap_or_default();
+            let output = registry.execute(&step.tool, &args_str).await;
 
             let ok = match output.status {
                 crate::tool::ToolStatus::Success => {
@@ -109,14 +85,8 @@ impl Tool for SelfTestTool {
                         output
                             .data
                             .as_ref()
-                            .and_then(|d| d.as_str())
-                            .map(|s| s.contains(expect))
+                            .map(|d| d.to_string().contains(expect))
                             .unwrap_or(false)
-                            || output
-                                .data
-                                .as_ref()
-                                .map(|d| d.to_string().contains(expect))
-                                .unwrap_or(false)
                     } else {
                         true
                     }
@@ -126,8 +96,8 @@ impl Tool for SelfTestTool {
 
             if ok {
                 passed += 1;
-            } else if optional {
-                passed += 1; // count optional passes as pass
+            } else if step.optional.unwrap_or(false) {
+                passed += 1;
             } else {
                 failed += 1;
             }
@@ -136,21 +106,23 @@ impl Tool for SelfTestTool {
                 "name": step.name,
                 "tool": step.tool,
                 "status": if ok { "pass" } else { "fail" },
-                "optional": optional,
             }));
         }
 
-        let total = manifest.steps.len();
+        let total = steps.len();
         let report = format!(
             "# 自检报告\n\n通过 {passed}/{total}，失败 {failed}\n\n{}",
             results
                 .iter()
-                .map(|r| format!(
-                    "- {} {} — {}",
-                    if r["status"] == "pass" { "✅" } else { "❌" },
-                    r["name"].as_str().unwrap_or("?"),
-                    r["tool"].as_str().unwrap_or("?"),
-                ))
+                .map(|r| {
+                    let icon = if r["status"] == "pass" { "✅" } else { "❌" };
+                    format!(
+                        "- {} {} — {}",
+                        icon,
+                        r["name"].as_str().unwrap_or("?"),
+                        r["tool"].as_str().unwrap_or("?")
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         );

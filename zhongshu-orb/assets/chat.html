@@ -30,7 +30,7 @@ body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMac
 /* ── Header ── */
 #header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px 6px;flex-shrink:0;user-select:none;border-bottom:1px solid var(--border);background:var(--bg)}
 #header-title{font-size:12px;font-weight:500;color:var(--text-muted);letter-spacing:0.06em;text-transform:uppercase}
-#header-model{font-size:10px;color:var(--text-muted);margin-left:6px;font-variant-numeric:tabular-nums;opacity:0.6}
+#header-model{font-size:11px;color:var(--text-dim);margin-left:8px;font-variant-numeric:tabular-nums}
 #header-btns{display:flex;gap:2px}
 #header-btns button{background:transparent;border:none;border-radius:var(--radius-sm);color:var(--text-muted);cursor:pointer;padding:4px 6px;font-size:13px;line-height:1;transition:all 120ms;opacity:0.6}
 #header-btns button:hover{opacity:1;color:var(--text-dim);background:var(--surface)}
@@ -84,6 +84,7 @@ body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMac
 .tools{margin:2px 0 6px;font-size:11px}
 .tool-item{display:inline-flex;align-items:center;gap:3px;margin-right:5px;padding:1px 6px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:4px;color:var(--text-muted)}
 .tool-done{color:var(--success)}
+.tool-count{font-size:10px;color:var(--text-muted);margin-left:1px}
 .tool-sep{height:1px;background:var(--border);margin:6px 0 8px}
 
 /* Thinking spinner */
@@ -460,7 +461,7 @@ function render() {
       for (let tc of m.toolCalls) {
         let item = document.createElement('span');
         item.className = 'tool-item';
-        item.innerHTML = '<span class="tool-done">✓</span> ' + escapeHtml(tc.name);
+        item.innerHTML = '<span class="tool-done">✓</span> ' + escapeHtml(tc.name) + (tc.count > 1 ? ' <span class="tool-count">×' + tc.count + '</span>' : '');
         tools.appendChild(item);
       }
       bubble.appendChild(tools);
@@ -487,7 +488,7 @@ function render() {
         for (let name of match[1].split(' · ')) {
           let item = document.createElement('span');
           item.className = 'tool-item';
-          item.innerHTML = '<span class="tool-done">✓</span> ' + name;
+          item.innerHTML = '<span class="tool-done">✓</span> ' + name + (tc.count > 1 ? ' ×' + tc.count : '');
           tools.appendChild(item);
         }
         bubble.appendChild(tools);
@@ -647,7 +648,12 @@ function handleIpc(message) {
           let sm = messages.find(m => m.id === streamingId);
           if (sm) {
             if (!sm.toolCalls) sm.toolCalls = [];
-            sm.toolCalls.push({name: msg.name});
+            let last = sm.toolCalls[sm.toolCalls.length - 1];
+            if (last && last.name === msg.name) {
+              last.count = (last.count || 1) + 1;
+            } else {
+              sm.toolCalls.push({name: msg.name, count: 1});
+            }
             scheduleRender();
           }
         }

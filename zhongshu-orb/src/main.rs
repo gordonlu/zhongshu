@@ -168,7 +168,7 @@ fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("ZHONGSHU_LOG").unwrap_or_else(|_| {
-                "info,wgpu_hal=off,wgpu_core=error,naga=error,sctk_adwaita=error".into()
+                "info,wgpu_hal=off,wgpu_core=error,naga=error,sctk_adwaita=error,deeplossless=warn".into()
             }),
         )
         .init();

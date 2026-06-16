@@ -5,6 +5,7 @@ mod handler;
 mod hotkey;
 mod indicator;
 mod overlay;
+mod render;
 mod services;
 
 use std::sync::{Arc, Mutex};

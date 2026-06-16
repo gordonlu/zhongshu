@@ -117,8 +117,8 @@ mod orb {
                 }
             }
 
-            let ctx = softbuffer::Context::new(w.clone()).unwrap();
-            let surface = softbuffer::Surface::new(&ctx, w.clone()).unwrap();
+            let ctx = softbuffer::Context::new(el).unwrap();
+            let surface = softbuffer::Surface::new(&ctx, &*w).unwrap();
             let c = state_color(AgentState::Idle);
             w.request_redraw();
             OrbIndicator {

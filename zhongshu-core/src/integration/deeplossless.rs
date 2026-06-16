@@ -218,21 +218,9 @@ impl DeeplosslessProxy {
             }
         };
 
-        let conv_id: Option<i64> = conn
-            .query_row(
-                "SELECT id FROM conversations ORDER BY id DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .ok();
-        let conv_id = match conv_id {
-            Some(id) => id,
-            None => return Vec::new(),
-        };
-
-        let mut stmt = match conn.prepare(
-            "SELECT role, content FROM messages WHERE conversation_id = ?1 ORDER BY id ASC",
-        ) {
+        // Load messages across ALL conversations (message IDs are globally
+        // unique and sequential).  This way restarts don't fragment history.
+        let mut stmt = match conn.prepare("SELECT role, content FROM messages ORDER BY id ASC") {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("failed to prepare messages query: {e}");
@@ -240,7 +228,7 @@ impl DeeplosslessProxy {
             }
         };
 
-        let rows = match stmt.query_map(rusqlite::params![conv_id], |row| {
+        let rows = match stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         }) {
             Ok(r) => r,

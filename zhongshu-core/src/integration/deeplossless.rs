@@ -319,21 +319,27 @@ impl DeeplosslessProxy {
             for cid in &conv_ids {
                 // Delete DAG nodes via deeplossless API.
                 if let Ok(nodes) = db.get_all_dag_nodes(*cid) {
+                    let mut deleted = 0usize;
                     for node in &nodes {
                         if !node.deleted {
                             let _ = db.delete_dag_node(node.id);
+                            deleted += 1;
                         }
                     }
-                    tracing::info!("deleted {} nodes from conversation {cid}", nodes.len());
+                    if deleted > 0 || !nodes.is_empty() {
+                        tracing::info!("deleted {deleted} nodes from conversation {cid}");
+                    }
                 }
                 // Delete messages scoped to this conversation.
-                if let Err(e) = conn.execute(
+                if let Ok(n) = conn.execute(
                     "DELETE FROM messages WHERE conversation_id = ?1",
                     rusqlite::params![cid],
                 ) {
-                    tracing::warn!("failed to delete messages for conv {cid}: {e}");
+                    if n > 0 {
+                        tracing::info!("deleted {n} messages for conversation {cid}");
+                    }
                 } else {
-                    tracing::info!("deleted messages for conversation {cid}");
+                    tracing::warn!("failed to delete messages for conv {cid}");
                 }
             }
         }

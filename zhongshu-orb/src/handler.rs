@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
@@ -19,6 +19,7 @@ use crate::config::AppConfig;
 use crate::hotkey::HotkeyManager;
 use crate::indicator::Indicator;
 use crate::overlay::{AuthRequest, OverlayHandle};
+use zhongshu_core::equipment::EquipmentObserver;
 
 // ── App state ────────────────────────────────────────────────────────
 
@@ -49,6 +50,7 @@ pub struct ZhongshuApp {
     pub assistant_id: Option<MessageId>,
     pub filter: ControlTokenFilter,
     pub task_repo: zhongshu_core::core::TaskRepository,
+    pub observer: Arc<Mutex<EquipmentObserver>>,
 }
 
 impl ZhongshuApp {
@@ -63,6 +65,7 @@ impl ZhongshuApp {
         proxy: Arc<tokio::sync::Mutex<DeeplosslessProxy>>,
         runtime: tokio::runtime::Runtime,
         task_repo: zhongshu_core::core::TaskRepository,
+        observer: Arc<Mutex<EquipmentObserver>>,
     ) -> anyhow::Result<Self> {
         let hotkey = HotkeyManager::new(&config.hotkey).unwrap_or_else(|e| {
             tracing::warn!("Global hotkey unavailable: {e:#}");
@@ -93,6 +96,7 @@ impl ZhongshuApp {
             assistant_id: None,
             filter: ControlTokenFilter::new(),
             task_repo,
+            observer,
         })
     }
 
@@ -115,6 +119,7 @@ impl ZhongshuApp {
         };
 
         if let Some(text) = ov.take_input() {
+            self.observer.lock().unwrap().record_user_message(&text);
             self.inbox.submit(text);
         }
         if let Some(rid) = ov.take_approve() {
@@ -160,6 +165,7 @@ impl ZhongshuApp {
             }
             if let Some(evolve) = settings.auto_evolve {
                 cfg.agent.auto_evolve = evolve;
+                self.controller.set_auto_evolve(evolve);
             }
             if let Some(ctx) = settings.max_context_tokens {
                 if ctx >= 100_000 && ctx <= 1_000_000 {

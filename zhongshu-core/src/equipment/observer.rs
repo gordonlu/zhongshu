@@ -22,6 +22,7 @@
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::equipment::Manifest;
 use crate::event::{AgentState, Event, ToolEvent};
 
 /// Maximum observations kept in the ring buffer.
@@ -673,6 +674,27 @@ prompt.md        # 可选：如果是 skill 类型
     pub fn usage_report(&self) -> String {
         self.period_report("全部时间", 24 * 365 * 10)
     }
+}
+
+/// Parse LLM response to an equipment proposal into a Manifest.
+/// Returns None if the LLM declined ("无需装备") or parsing failed.
+pub fn parse_proposal_response(text: &str) -> Option<Manifest> {
+    let trimmed = text.trim();
+    if trimmed.contains("无需装备") {
+        return None;
+    }
+    // Try to extract JSON from markdown code block first.
+    let json_str = if let Some(start) = trimmed.find("```json") {
+        let after = &trimmed[start + 7..];
+        let end = after.find("```").unwrap_or(after.len());
+        after[..end].trim()
+    } else if let Some(start) = trimmed.find('{') {
+        let end = trimmed.rfind('}')?;
+        &trimmed[start..=end]
+    } else {
+        return None;
+    };
+    serde_json::from_str(json_str).ok()
 }
 
 #[cfg(test)]

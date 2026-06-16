@@ -7,7 +7,7 @@ mod indicator;
 mod overlay;
 mod services;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use winit::event_loop::EventLoop;
@@ -23,6 +23,7 @@ use zhongshu_core::core::{
     TaskTool,
 };
 use zhongshu_core::digest::DigestBuilder;
+use zhongshu_core::equipment::EquipmentObserver;
 use zhongshu_core::event::{EventBus, EventLogger, MessageId, ResponseEvent, ResponseRole};
 use zhongshu_core::heartbeat::Heartbeat;
 use zhongshu_core::integration::DeeplosslessProxy;
@@ -227,20 +228,19 @@ fn main() {
     let _dispatcher_handle = dispatcher.spawn(&eb);
 
     // ── 军器监初始化 ──
-    let equipment = {
-        let dir = config::config_dir().join("equipment");
-        std::fs::create_dir_all(&dir).unwrap_or(());
-        let _ = std::fs::remove_dir_all(dir.join("search-files"));
-        let mut reg = zhongshu_core::equipment::EquipmentRegistry::new(dir);
-        reg.install_defaults();
-        reg
-    };
-    let equip_prompts = equipment.skill_prompts();
-    let mut system_prompt = cfg.agent.effective_system_prompt();
-    for (_id, prompt) in &equip_prompts {
+    let equipment_dir = config::config_dir().join("equipment");
+    std::fs::create_dir_all(&equipment_dir).unwrap_or(());
+    let _ = std::fs::remove_dir_all(equipment_dir.join("search-files"));
+    let mut reg = zhongshu_core::equipment::EquipmentRegistry::new(equipment_dir);
+    reg.install_defaults();
+    let base_system_prompt = cfg.agent.effective_system_prompt();
+    let mut system_prompt = base_system_prompt.clone();
+    for (_id, prompt) in &reg.skill_prompts() {
         system_prompt.push_str("\n\n");
         system_prompt.push_str(prompt);
     }
+    let equipment = Arc::new(Mutex::new(reg));
+    let (_observer_handle, observer) = EquipmentObserver::new().spawn(&eb);
 
     // ── 核心数据库 ──
     let core_db_path = config::config_dir().join("core.db");
@@ -301,6 +301,7 @@ fn main() {
             .register(memory_query_tool.clone()),
         cfg.llm.model.clone(),
         app::SessionState::new(),
+        base_system_prompt,
         system_prompt,
         config::config_dir().join("agent.json"),
         proxy.clone(),
@@ -311,6 +312,12 @@ fn main() {
     ));
     let inbox = Arc::new(AgentInbox::new(controller.clone()));
     inbox.start();
+    services::spawn_auto_evolution(
+        observer.clone(),
+        provider.clone(),
+        controller.clone(),
+        equipment.clone(),
+    );
 
     let mut task_scheduler = TaskScheduler::new(Duration::from_secs(1));
 
@@ -457,6 +464,7 @@ fn main() {
         proxy,
         r,
         task_repo,
+        observer.clone(),
     ) {
         Ok(app) => app,
         Err(e) => {

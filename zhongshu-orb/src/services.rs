@@ -1,8 +1,11 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use zhongshu_core::agent::llm::{ChatCompletionRequest, LlmProvider, OpenAiProvider};
+use zhongshu_core::equipment::{parse_proposal_response, EquipmentObserver, EquipmentRegistry};
+
+use crate::app::AgentController;
 use zhongshu_core::core::{
     ArtifactRepository, ArtifactType, Database, GoalRepository, GoalType, MemoryCandidateStore,
     MemoryPolicy, ObservationStore, ObservationType, Scheduler, StepStatus, SuggestionEngine,
@@ -437,6 +440,83 @@ pub fn spawn_compensation(eb: Arc<EventBus>, core_db_path: PathBuf) {
                     }
                 }
             });
+        }
+    });
+}
+
+/// Periodically check observations and ask LLM to propose new equipment.
+/// Runs only when `controller.auto_evolve_enabled` is true.
+pub fn spawn_auto_evolution(
+    observer: Arc<Mutex<EquipmentObserver>>,
+    provider: OpenAiProvider,
+    controller: Arc<AgentController>,
+    equipment: Arc<Mutex<EquipmentRegistry>>,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            if !controller
+                .auto_evolve_enabled
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                continue;
+            }
+            let prompt = match observer.lock().unwrap().equipment_proposal_prompt() {
+                Some(p) => p,
+                None => continue,
+            };
+            tracing::info!("auto_evolve: requesting equipment proposal from LLM");
+            let req = ChatCompletionRequest {
+                model: provider.model_name().to_string(),
+                messages: vec![zhongshu_core::agent::llm::Message::user(&prompt)],
+                stream: false,
+                temperature: Some(0.3),
+                max_tokens: Some(2000),
+                reasoning_effort: None,
+                tools: None,
+                tool_choice: None,
+            };
+            let response = match provider.chat(req).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!("auto_evolve: LLM call failed: {e}");
+                    continue;
+                }
+            };
+            let text = response
+                .choices
+                .first()
+                .map(|c| c.message.content.as_str())
+                .unwrap_or("");
+            let manifest = match parse_proposal_response(text) {
+                Some(m) => m,
+                None => {
+                    tracing::info!("auto_evolve: LLM declined or returned invalid proposal");
+                    continue;
+                }
+            };
+            // Write manifest to a temp directory for installation.
+            let tmp = std::env::temp_dir().join(format!("zhongshu_evolve_{}", manifest.name));
+            let _ = std::fs::create_dir_all(&tmp);
+            if let Err(e) = std::fs::write(
+                tmp.join("manifest.json"),
+                serde_json::to_string_pretty(&manifest).unwrap(),
+            ) {
+                tracing::warn!("auto_evolve: failed to write temp manifest: {e}");
+                continue;
+            }
+            // Install via registry.
+            let name = manifest.name.clone();
+            match equipment.lock().unwrap().install_from(&tmp) {
+                Ok(id) => {
+                    tracing::info!("auto_evolve: installed '{}'", id);
+                    controller.refresh_skill_prompts(&equipment.lock().unwrap());
+                }
+                Err(e) => {
+                    tracing::warn!("auto_evolve: install failed for '{name}': {e}");
+                }
+            }
+            let _ = std::fs::remove_dir_all(&tmp);
         }
     });
 }

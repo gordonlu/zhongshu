@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -49,6 +49,7 @@ pub struct AgentController {
     model: String,
     #[allow(dead_code)]
     session: SessionState,
+    base_system_prompt: String,
     system_prompt: Mutex<String>,
     history: Arc<Mutex<Vec<(String, String)>>>,
     state: Arc<RwLock<AgentState>>,
@@ -59,6 +60,7 @@ pub struct AgentController {
     reasoning_complex: String,
     reasoning_agent: String,
     max_context_tokens: AtomicU32,
+    pub auto_evolve_enabled: AtomicBool,
 }
 
 impl AgentController {
@@ -69,6 +71,7 @@ impl AgentController {
         tools: ToolRegistry,
         model: String,
         #[allow(dead_code)] session: SessionState,
+        base_system_prompt: String,
         system_prompt: String,
         profile_path: PathBuf,
         proxy: Arc<tokio::sync::Mutex<DeeplosslessProxy>>,
@@ -85,6 +88,7 @@ impl AgentController {
             tools,
             model,
             session,
+            base_system_prompt,
             system_prompt: Mutex::new(system_prompt),
             history: Arc::new(Mutex::new(Vec::new())),
             state: Arc::new(RwLock::new(AgentState::Idle)),
@@ -95,6 +99,7 @@ impl AgentController {
             reasoning_complex,
             reasoning_agent,
             max_context_tokens: AtomicU32::new(max_context_tokens),
+            auto_evolve_enabled: AtomicBool::new(false),
         }
     }
 
@@ -108,9 +113,36 @@ impl AgentController {
         *self.system_prompt.lock().unwrap() = prompt;
     }
 
+    /// Rebuild system prompt by appending current skill prompts.
+    pub fn refresh_skill_prompts(&self, equipment: &zhongshu_core::equipment::EquipmentRegistry) {
+        let base = &self.base_system_prompt;
+        let skill_prompts = equipment.skill_prompts();
+        if skill_prompts.is_empty() {
+            return;
+        }
+        let mut full = base.clone();
+        for (_id, prompt) in &skill_prompts {
+            full.push_str("\n\n");
+            full.push_str(prompt);
+        }
+        *self.system_prompt.lock().unwrap() = full;
+        tracing::info!(
+            "refreshed system prompt with {} skill(s)",
+            skill_prompts.len()
+        );
+    }
+
     pub fn set_max_context_tokens(&self, val: u32) {
         self.max_context_tokens.store(val, Ordering::Relaxed);
         tracing::info!("max_context_tokens updated to {val}");
+    }
+
+    pub fn set_auto_evolve(&self, enabled: bool) {
+        self.auto_evolve_enabled.store(enabled, Ordering::Relaxed);
+        tracing::info!(
+            "auto_evolve {}",
+            if enabled { "enabled" } else { "disabled" }
+        );
     }
 
     pub fn set_chat_history(&self, history: Vec<(String, String)>) {

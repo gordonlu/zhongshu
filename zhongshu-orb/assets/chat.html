@@ -504,6 +504,20 @@ function render() {
   }
 }
 
+// Throttle renders to at most every 50ms during streaming.
+let renderPending = false;
+let renderTimer = null;
+function scheduleRender() {
+  if (renderPending) return;
+  renderPending = true;
+  if (renderTimer) clearTimeout(renderTimer);
+  renderTimer = setTimeout(() => {
+    renderPending = false;
+    render();
+    scrollBottom();
+  }, 50);
+}
+
 // ── IPC: Receive from Rust ──
 function handleIpc(message) {
   try {
@@ -514,8 +528,7 @@ function handleIpc(message) {
           streamingId = 'stream-' + Date.now();
           streamingBuffer = '';
           messages.push({id: streamingId, role: 'assistant', content: '', toolCalls: [], _thinking: true});
-          render();
-          scrollBottom();
+          scheduleRender();
         }
         break;
 
@@ -530,8 +543,7 @@ function handleIpc(message) {
         if (sm) {
           sm._thinking = false;
           sm.content = streamingBuffer;
-          render();
-          scrollBottom();
+          scheduleRender();
         }
         break;
 
@@ -544,8 +556,7 @@ function handleIpc(message) {
           }
           streamingId = null;
           streamingBuffer = '';
-          render();
-          scrollBottom();
+          scheduleRender();
         }
         break;
 

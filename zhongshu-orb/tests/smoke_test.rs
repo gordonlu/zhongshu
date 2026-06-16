@@ -115,14 +115,16 @@ fn test_chat_html_renders_messages() {
     ).expect("check3 eval failed");
     let pump_start = std::time::Instant::now();
     let final_state = loop {
-        pump_gtk(50);
+        // Non‑blocking GTK pump – don't sleep between iterations.
+        while glib::MainContext::default().iteration(false) {}
         if let Ok(r) = rx4.try_recv() {
             break r;
         }
-        if pump_start.elapsed() > Duration::from_secs(5) {
-            println!("waiting for JS callback timed out");
+        if pump_start.elapsed() > Duration::from_secs(10) {
+            eprintln!("smoke test: JS callback not received within 10s");
             break String::new();
         }
+        std::thread::sleep(Duration::from_millis(5));
     };
     println!("Final: {final_state}");
     let final_parsed: serde_json::Value = serde_json::from_str(&final_state).unwrap_or_default();

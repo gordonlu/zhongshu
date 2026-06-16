@@ -5,6 +5,7 @@ pub mod memory;
 pub mod screenshot;
 pub mod search;
 pub mod search_files;
+pub mod self_test;
 pub mod shell;
 pub mod system_info;
 pub mod webfetch;
@@ -347,4 +348,5 @@ pub fn default_registry() -> ToolRegistry {
         .register(fs::WriteFileTool)
         .register(fs::ListDirTool)
         .register(system_info::SystemInfoTool)
+        .register(self_test::SelfTestTool)
 }

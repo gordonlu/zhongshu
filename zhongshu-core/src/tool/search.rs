@@ -1,4 +1,4 @@
-use crate::tool::{Tool, ToolOutput};
+use crate::tool::{build_browser_client, Tool, ToolOutput};
 use async_trait::async_trait;
 use serde_json::json;
 use tracing::info;
@@ -36,10 +36,7 @@ impl Tool for WebSearchTool {
 
         info!("web_search: {query}  region={region}");
 
-        let client = match reqwest::Client::builder()
-            .user_agent("zhongshu/0.1")
-            .build()
-        {
+        let client = match build_browser_client() {
             Ok(c) => c,
             Err(e) => return ToolOutput::error(format!("创建 HTTP 客户端失败: {e}")),
         };

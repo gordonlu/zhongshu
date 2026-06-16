@@ -1,9 +1,7 @@
-use crate::tool::{Tool, ToolOutput};
+use crate::tool::{build_browser_client, detect_security_page, Tool, ToolOutput};
 use async_trait::async_trait;
 use serde_json::json;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-const BROWSER_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 
 pub struct BrowserTool;
 
@@ -36,7 +34,7 @@ impl Tool for BrowserTool {
         let max_len = arguments["max_length"].as_u64().unwrap_or(5000).min(20000) as usize;
         let open_browser = arguments["open_browser"].as_bool().unwrap_or(false);
 
-        let client = match reqwest::Client::builder().user_agent(BROWSER_UA).build() {
+        let client = match build_browser_client() {
             Ok(c) => c,
             Err(e) => return ToolOutput::error(format!("HTTP 客户端创建失败: {e}")),
         };
@@ -56,6 +54,19 @@ impl Tool for BrowserTool {
             },
             Err(e) => return ToolOutput::error(format!("请求失败: {e}")),
         };
+
+        // Check for anti-bot / captcha pages before processing.
+        if let Some(reason) = detect_security_page(&html) {
+            if open_browser {
+                let _ = open::that(url);
+            }
+            return ToolOutput::success(json!({
+                "url": url,
+                "warning": format!("目标网站返回了安全验证页面（{reason}），无法获取内容"),
+                "note": "该网站有反爬机制，已在默认浏览器中打开，你可以直接查看。",
+                "opened_browser": open_browser,
+            }));
+        }
 
         let text = extract_text(&html);
         let truncated = if text.len() > max_len {

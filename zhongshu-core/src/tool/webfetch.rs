@@ -1,9 +1,7 @@
-use crate::tool::{Tool, ToolOutput};
+use crate::tool::{build_browser_client, detect_security_page, Tool, ToolOutput};
 use async_trait::async_trait;
 use serde_json::json;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-const BROWSER_UA: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 
 pub struct WebFetchTool;
 
@@ -34,7 +32,7 @@ impl Tool for WebFetchTool {
         };
         let max_len = arguments["max_length"].as_u64().unwrap_or(5000).min(20000) as usize;
 
-        let client = match reqwest::Client::builder().user_agent(BROWSER_UA).build() {
+        let client = match build_browser_client() {
             Ok(c) => c,
             Err(e) => return ToolOutput::error(format!("HTTP 客户端创建失败: {e}")),
         };
@@ -54,6 +52,15 @@ impl Tool for WebFetchTool {
             },
             Err(e) => return ToolOutput::error(format!("请求失败: {e}")),
         };
+
+        // Check for anti-bot / captcha pages before processing.
+        if let Some(reason) = detect_security_page(&html) {
+            return ToolOutput::success(json!({
+                "url": url,
+                "warning": format!("目标网站返回了安全验证页面（{reason}），无法获取实际内容"),
+                "note": "这个网站有反爬机制，可能需要在真实的浏览器中打开。",
+            }));
+        }
 
         let text = extract_text(&html);
         let truncated = if text.len() > max_len {

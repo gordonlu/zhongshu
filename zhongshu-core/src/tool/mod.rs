@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolOutput {
@@ -172,6 +173,60 @@ impl ToolRegistry {
                 .collect(),
         }
     }
+}
+
+/// Build an HTTP client with realistic browser headers to reduce
+/// the chance of being blocked by anti-bot detection.
+pub fn build_browser_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+        .default_headers(
+            vec![
+                ("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
+                ("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8"),
+                ("Accept-Encoding", "gzip, deflate, br"),
+                ("Sec-Fetch-Dest", "document"),
+                ("Sec-Fetch-Mode", "navigate"),
+                ("Sec-Fetch-Site", "none"),
+                ("Sec-Fetch-User", "?1"),
+                ("Upgrade-Insecure-Requests", "1"),
+            ].into_iter().map(|(k, v)| {
+                (reqwest::header::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                 reqwest::header::HeaderValue::from_str(v).unwrap())
+            }).collect(),
+        )
+        .timeout(Duration::from_secs(30))
+        .build()
+}
+
+/// Check if page content indicates a security/anti-bot/captcha page.
+/// Returns the first reason if detected, or None if the content looks normal.
+pub fn detect_security_page(text: &str) -> Option<&'static str> {
+    let lower = text.to_lowercase();
+    let patterns: &[(&str, &str)] = &[
+        // Chinese anti-bot patterns
+        ("安全验证", "触发了安全验证"),
+        ("安全协议", "触发安全协议"),
+        ("请输入验证码", "需要输入验证码"),
+        ("验证码", "验证码拦截"),
+        ("人机验证", "人机验证"),
+        ("机器行为", "被识别为机器行为"),
+        ("您的请求有异常", "请求异常"),
+        ("网络请求异常", "网络请求异常"),
+        ("您的访问被拒绝", "访问被拒绝"),
+        ("您需要启用 javascript", "需要启用 JavaScript"),
+        // English anti-bot patterns
+        ("captcha", "CAPTCHA verification"),
+        ("please verify you are human", "人机验证"),
+        ("your request has been blocked", "请求被拦截"),
+        ("automated access", "自动化访问被拒绝"),
+    ];
+    for (pattern, reason) in patterns {
+        if lower.contains(pattern) {
+            return Some(reason);
+        }
+    }
+    None
 }
 
 pub fn default_registry() -> ToolRegistry {

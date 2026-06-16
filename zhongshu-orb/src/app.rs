@@ -323,38 +323,39 @@ impl AgentController {
             let mut runtime = AgentRuntime::new(p, t, m, AgentBudget::default());
             runtime.reasoning_effort = reasoning_str;
 
-            let callbacks = AgentCallbacks {
-                on_text: {
-                    let tx = tx.clone();
-                    Box::new(move |x: &str| {
-                        if !x.is_empty() {
-                            tracing::debug!(len = x.len(), "on_text");
-                            let _ = tx.try_send(ResponseEvent::MessageDelta {
-                                id: aid,
-                                delta: x.to_string(),
-                            });
-                        } else {
-                            tracing::debug!("on_text empty");
-                        }
-                    })
-                },
-                on_tool_start: {
-                    let eb = eb.clone();
-                    Box::new(move |name: &str| {
-                        eb.publish(Event::Tool(ToolEvent::Started {
+            let tool_names = Arc::new(Mutex::new(Vec::<String>::new()));
+            let callbacks = {
+                let tn = tool_names.clone();
+                let eb1 = eb.clone();
+                let eb2 = eb.clone();
+                AgentCallbacks {
+                    on_text: {
+                        let tx = tx.clone();
+                        Box::new(move |x: &str| {
+                            if !x.is_empty() {
+                                tracing::debug!(len = x.len(), "on_text");
+                                let _ = tx.try_send(ResponseEvent::MessageDelta {
+                                    id: aid,
+                                    delta: x.to_string(),
+                                });
+                            } else {
+                                tracing::debug!("on_text empty");
+                            }
+                        })
+                    },
+                    on_tool_start: Box::new(move |name: &str| {
+                        tn.lock().unwrap().push(name.to_string());
+                        eb1.publish(Event::Tool(ToolEvent::Started {
                             name: name.to_string(),
                         }));
-                    })
-                },
-                on_tool_done: {
-                    let eb = eb.clone();
-                    Box::new(move |name: &str, ok: bool| {
-                        eb.publish(Event::Tool(ToolEvent::Completed {
+                    }),
+                    on_tool_done: Box::new(move |name: &str, ok: bool| {
+                        eb2.publish(Event::Tool(ToolEvent::Completed {
                             name: name.to_string(),
                             success: ok,
                         }));
-                    })
-                },
+                    }),
+                }
             };
 
             let r = tokio::time::timeout(
@@ -372,10 +373,21 @@ impl AgentController {
                         .unwrap()
                         .push(("user".to_string(), input.clone()));
                     if !last.is_empty() {
+                        let tools_used = tool_names.lock().unwrap();
+                        let history_content = if tools_used.is_empty() {
+                            last.to_string()
+                        } else {
+                            let badge = tools_used
+                                .iter()
+                                .map(|n| format!("✓ {n}"))
+                                .collect::<Vec<_>>()
+                                .join(" · ");
+                            format!("[工具: {badge}]\n\n{last}")
+                        };
                         history_arc
                             .lock()
                             .unwrap()
-                            .push(("assistant".to_string(), last.to_string()));
+                            .push(("assistant".to_string(), history_content));
                     }
                     // Extract todos and goal completions.
                     memory.extract_todos(last);

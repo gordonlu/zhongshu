@@ -475,7 +475,25 @@ function render() {
     } else if (m.role === 'user') {
       content.textContent = m.content;
     } else {
-      content.innerHTML = renderMarkdown(m.content);
+      // Restore tool call badges from history content if present.
+      let display = m.content;
+      let match = m.content.match(/^\[工具: (.+?)\]\n\n/);
+      if (match) {
+        display = m.content.slice(match[0].length);
+        let tools = document.createElement('div');
+        tools.className = 'tools';
+        for (let name of match[1].split(' · ')) {
+          let item = document.createElement('span');
+          item.className = 'tool-item';
+          item.innerHTML = '<span class="tool-done">✓</span> ' + name;
+          tools.appendChild(item);
+        }
+        bubble.appendChild(tools);
+        let sep = document.createElement('div');
+        sep.className = 'tool-sep';
+        bubble.appendChild(sep);
+      }
+      content.innerHTML = renderMarkdown(display);
     }
     bubble.appendChild(content);
 

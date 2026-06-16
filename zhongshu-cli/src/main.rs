@@ -68,10 +68,10 @@ async fn main() -> anyhow::Result<()> {
         .register(zhongshu_core::tool::automation::AutomationTool);
 
     let budget = AgentBudget {
-        max_steps: 30,
-        max_tool_calls: 20,
-        per_tool_limit: 10,
-        token_limit: 128_000,
+        max_steps: 100,
+        max_tool_calls: 200,
+        per_tool_limit: 50,
+        token_limit: 384_000,
     };
 
     loop {

@@ -357,10 +357,10 @@ fn main() {
             .register(memory_query_tool.clone()),
         cfg.llm.model.clone(),
         AgentBudget {
-            max_steps: 10,
-            max_tool_calls: 5,
-            per_tool_limit: 10,
-            token_limit: 32_000,
+            max_steps: 50,
+            max_tool_calls: 100,
+            per_tool_limit: 30,
+            token_limit: 128_000,
         },
     ));
 

@@ -7,10 +7,10 @@ use crate::tool::ToolStatus;
 use anyhow::Context;
 use tracing::{debug, info, warn};
 
-const DEFAULT_MAX_STEPS: usize = 30;
-const DEFAULT_MAX_TOOL_CALLS: usize = 20;
-const DEFAULT_PER_TOOL_LIMIT: usize = 20;
-const DEFAULT_TOKEN_LIMIT: usize = 128_000;
+const DEFAULT_MAX_STEPS: usize = 100;
+const DEFAULT_MAX_TOOL_CALLS: usize = 200;
+const DEFAULT_PER_TOOL_LIMIT: usize = 50;
+const DEFAULT_TOKEN_LIMIT: usize = 384_000;
 
 /// Per-agent resource budget.
 #[derive(Debug, Clone)]

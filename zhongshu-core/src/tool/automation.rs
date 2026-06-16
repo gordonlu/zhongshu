@@ -60,10 +60,121 @@ impl Tool for AutomationTool {
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
+fn exec_automation(action: &str, arguments: &serde_json::Value) -> ToolOutput {
+    if is_wayland() {
+        exec_wayland(action, arguments)
+    } else {
+        exec_enigo(action, arguments)
+    }
+}
+
+/// Detect Wayland desktop session.
+fn is_wayland() -> bool {
+    std::env::var("XDG_SESSION_TYPE").ok().as_deref() == Some("wayland")
+}
+
+/// Wayland backend: shell out to `ydotool` / `wtype`.
+#[cfg(target_os = "linux")]
+fn exec_wayland(action: &str, arguments: &serde_json::Value) -> ToolOutput {
+    match action {
+        "type" => {
+            let text = match arguments["text"].as_str() {
+                Some(t) => t,
+                None => return ToolOutput::error("'text' must be a string"),
+            };
+            info!("desktop type (wayland): {text}");
+            let output = std::process::Command::new("wtype").arg(text).output();
+            match output {
+                Ok(o) if o.status.success() => {
+                    ToolOutput::success(json!({ "action": "type", "text": text }))
+                }
+                Ok(o) => ToolOutput::error(format!(
+                    "wtype 失败: {}",
+                    String::from_utf8_lossy(&o.stderr)
+                )),
+                Err(e) => ToolOutput::error(format!("wtype 不可用: {e}，请安装 wtype")),
+            }
+        }
+        "key" => {
+            let keys = match arguments["keys"].as_str() {
+                Some(k) => k,
+                None => return ToolOutput::error("'keys' must be a string"),
+            };
+            info!("desktop key (wayland): {keys}");
+            let mut cmd = std::process::Command::new("ydotool");
+            cmd.arg("key");
+            for part in keys.split('+') {
+                let p = part.trim();
+                if !p.is_empty() {
+                    cmd.arg(p);
+                }
+            }
+            let output = cmd.output();
+            match output {
+                Ok(o) if o.status.success() => {
+                    ToolOutput::success(json!({ "action": "key", "keys": keys }))
+                }
+                Ok(o) => ToolOutput::error(format!(
+                    "ydotool 失败: {}",
+                    String::from_utf8_lossy(&o.stderr)
+                )),
+                Err(e) => ToolOutput::error(format!("ydotool 不可用: {e}，请安装 ydotool")),
+            }
+        }
+        "click" => {
+            let x = arguments["x"].as_i64().unwrap_or(0) as i32;
+            let y = arguments["y"].as_i64().unwrap_or(0) as i32;
+            let output = std::process::Command::new("ydotool")
+                .args(["mousemove", &x.to_string(), &y.to_string()])
+                .output();
+            if let Err(e) = output {
+                return ToolOutput::error(format!("ydotool 不可用: {e}，请安装 ydotool"));
+            }
+            let output = std::process::Command::new("ydotool")
+                .args(["click", "1"])
+                .output();
+            match output {
+                Ok(o) if o.status.success() => {
+                    ToolOutput::success(json!({ "action": "click", "x": x, "y": y }))
+                }
+                Ok(o) => ToolOutput::error(format!(
+                    "ydotool click 失败: {}",
+                    String::from_utf8_lossy(&o.stderr)
+                )),
+                Err(e) => ToolOutput::error(format!("ydotool 不可用: {e}，请安装 ydotool")),
+            }
+        }
+        "move" => {
+            let x = arguments["x"].as_i64().unwrap_or(0) as i32;
+            let y = arguments["y"].as_i64().unwrap_or(0) as i32;
+            let output = std::process::Command::new("ydotool")
+                .args(["mousemove", &x.to_string(), &y.to_string()])
+                .output();
+            match output {
+                Ok(o) if o.status.success() => {
+                    ToolOutput::success(json!({ "action": "move", "x": x, "y": y }))
+                }
+                Ok(o) => ToolOutput::error(format!(
+                    "ydotool mousemove 失败: {}",
+                    String::from_utf8_lossy(&o.stderr)
+                )),
+                Err(e) => ToolOutput::error(format!("ydotool 不可用: {e}，请安装 ydotool")),
+            }
+        }
+        other => ToolOutput::error(format!("未知操作: '{other}'")),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn exec_wayland(_action: &str, _arguments: &serde_json::Value) -> ToolOutput {
+    ToolOutput::error("Wayland 自动化仅支持 Linux")
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use {enigo::Keyboard, enigo::Mouse};
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-fn exec_automation(action: &str, arguments: &serde_json::Value) -> ToolOutput {
+fn exec_enigo(action: &str, arguments: &serde_json::Value) -> ToolOutput {
     let mut enigo = match enigo::Enigo::new(&enigo::Settings::default()) {
         Ok(e) => e,
         Err(e) => return ToolOutput::error(format!("enigo 初始化失败: {e}")),

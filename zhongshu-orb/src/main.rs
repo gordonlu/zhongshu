@@ -292,6 +292,7 @@ fn main() {
         default_registry()
             .register(zhongshu_core::tool::search::WebSearchTool)
             .register(zhongshu_core::tool::browser::BrowserTool)
+            .register(zhongshu_core::tool::browser_automation::BrowserAutomationTool)
             .register(zhongshu_core::tool::webfetch::WebFetchTool)
             .register(zhongshu_core::tool::search_files::SearchFilesTool)
             .register(zhongshu_core::tool::automation::AutomationTool)
@@ -313,14 +314,10 @@ fn main() {
         cfg.llm.max_context_tokens,
         equipment.clone(),
     ));
+    controller.set_auto_evolve(cfg.agent.auto_evolve);
     let inbox = Arc::new(AgentInbox::new(controller.clone()));
     inbox.start();
-    services::spawn_auto_evolution(
-        observer.clone(),
-        provider.clone(),
-        controller.clone(),
-        equipment.clone(),
-    );
+    services::spawn_auto_evolution(observer.clone(), controller.clone(), equipment.clone());
 
     let mut task_scheduler = TaskScheduler::new(Duration::from_secs(1));
 
@@ -348,6 +345,7 @@ fn main() {
         default_registry()
             .register(zhongshu_core::tool::search::WebSearchTool)
             .register(zhongshu_core::tool::browser::BrowserTool)
+            .register(zhongshu_core::tool::browser_automation::BrowserAutomationTool)
             .register(zhongshu_core::tool::webfetch::WebFetchTool)
             .register(zhongshu_core::tool::search_files::SearchFilesTool)
             .register(zhongshu_core::tool::automation::AutomationTool)

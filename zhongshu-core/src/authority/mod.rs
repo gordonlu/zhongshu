@@ -619,7 +619,7 @@ impl AuthorityGate {
         }
 
         let risk = match tool {
-            "screenshot" | "automation" | "browser" => Risk::Dangerous,
+            "screenshot" | "automation" | "browser" | "browser_automation" => Risk::Dangerous,
             _ => return CheckResult::Allow,
         };
 

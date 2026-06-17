@@ -3,7 +3,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use zhongshu_core::agent::llm::{ChatCompletionRequest, LlmProvider, OpenAiProvider};
-use zhongshu_core::equipment::{parse_proposal_response, EquipmentObserver, EquipmentRegistry};
+use zhongshu_core::equipment::{
+    parse_proposal_response, EquipmentObserver, EquipmentRegistry, EquipmentType, Manifest,
+};
 
 use crate::app::AgentController;
 use zhongshu_core::core::{
@@ -448,7 +450,6 @@ pub fn spawn_compensation(eb: Arc<EventBus>, core_db_path: PathBuf) {
 /// Runs only when `controller.auto_evolve_enabled` is true.
 pub fn spawn_auto_evolution(
     observer: Arc<Mutex<EquipmentObserver>>,
-    provider: OpenAiProvider,
     controller: Arc<AgentController>,
     equipment: Arc<Mutex<EquipmentRegistry>>,
 ) {
@@ -466,6 +467,7 @@ pub fn spawn_auto_evolution(
                 None => continue,
             };
             tracing::info!("auto_evolve: requesting equipment proposal from LLM");
+            let provider = controller.provider_snapshot();
             let req = ChatCompletionRequest {
                 model: provider.model_name().to_string(),
                 messages: vec![zhongshu_core::agent::llm::Message::user(&prompt)],
@@ -495,14 +497,26 @@ pub fn spawn_auto_evolution(
                     continue;
                 }
             };
+            if !matches!(manifest.equipment_type, EquipmentType::Skill) {
+                tracing::warn!(
+                    "auto_evolve: unsupported equipment type for '{}'; only skill is currently installable",
+                    manifest.name
+                );
+                continue;
+            }
             // Write manifest to a temp directory for installation.
             let tmp = std::env::temp_dir().join(format!("zhongshu_evolve_{}", manifest.name));
-            let _ = std::fs::create_dir_all(&tmp);
-            if let Err(e) = std::fs::write(
-                tmp.join("manifest.json"),
-                serde_json::to_string_pretty(&manifest).unwrap(),
+            if let Err(e) = std::fs::create_dir_all(&tmp) {
+                tracing::warn!("auto_evolve: failed to create temp dir: {e}");
+                continue;
+            }
+            if let Err(e) = write_auto_evolve_package(
+                &tmp,
+                &manifest,
+                &serde_json::to_string_pretty(&manifest).unwrap(),
             ) {
-                tracing::warn!("auto_evolve: failed to write temp manifest: {e}");
+                tracing::warn!("auto_evolve: failed to write temp package: {e}");
+                let _ = std::fs::remove_dir_all(&tmp);
                 continue;
             }
             // Install via registry.
@@ -519,4 +533,37 @@ pub fn spawn_auto_evolution(
             let _ = std::fs::remove_dir_all(&tmp);
         }
     });
+}
+
+fn write_auto_evolve_package(
+    dir: &std::path::Path,
+    manifest: &Manifest,
+    manifest_json: &str,
+) -> std::io::Result<()> {
+    std::fs::write(dir.join("manifest.json"), manifest_json)?;
+    if matches!(manifest.equipment_type, EquipmentType::Skill) {
+        std::fs::write(dir.join("prompt.md"), auto_evolve_prompt_md(manifest))?;
+    }
+    Ok(())
+}
+
+fn auto_evolve_prompt_md(manifest: &Manifest) -> String {
+    let tools = if manifest.tools.is_empty() {
+        "无特定工具".to_string()
+    } else {
+        manifest.tools.join(", ")
+    };
+    format!(
+        r#"# 装备：{name}
+
+{description}
+
+当用户请求与该装备能力匹配时，优先按本装备处理。使用工具前遵守中书的权限关卡；不要自行扩大权限。
+
+可用/相关工具：{tools}
+"#,
+        name = manifest.name,
+        description = manifest.description,
+        tools = tools
+    )
 }

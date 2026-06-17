@@ -609,19 +609,15 @@ impl EquipmentObserver {
 
 根据以上观察数据，判断是否有值得为用户**升级或新建**装备（equipment）的模式。
 
-装备是 `~/.config/zhongshu/equipment/<name>/` 目录下的一个包，包含：
+装备是 `~/.config/zhongshu/equipment/<name>/` 目录下的一个包。当前自动进化链路只支持生成 **skill 装备**：
 
 ```
 manifest.json    # 必选：装备元数据
-workflow.yaml    # 可选：如果是 workflow 类型
-prompt.md        # 可选：如果是 skill 类型
+prompt.md        # 由中书根据 manifest 自动生成并注入 system prompt
 ```
 
-装备类型：
-- `skill` — 可复用的技能（有触发条件、执行流程、输入输出）
-- `tool-extension` — 新增系统能力
-- `workflow` — 多步骤执行模板
-- `worker-profile` — 专用 worker 配置
+装备类型固定为：
+- `skill` — 可复用的技能（触发条件、处理原则、推荐工具）
 
 ### 判断规则
 
@@ -654,7 +650,7 @@ prompt.md        # 可选：如果是 skill 类型
 {{
   "name": "<装备名>",
   "version": "1.0.0",
-  "type": "skill | workflow | tool-extension | worker-profile",
+  "type": "skill",
   "description": "<说明>",
   "tools": ["<需要的工具名>"],
   "permissions": {{

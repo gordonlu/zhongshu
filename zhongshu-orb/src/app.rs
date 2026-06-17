@@ -44,9 +44,9 @@ impl SessionState {
 pub struct AgentController {
     event_bus: Arc<EventBus>,
     response_tx: ResponseTx,
-    provider: OpenAiProvider,
+    provider: Mutex<OpenAiProvider>,
     tools: ToolRegistry,
-    model: String,
+    model: Mutex<String>,
     #[allow(dead_code)]
     session: SessionState,
     base_system_prompt: Mutex<String>,
@@ -56,9 +56,9 @@ pub struct AgentController {
     memory: AgentMemory,
     current_task: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     proxy: Arc<tokio::sync::Mutex<DeeplosslessProxy>>,
-    router: ModelRouter,
-    reasoning_complex: String,
-    reasoning_agent: String,
+    router: Mutex<ModelRouter>,
+    reasoning_complex: Mutex<String>,
+    reasoning_agent: Mutex<String>,
     equipment: Arc<Mutex<zhongshu_core::equipment::EquipmentRegistry>>,
     max_context_tokens: AtomicU32,
     pub auto_evolve_enabled: AtomicBool,
@@ -86,9 +86,9 @@ impl AgentController {
         AgentController {
             event_bus,
             response_tx,
-            provider,
+            provider: Mutex::new(provider),
             tools,
-            model,
+            model: Mutex::new(model),
             session,
             base_system_prompt: Mutex::new(base_system_prompt),
             system_prompt: Mutex::new(system_prompt),
@@ -97,9 +97,9 @@ impl AgentController {
             memory,
             current_task: Arc::new(tokio::sync::Mutex::new(None)),
             proxy,
-            router,
-            reasoning_complex,
-            reasoning_agent,
+            router: Mutex::new(router),
+            reasoning_complex: Mutex::new(reasoning_complex),
+            reasoning_agent: Mutex::new(reasoning_agent),
             max_context_tokens: AtomicU32::new(max_context_tokens),
             auto_evolve_enabled: AtomicBool::new(false),
             equipment,
@@ -146,7 +146,27 @@ impl AgentController {
     }
 
     pub fn model_name(&self) -> String {
-        self.model.clone()
+        self.model.lock().unwrap().clone()
+    }
+
+    pub fn provider_snapshot(&self) -> OpenAiProvider {
+        self.provider.lock().unwrap().clone()
+    }
+
+    pub fn update_llm_runtime(
+        &self,
+        provider: OpenAiProvider,
+        model: String,
+        router: ModelRouter,
+        reasoning_complex: String,
+        reasoning_agent: String,
+    ) {
+        *self.provider.lock().unwrap() = provider;
+        *self.model.lock().unwrap() = model;
+        *self.router.lock().unwrap() = router;
+        *self.reasoning_complex.lock().unwrap() = reasoning_complex;
+        *self.reasoning_agent.lock().unwrap() = reasoning_agent;
+        tracing::info!("chat LLM runtime updated");
     }
 
     pub fn set_chat_history(&self, history: Vec<(String, String)>) {
@@ -156,10 +176,21 @@ impl AgentController {
     /// Cancel the currently running agent task.
     pub fn cancel(&self) {
         let ct = self.current_task.clone();
+        let state = self.state.clone();
+        let eb = self.event_bus.clone();
         tokio::spawn(async move {
             if let Some(h) = ct.lock().await.take() {
                 h.abort();
                 tracing::info!("agent task cancelled by user");
+                *state.write().await = AgentState::Idle;
+                eb.publish(Event::Agent(AgentEvent::StateChanged {
+                    from: AgentState::Thinking,
+                    to: AgentState::Done { success: false },
+                }));
+                eb.publish(Event::Agent(AgentEvent::StateChanged {
+                    from: AgentState::Done { success: false },
+                    to: AgentState::Idle,
+                }));
             }
         });
     }
@@ -239,16 +270,22 @@ impl AgentController {
         let state_arc = self.state.clone();
 
         // Determine routed model + reasoning effort.
-        let (routed_model, routed_effort) = self.router.route(&input);
-        let reasoning_str: Option<String> = match routed_effort {
-            Some("high") => Some(self.reasoning_complex.clone()),
-            Some("max") => Some(self.reasoning_agent.clone()),
+        let provider_snapshot = self.provider.lock().unwrap().clone();
+        let model_snapshot = self.model.lock().unwrap().clone();
+        let (routed_model, routed_effort) = {
+            let router = self.router.lock().unwrap();
+            let (model, effort) = router.route(&input);
+            (model, effort.map(str::to_string))
+        };
+        let reasoning_str: Option<String> = match routed_effort.as_deref() {
+            Some("high") => Some(self.reasoning_complex.lock().unwrap().clone()),
+            Some("max") => Some(self.reasoning_agent.lock().unwrap().clone()),
             _ => None,
         };
-        let p = if routed_model != self.model {
-            self.provider.with_model(&routed_model)
+        let p = if routed_model != model_snapshot {
+            provider_snapshot.with_model(&routed_model)
         } else {
-            self.provider.clone()
+            provider_snapshot
         };
         let m = routed_model;
         let max_ctx = self.max_context_tokens.load(Ordering::Relaxed);

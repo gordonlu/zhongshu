@@ -26,3 +26,4 @@ serde_json = "1"
 ksni = "0.3"
 softbuffer = "0.4"
 notify-rust = "4"
+keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native-sync-persistent"] }

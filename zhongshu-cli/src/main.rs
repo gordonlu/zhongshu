@@ -15,6 +15,7 @@ const SYSTEM_PROMPT: &str = "\
 - 读写文件 (read_file / write_file / list_dir)
 - 搜索网页 (web_search)
 - 浏览器操作 (browser)
+- 托管 Chrome 自动化 (browser_automation)
 - 桌面自动化 (desktop — 键盘鼠标操作)
 - 截图 (screenshot)
 
@@ -64,6 +65,7 @@ async fn main() -> anyhow::Result<()> {
     let tools = default_registry()
         .register(zhongshu_core::tool::search::WebSearchTool)
         .register(zhongshu_core::tool::browser::BrowserTool)
+        .register(zhongshu_core::tool::browser_automation::BrowserAutomationTool)
         .register(zhongshu_core::tool::screenshot::ScreenshotTool)
         .register(zhongshu_core::tool::automation::AutomationTool);
 

@@ -194,6 +194,28 @@ mod tests {
     }
 
     #[test]
+    fn task_list_open_includes_running_excludes_finished() {
+        let db = test_db();
+        let repo = TaskRepository::new(db);
+        let pending = repo.create(None, "pending").unwrap();
+        let running = repo.create(None, "running").unwrap();
+        let completed = repo.create(None, "completed").unwrap();
+
+        assert!(repo
+            .update_status(&running.id, TaskStatus::Running)
+            .unwrap());
+        assert!(repo
+            .update_status(&completed.id, TaskStatus::Completed)
+            .unwrap());
+
+        let open = repo.list_open().unwrap();
+        let ids: Vec<&str> = open.iter().map(|t| t.id.as_str()).collect();
+        assert!(ids.contains(&pending.id.as_str()));
+        assert!(ids.contains(&running.id.as_str()));
+        assert!(!ids.contains(&completed.id.as_str()));
+    }
+
+    #[test]
     fn task_steps() {
         let db = test_db();
         let repo = TaskRepository::new(db);

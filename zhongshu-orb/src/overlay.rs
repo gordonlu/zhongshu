@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use glib;
+use gtk::gdk::prelude::MonitorExt;
 use gtk::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -47,6 +48,7 @@ pub struct AuthRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettingsConfig {
     pub api_key: String,
+    pub api_key_saved: bool,
     pub api_base: String,
     pub model: String,
     pub personality: String,
@@ -104,7 +106,19 @@ pub(crate) static GTK_TX: once_cell::sync::Lazy<crossbeam_channel::Sender<GtkCom
                             }
                         }
                         GtkCommand::Show(w, h) => {
-                            window.set_default_size(w as i32, h as i32);
+                            let (screen_w, screen_h) = gtk::gdk::Display::default()
+                                .and_then(|display| display.primary_monitor())
+                                .map(|monitor| {
+                                    let area = monitor.workarea();
+                                    (area.width() as f32, area.height() as f32)
+                                })
+                                .unwrap_or((1280.0, 900.0));
+                            let max_w = (screen_w * 0.96).max(320.0);
+                            let max_h = (screen_h * 0.92).max(480.0);
+                            let clamped_w = w.min(max_w).max(360.0) as i32;
+                            let clamped_h = h.min(max_h).max(520.0) as i32;
+                            window.resize(clamped_w, clamped_h);
+                            window.set_default_size(clamped_w, clamped_h);
                             window.show_all();
                         }
                         GtkCommand::Hide => {
@@ -138,6 +152,7 @@ pub struct OverlayHandle {
     pub pending_open_settings: Arc<Mutex<bool>>,
     pub pending_load_more: Arc<Mutex<bool>>,
     pub pending_list_tasks: Arc<Mutex<bool>>,
+    pub pending_toggle_zoom: Arc<Mutex<bool>>,
     pub pending_cancel_task: Arc<Mutex<Option<String>>>,
     pub pending_complete_task: Arc<Mutex<Option<String>>>,
     #[allow(dead_code)]
@@ -250,6 +265,10 @@ impl OverlayHandle {
         std::mem::take(&mut *self.pending_list_tasks.lock().unwrap())
     }
 
+    pub fn take_toggle_zoom(&self) -> bool {
+        std::mem::take(&mut *self.pending_toggle_zoom.lock().unwrap())
+    }
+
     pub fn take_cancel_task(&self) -> Option<String> {
         std::mem::take(&mut *self.pending_cancel_task.lock().unwrap())
     }
@@ -284,6 +303,7 @@ pub fn show(width: f32, height: f32) -> OverlayHandle {
     let pending_open_settings: Arc<Mutex<bool>> = Default::default();
     let pending_load_more: Arc<Mutex<bool>> = Default::default();
     let pending_list_tasks: Arc<Mutex<bool>> = Default::default();
+    let pending_toggle_zoom: Arc<Mutex<bool>> = Default::default();
     let pending_cancel_task: Arc<Mutex<Option<String>>> = Default::default();
     let pending_complete_task: Arc<Mutex<Option<String>>> = Default::default();
 
@@ -297,6 +317,7 @@ pub fn show(width: f32, height: f32) -> OverlayHandle {
     let pos = pending_open_settings.clone();
     let plm = pending_load_more.clone();
     let plt = pending_list_tasks.clone();
+    let ptz = pending_toggle_zoom.clone();
     let pct = pending_cancel_task.clone();
     let pcmt = pending_complete_task.clone();
 
@@ -337,6 +358,10 @@ pub fn show(width: f32, height: f32) -> OverlayHandle {
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("")
                                 .to_string(),
+                            api_key_saved: cfg
+                                .get("api_key_saved")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
                             api_base: cfg
                                 .get("api_base")
                                 .and_then(|v| v.as_str())
@@ -385,6 +410,9 @@ pub fn show(width: f32, height: f32) -> OverlayHandle {
                 Some("list_tasks") => {
                     *plt.lock().unwrap() = true;
                 }
+                Some("toggle_zoom") => {
+                    *ptz.lock().unwrap() = true;
+                }
                 Some("cancel_task") => {
                     if let Some(id) = msg["task_id"].as_str() {
                         *pct.lock().unwrap() = Some(id.to_string());
@@ -413,6 +441,7 @@ pub fn show(width: f32, height: f32) -> OverlayHandle {
         pending_open_settings,
         pending_load_more,
         pending_list_tasks,
+        pending_toggle_zoom,
         pending_cancel_task,
         pending_complete_task,
         request_quit: false,

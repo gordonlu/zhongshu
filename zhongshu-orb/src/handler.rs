@@ -6,6 +6,8 @@ use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::window::WindowId;
 
+use zhongshu_core::agent::llm::OpenAiProvider;
+use zhongshu_core::agent::ModelRouter;
 use zhongshu_core::authority;
 use zhongshu_core::event::{
     AgentEvent, AgentState, Event, EventBus, EventRx, MessageId, ResponseEvent, ResponseRole,
@@ -51,6 +53,7 @@ pub struct ZhongshuApp {
     pub filter: ControlTokenFilter,
     pub task_repo: zhongshu_core::core::TaskRepository,
     pub observer: Arc<Mutex<EquipmentObserver>>,
+    pub overlay_zoomed: bool,
 }
 
 impl ZhongshuApp {
@@ -97,6 +100,7 @@ impl ZhongshuApp {
             filter: ControlTokenFilter::new(),
             task_repo,
             observer,
+            overlay_zoomed: false,
         })
     }
 
@@ -138,8 +142,15 @@ impl ZhongshuApp {
         }
         if let Some(settings) = ov.take_settings() {
             let mut cfg = crate::config::load();
+            let old_api_base = cfg.llm.api_base.clone();
+            let old_proxy_port = cfg.deeplossless.proxy_port;
             if !settings.api_key.is_empty() {
-                std::env::set_var(&cfg.llm.api_key_env, &settings.api_key);
+                if let Err(e) = crate::config::store_api_key(&settings.api_key) {
+                    tracing::warn!("save API key failed: {e:#}");
+                    ov.toast("API Key 保存失败");
+                } else {
+                    ov.toast("API Key 已保存到系统凭据库");
+                }
             }
             if !settings.api_base.is_empty() {
                 cfg.llm.api_base = settings.api_base;
@@ -180,6 +191,26 @@ impl ZhongshuApp {
                     .set_system_prompt(cfg.agent.effective_system_prompt());
             }
             crate::config::save(&cfg);
+            self.config = cfg.clone();
+            let model_router = ModelRouter::new(
+                &cfg.llm.model_routing.flash_model,
+                &cfg.llm.model_routing.pro_model,
+            );
+            let base_url = self
+                .runtime
+                .block_on(async { self.proxy.lock().await.base_url().to_string() });
+            let provider =
+                OpenAiProvider::new(cfg.llm.api_key(), &cfg.llm.model).with_base_url(base_url);
+            self.controller.update_llm_runtime(
+                provider,
+                cfg.llm.model.clone(),
+                model_router,
+                cfg.llm.model_routing.reasoning_complex.clone(),
+                cfg.llm.model_routing.reasoning_agent.clone(),
+            );
+            if old_api_base != cfg.llm.api_base || old_proxy_port != cfg.deeplossless.proxy_port {
+                ov.toast("API 地址或代理端口将在重启后生效");
+            }
         }
         if ov.take_new_conversation() {
             self.delete_all_history();
@@ -187,10 +218,23 @@ impl ZhongshuApp {
         if ov.take_stop() {
             self.controller.cancel();
         }
+        if ov.take_toggle_zoom() {
+            self.overlay_zoomed = !self.overlay_zoomed;
+            let scale = if self.overlay_zoomed { 2.0 } else { 1.0 };
+            ov.show_window(
+                self.config.ui.overlay_width * scale,
+                self.config.ui.overlay_height * scale,
+            );
+            ov.send(&serde_json::json!({"type":"zoom","active": self.overlay_zoomed}));
+        }
         if ov.take_open_settings() {
             let cfg = crate::config::load();
             ov.show_settings(&crate::overlay::SettingsConfig {
-                api_key: cfg.llm.api_key(),
+                api_key: String::new(),
+                api_key_saved: crate::config::has_stored_api_key()
+                    || std::env::var(&cfg.llm.api_key_env)
+                        .map(|v| !v.is_empty())
+                        .unwrap_or(false),
                 api_base: cfg.llm.api_base.clone(),
                 model: cfg.llm.model.clone(),
                 max_context_tokens: Some(cfg.llm.max_context_tokens),
@@ -247,7 +291,7 @@ impl ZhongshuApp {
             refresh = true;
         }
         if refresh {
-            let tasks = match self.task_repo.list_pending() {
+            let tasks = match self.task_repo.list_open() {
                 Ok(t) => t,
                 Err(e) => {
                     tracing::warn!("list tasks failed: {e}");
@@ -257,27 +301,6 @@ impl ZhongshuApp {
             let items: Vec<serde_json::Value> = tasks.iter().map(|t| serde_json::json!({
                 "id": t.id, "title": t.title, "status": t.status.as_str(), "created_at": t.created_at,
             })).collect();
-            ov.show_tasks(&items);
-        }
-        if ov.take_list_tasks() {
-            let tasks = match self.task_repo.list_pending() {
-                Ok(t) => t,
-                Err(e) => {
-                    tracing::warn!("list tasks failed: {e}");
-                    vec![]
-                }
-            };
-            let items: Vec<serde_json::Value> = tasks
-                .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "id": t.id,
-                        "title": t.title,
-                        "status": t.status.as_str(),
-                        "created_at": t.created_at,
-                    })
-                })
-                .collect();
             ov.show_tasks(&items);
         }
     }
@@ -337,6 +360,17 @@ impl ZhongshuApp {
                             self.indicator_state = to;
                             if let Some(ind) = self.indicator.as_mut() {
                                 ind.set_state(to);
+                            }
+                            if let Some(ref ov) = self.overlay {
+                                match to {
+                                    AgentState::Thinking | AgentState::Executing => {
+                                        ov.set_state("thinking")
+                                    }
+                                    AgentState::Done { success } => {
+                                        ov.set_state(if success { "done" } else { "stopped" })
+                                    }
+                                    AgentState::Idle => ov.set_state("idle"),
+                                }
                             }
                         }
                         Event::Tool(ToolEvent::Started { name }) => {

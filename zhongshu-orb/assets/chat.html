@@ -22,8 +22,30 @@
   --user-border:rgba(251,146,60,0.15);
   --user-accent:#f59e0b;
   --success:#22c55e;
+  --danger:#d04a1a;
+  --shadow:rgba(0,0,0,0.6);
   --radius:10px;
   --radius-sm:6px;
+}
+body.light{
+  --bg:#f7f7f8;
+  --surface:#ffffff;
+  --surface-hover:#f0f1f3;
+  --border:#dedfe3;
+  --border-light:#d1d5db;
+  --text:#202124;
+  --text-dim:#5f6368;
+  --text-muted:#8a8f98;
+  --accent:#2563eb;
+  --accent-hover:#1d4ed8;
+  --accent-soft:rgba(37,99,235,0.09);
+  --accent-glow:rgba(37,99,235,0.18);
+  --user:#fff7ed;
+  --user-border:rgba(245,158,11,0.22);
+  --user-accent:#b45309;
+  --success:#15803d;
+  --danger:#b42318;
+  --shadow:rgba(15,23,42,0.16);
 }
 body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;height:100vh;display:flex;flex-direction:column;overflow:hidden;-webkit-font-smoothing:antialiased;letter-spacing:0.01em}
 
@@ -31,9 +53,10 @@ body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMac
 #header{display:flex;align-items:center;justify-content:space-between;padding:10px 14px 6px;flex-shrink:0;user-select:none;border-bottom:1px solid var(--border);background:var(--bg)}
 #header-title{font-size:12px;font-weight:500;color:var(--text-muted);letter-spacing:0.06em;text-transform:uppercase}
 #header-model{font-size:11px;color:var(--text-dim);margin-left:8px;font-variant-numeric:tabular-nums}
-#header-btns{display:flex;gap:2px}
-#header-btns button{background:transparent;border:none;border-radius:var(--radius-sm);color:var(--text-muted);cursor:pointer;padding:4px 6px;font-size:13px;line-height:1;transition:all 120ms;opacity:0.6}
-#header-btns button:hover{opacity:1;color:var(--text-dim);background:var(--surface)}
+#header-btns{display:flex;gap:4px}
+.icon-btn{width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;background:transparent;border:1px solid transparent;border-radius:var(--radius-sm);color:var(--text-muted);cursor:pointer;padding:0;transition:all 120ms;opacity:0.78;line-height:1}
+.icon-btn svg{width:16px;height:16px;display:block;stroke:currentColor;stroke-width:2;fill:none;stroke-linecap:round;stroke-linejoin:round}
+.icon-btn:hover,.icon-btn.active{opacity:1;color:var(--text);background:var(--surface-hover);border-color:var(--border)}
 #tasks-count{font-size:10px;background:var(--accent);color:#fff;border-radius:8px;padding:0 5px;margin-left:3px;display:none}
 
 /* ── Chat ── */
@@ -65,7 +88,7 @@ body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMac
 .md h1{font-size:15px}
 .md h2{font-size:14px}
 .md h3{font-size:13px}
-.md pre{background:#0a0a0c;border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px;margin:6px 0;overflow-x:auto;font:12px/1.5 'SF Mono','JetBrains Mono','Cascadia Code',monospace}
+.md pre{background:rgba(0,0,0,0.18);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px;margin:6px 0;overflow-x:auto;font:12px/1.5 'SF Mono','JetBrains Mono','Cascadia Code',monospace}
 .md code{background:var(--accent-soft);border:none;border-radius:3px;padding:1px 4px;font-size:0.85em;font-family:'SF Mono','JetBrains Mono',monospace;color:#93c5fd}
 .md pre code{background:none;padding:0;font-size:12px;color:var(--text)}
 .md table{border-collapse:collapse;width:100%;margin:6px 0;font-size:12px;border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden}
@@ -93,13 +116,15 @@ body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMac
 @keyframes spin{to{transform:rotate(360deg)}}
 
 /* Input */
-#input-area{display:flex;gap:6px;padding:8px 12px 12px;background:var(--bg);border-top:1px solid var(--border);flex-shrink:0}
+#input-area{display:flex;gap:6px;padding:8px 12px 12px;background:var(--bg);border-top:1px solid var(--border);flex-shrink:0;min-height:57px}
 #input{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:8px 12px;color:var(--text);font:13.5px/1.5 -apple-system,sans-serif;resize:none;outline:none;min-height:36px;max-height:90px;transition:border-color 120ms,box-shadow 120ms}
 #input:focus{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-soft)}
 #input::placeholder{color:var(--text-muted)}
 #send{background:var(--accent);border:none;border-radius:var(--radius);padding:7px 14px;color:#fff;font-weight:500;cursor:pointer;white-space:nowrap;transition:all 120ms;font-size:12.5px}
 #send:hover{background:var(--accent-hover)}
 #send:active{transform:scale(0.97)}
+#stop{display:none;color:var(--danger);border-color:rgba(208,74,26,0.28);align-self:flex-start;margin-top:4px}
+#stop.active{display:inline-flex}
 
 /* Auth */
 #auth-overlay{display:none;position:sticky;bottom:0;width:100%;background:rgba(30,30,36,0.96);border-top:1px solid #333;padding:12px 16px;z-index:100;backdrop-filter:blur(4px)}
@@ -110,7 +135,7 @@ body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMac
 #auth-btns button{padding:6px 16px;border:none;border-radius:4px;cursor:pointer;font-size:12px}
 #auth-approve{background:#4caf50;color:#fff}
 #auth-deny{background:#666;color:#fff}
-#auth-card{background:var(--surface);border:1px solid var(--border-light);border-radius:12px;padding:20px;max-width:380px;width:90%;box-shadow:0 16px 48px rgba(0,0,0,0.6)}
+#auth-card{background:var(--surface);border:1px solid var(--border-light);border-radius:12px;padding:20px;max-width:380px;width:90%;box-shadow:0 16px 48px var(--shadow)}
 #auth-card h3{font-size:13.5px;font-weight:600;color:var(--text);margin-bottom:6px}
 #auth-card p{margin:2px 0;color:var(--text-dim);font-size:12.5px;word-break:break-all}
 #auth-btns{display:flex;gap:6px;margin-top:14px}
@@ -122,7 +147,7 @@ body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMac
 /* Tasks */
 #tasks-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:1000;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
 #tasks-overlay.active{display:flex}
-#tasks-card{background:var(--surface);border:1px solid var(--border-light);border-radius:12px;padding:20px;max-width:400px;width:90%;max-height:70vh;overflow-y:auto;box-shadow:0 16px 48px rgba(0,0,0,0.6)}
+#tasks-card{background:var(--surface);border:1px solid var(--border-light);border-radius:12px;padding:20px;max-width:400px;width:90%;max-height:70vh;overflow-y:auto;box-shadow:0 16px 48px var(--shadow)}
 #tasks-list{display:flex;flex-direction:column;gap:6px}
 .task-item{display:flex;justify-content:space-between;align-items:center;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);font-size:12.5px}
 .task-item .task-title{color:var(--text);flex:1;word-break:break-word}
@@ -132,17 +157,18 @@ body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMac
 .task-btn:hover{background:var(--surface-hover);color:var(--text)}
 .task-btn-done{color:var(--success)}
 .task-btn-done:hover{background:rgba(34,197,94,0.1);color:var(--success)}
-.task-btn-cancel{color:#d04a1a}
-.task-btn-cancel:hover{background:rgba(208,74,26,0.1);color:#d04a1a}
+.task-btn-cancel{color:var(--danger)}
+.task-btn-cancel:hover{background:rgba(208,74,26,0.1);color:var(--danger)}
 .task-status-pending{background:rgba(59,130,246,0.15);color:#93c5fd}
 .task-status-planning{background:rgba(251,146,60,0.15);color:#fcd34d}
 .task-status-running{background:rgba(34,197,94,0.15);color:#86efac}
+.task-status-waiting_approval{background:rgba(251,146,60,0.15);color:#fcd34d}
 .task-empty{color:var(--text-muted);font-size:13px;text-align:center;padding:20px 0}
 
 /* Settings */
 #settings-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:1000;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
 #settings-overlay.active{display:flex}
-#settings-card{background:var(--surface);border:1px solid var(--border-light);border-radius:12px;padding:24px;max-width:420px;width:90%;max-height:85vh;overflow-y:auto;box-shadow:0 16px 48px rgba(0,0,0,0.6)}
+#settings-card{background:var(--surface);border:1px solid var(--border-light);border-radius:12px;padding:24px;max-width:420px;width:90%;max-height:85vh;overflow-y:auto;box-shadow:0 16px 48px var(--shadow)}
 #settings-card h3{font-size:14px;font-weight:600}
 #settings-card label{display:block;font-size:11.5px;color:var(--text-muted);margin-top:12px;margin-bottom:3px;letter-spacing:0.03em}
 #settings-card input,#settings-card select{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:7px 10px;color:var(--text);font:13px -apple-system,sans-serif;outline:none;transition:border-color 120ms}
@@ -164,13 +190,13 @@ body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMac
 /* Confirm */
 #confirm-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:1000;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
 #confirm-overlay.active{display:flex}
-#confirm-card{background:var(--surface);border:1px solid var(--border-light);border-radius:12px;padding:20px;max-width:360px;width:90%;box-shadow:0 16px 48px rgba(0,0,0,0.6)}
+#confirm-card{background:var(--surface);border:1px solid var(--border-light);border-radius:12px;padding:20px;max-width:360px;width:90%;box-shadow:0 16px 48px var(--shadow)}
 #confirm-text{margin-bottom:14px;color:var(--text);font-size:13px;line-height:1.5}
 #confirm-ok{flex:1;background:var(--accent);border:none;border-radius:var(--radius-sm);padding:8px;color:#fff;cursor:pointer;font-weight:500;font-size:12.5px;transition:all 120ms}
 #confirm-ok:hover{background:var(--accent-hover)}
 #confirm-cancel{flex:1;background:transparent;border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px;color:var(--text-dim);cursor:pointer;font-size:12.5px;transition:all 120ms}
 #confirm-cancel:hover{background:var(--surface-hover);color:var(--text)}
-#toast{display:none;position:fixed;bottom:64px;left:50%;transform:translateX(-50%);background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 14px;font-size:12px;color:var(--text-dim);z-index:2000;white-space:nowrap;box-shadow:0 8px 32px rgba(0,0,0,0.5)}
+#toast{display:none;position:fixed;bottom:64px;left:50%;transform:translateX(-50%);background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 14px;font-size:12px;color:var(--text-dim);z-index:2000;white-space:nowrap;box-shadow:0 8px 32px var(--shadow)}
 #toast.show{display:block}
 </style>
 </head>
@@ -180,8 +206,18 @@ body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMac
   <span id="header-title">中书</span>
   <span id="header-model" class="header-model"></span>
   <div id="header-btns">
-    <button id="btn-tasks" title="任务">📋<span id="tasks-count"></span></button>
-    <button id="btn-settings" title="设置">⚙</button>
+    <button id="btn-theme" class="icon-btn" title="切换主题" aria-label="切换主题">
+      <svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9Z"/></svg>
+    </button>
+    <button id="btn-zoom" class="icon-btn" title="2X 放大" aria-label="2X 放大">
+      <svg viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
+    </button>
+    <button id="btn-tasks" class="icon-btn" title="任务" aria-label="任务">
+      <svg viewBox="0 0 24 24"><path d="M9 6h11"/><path d="M9 12h11"/><path d="M9 18h11"/><path d="M4 6h.01"/><path d="M4 12h.01"/><path d="M4 18h.01"/></svg><span id="tasks-count"></span>
+    </button>
+    <button id="btn-settings" class="icon-btn" title="设置" aria-label="设置">
+      <svg viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.3a2 2 0 1 1-4 0V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1A2 2 0 1 1 4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.5 7A2 2 0 1 1 7.3 4.2l.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.6V3a2 2 0 1 1 4 0v.3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 1 1 20.1 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.3a2 2 0 1 1 0 4h-.3a1.7 1.7 0 0 0-1.6 1Z"/></svg>
+    </button>
   </div>
 </div>
 
@@ -189,6 +225,9 @@ body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMac
 
 <div id="input-area">
   <textarea id="input" placeholder="输入消息..." rows="1"></textarea>
+  <button id="stop" class="icon-btn" title="停止生成" aria-label="停止生成">
+    <svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1"/></svg>
+  </button>
   <button id="send">发送</button>
 </div>
 
@@ -222,7 +261,7 @@ body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMac
       <button id="settings-close" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:20px;padding:0 4px;line-height:1">✕</button>
     </div>
     <label>API Key</label>
-    <input id="set-api-key" type="password" placeholder="sk-...">
+    <input id="set-api-key" type="password" placeholder="留空则保持已保存的 Key">
     <label>API 地址</label>
     <input id="set-api-base" placeholder="https://api.deepseek.com">
     <label>模型</label>
@@ -247,7 +286,7 @@ body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMac
     <label>检查间隔（秒）</label>
     <input id="set-bg-interval" type="number" placeholder="600">
     <label>检查提示词</label>
-    <textarea id="set-bg-prompt" rows="2" style="width:100%;background:var(--input-bg);border:1px solid var(--border);border-radius:8px;padding:8px 11px;color:var(--text);font:13px system-ui,sans-serif;outline:none;resize:vertical;transition:border-color 120ms">[定时检查] 使用 system_info 工具收集系统信息并检查异常</textarea>
+    <textarea id="set-bg-prompt" rows="2" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 11px;color:var(--text);font:13px system-ui,sans-serif;outline:none;resize:vertical;transition:border-color 120ms">[定时检查] 使用 system_info 工具收集系统信息并检查异常</textarea>
     <label>上下文窗口</label>
     <div style="display:flex;align-items:center;gap:10px;margin-top:4px">
       <input id="set-context-size" type="range" min="500000" max="1000000" step="100000" value="500000"
@@ -262,9 +301,9 @@ body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMac
     </span>
     <div style="margin-top:8px">
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text);letter-spacing:0">
-        <input id="set-auto-evolve" type="checkbox" style="width:auto"> 自动进化
+        <input id="set-auto-evolve" type="checkbox" style="width:auto"> 自我进化装备
       </label>
-      <span style="font-size:11px;color:var(--text-muted);display:block;margin-top:4px;line-height:1.4">AI 根据对话历史自动调整个性风格和响应方式</span>
+      <span style="font-size:11px;color:var(--text-muted);display:block;margin-top:4px;line-height:1.4">根据中书内部使用模式，自动提议并安装可复用的 skill 装备</span>
     </div>
     <button id="settings-save">保存</button>
     <hr style="border:none;border-top:1px solid var(--border);margin:16px 0">
@@ -412,16 +451,32 @@ function renderInline(text) {
 
 // ── Chat Logic ──
 let messages = [];
+let messageNodes = new Map();
 let streamingId = null;
 let streamingBuffer = '';
 let has_more = false;
 let loading_more = false;
 let currentAuthRequestId = '';
 
+function applyTheme(theme) {
+  let light = theme === 'light';
+  document.body.classList.toggle('light', light);
+  document.getElementById('btn-theme')?.classList.toggle('active', light);
+  try { localStorage.setItem('zhongshu-theme', theme); } catch(e) {}
+}
+
+function initTheme() {
+  let saved = '';
+  try { saved = localStorage.getItem('zhongshu-theme') || ''; } catch(e) {}
+  if (!saved) saved = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  applyTheme(saved);
+}
+
 function addMessage(role, content, toolCalls) {
   let id = 'msg-' + Date.now() + '-' + Math.random().toString(36).slice(2,6);
-  messages.push({id, role, content, toolCalls: toolCalls || []});
-  render();
+  let msg = {id, role, content, toolCalls: toolCalls || []};
+  messages.push(msg);
+  appendMessage(msg);
   scrollBottom();
   return id;
 }
@@ -436,32 +491,65 @@ function scrollTop(prevScrollHeight, prevScrollTop) {
   chat.scrollTop = chat.scrollHeight - prevScrollHeight + prevScrollTop;
 }
 
-function render() {
-  let chat = document.getElementById('chat');
-  chat.innerHTML = '';
-  for (let m of messages) {
-    let div = document.createElement('div');
-    let cssRole = m.role === 'assistant' ? 'ai' : m.role;
-    div.className = 'msg msg-' + (m.role === 'user' ? 'user' : 'left');
-    div.id = m.id;
+function setBusy(busy) {
+  document.getElementById('stop').classList.toggle('active', busy);
+  document.getElementById('send').disabled = busy;
+  document.getElementById('send').style.opacity = busy ? '0.55' : '1';
+}
 
-    let bubble = document.createElement('div');
-    bubble.className = 'bubble bubble-' + cssRole;
+function buildToolBadges(toolCalls) {
+  let frag = document.createDocumentFragment();
+  if (!toolCalls || toolCalls.length === 0) return frag;
+  let tools = document.createElement('div');
+  tools.className = 'tools';
+  for (let tc of toolCalls) {
+    let item = document.createElement('span');
+    item.className = 'tool-item';
+    item.innerHTML = '<span class="tool-done">✓</span> ' + escapeHtml(tc.name) + (tc.count > 1 ? ' <span class="tool-count">×' + tc.count + '</span>' : '');
+    tools.appendChild(item);
+  }
+  frag.appendChild(tools);
+  let sep = document.createElement('div');
+  sep.className = 'tool-sep';
+  frag.appendChild(sep);
+  return frag;
+}
 
-    // Role label
-    let roleLabel = document.createElement('div');
-    roleLabel.className = 'role-label';
-    roleLabel.textContent = m.role === 'user' ? '你' : '中书';
-    bubble.appendChild(roleLabel);
+function buildMessageNode(m) {
+  let div = document.createElement('div');
+  let cssRole = m.role === 'assistant' ? 'ai' : m.role;
+  div.className = 'msg msg-' + (m.role === 'user' ? 'user' : 'left');
+  div.id = m.id;
 
-    // Tool calls
-    if (m.toolCalls && m.toolCalls.length > 0) {
+  let bubble = document.createElement('div');
+  bubble.className = 'bubble bubble-' + cssRole;
+
+  let roleLabel = document.createElement('div');
+  roleLabel.className = 'role-label';
+  roleLabel.textContent = m.role === 'user' ? '你' : '中书';
+  bubble.appendChild(roleLabel);
+
+  if (m.toolCalls && m.toolCalls.length > 0) {
+    bubble.appendChild(buildToolBadges(m.toolCalls));
+  }
+
+  let content = document.createElement('div');
+  content.className = 'md';
+  if (m._thinking) {
+    content.innerHTML = '<span class="thinking"><span class="spinner"></span>思考中...</span>';
+  } else if (m.role === 'user') {
+    content.textContent = m.content;
+  } else {
+    let display = m.content;
+    let match = m.content.match(/^\[工具: (.+?)\]\n\n/);
+    if (match) {
+      display = m.content.slice(match[0].length);
       let tools = document.createElement('div');
       tools.className = 'tools';
-      for (let tc of m.toolCalls) {
+      for (let name of match[1].split(' · ')) {
         let item = document.createElement('span');
         item.className = 'tool-item';
-        item.innerHTML = '<span class="tool-done">✓</span> ' + escapeHtml(tc.name) + (tc.count > 1 ? ' <span class="tool-count">×' + tc.count + '</span>' : '');
+        item.innerHTML = '<span class="tool-done">✓</span> ' + escapeHtml(name);
         tools.appendChild(item);
       }
       bubble.appendChild(tools);
@@ -469,40 +557,37 @@ function render() {
       sep.className = 'tool-sep';
       bubble.appendChild(sep);
     }
-
-    // Content
-    let content = document.createElement('div');
-    content.className = 'md';
-    if (m._thinking) {
-      content.innerHTML = '<span class="thinking"><span class="spinner"></span>思考中...</span>';
-    } else if (m.role === 'user') {
-      content.textContent = m.content;
-    } else {
-      // Restore tool call badges from history content if present.
-      let display = m.content;
-      let match = m.content.match(/^\[工具: (.+?)\]\n\n/);
-      if (match) {
-        display = m.content.slice(match[0].length);
-        let tools = document.createElement('div');
-        tools.className = 'tools';
-        for (let name of match[1].split(' · ')) {
-          let item = document.createElement('span');
-          item.className = 'tool-item';
-          item.innerHTML = '<span class="tool-done">✓</span> ' + name + (tc.count > 1 ? ' ×' + tc.count : '');
-          tools.appendChild(item);
-        }
-        bubble.appendChild(tools);
-        let sep = document.createElement('div');
-        sep.className = 'tool-sep';
-        bubble.appendChild(sep);
-      }
-      content.innerHTML = renderMarkdown(display);
-    }
-    bubble.appendChild(content);
-
-    div.appendChild(bubble);
-    chat.appendChild(div);
+    content.innerHTML = renderMarkdown(display);
   }
+  bubble.appendChild(content);
+  div.appendChild(bubble);
+  return div;
+}
+
+function appendMessage(m) {
+  let node = buildMessageNode(m);
+  document.getElementById('chat').appendChild(node);
+  messageNodes.set(m.id, node);
+}
+
+function updateMessage(id) {
+  let index = messages.findIndex(m => m.id === id);
+  if (index < 0) return;
+  let oldNode = messageNodes.get(id);
+  let newNode = buildMessageNode(messages[index]);
+  if (oldNode && oldNode.parentNode) {
+    oldNode.replaceWith(newNode);
+  } else {
+    document.getElementById('chat').appendChild(newNode);
+  }
+  messageNodes.set(id, newNode);
+}
+
+function render() {
+  let chat = document.getElementById('chat');
+  chat.innerHTML = '';
+  messageNodes.clear();
+  for (let m of messages) appendMessage(m);
 }
 
 // Throttle renders to at most every 50ms during streaming.
@@ -518,7 +603,8 @@ function scheduleRender() {
   if (renderTimer) clearTimeout(renderTimer);
   renderTimer = setTimeout(() => {
     renderPending = false;
-    render();
+    if (streamingId) updateMessage(streamingId);
+    else render();
     scrollBottom();
   }, 50);
 }
@@ -530,10 +616,27 @@ function handleIpc(message) {
     switch (msg.type) {
       case 'state_change':
         if (msg.state === 'thinking' && !streamingId) {
+          setBusy(true);
           streamingId = 'stream-' + Date.now();
           streamingBuffer = '';
           messages.push({id: streamingId, role: 'assistant', content: '', toolCalls: [], _thinking: true});
           scheduleRender();
+        } else if (msg.state === 'thinking') {
+          setBusy(true);
+        } else if (msg.state === 'stopped') {
+          if (streamingId) {
+            let cm = messages.find(m => m.id === streamingId);
+            if (cm) {
+              cm._thinking = false;
+              cm.content = streamingBuffer ? streamingBuffer + '\n\n[已停止]' : '[已停止]';
+              updateMessage(streamingId);
+            }
+            streamingId = null;
+            streamingBuffer = '';
+          }
+          setBusy(false);
+        } else if (msg.state === 'idle' || msg.state === 'done') {
+          setBusy(false);
         }
         break;
 
@@ -561,6 +664,7 @@ function handleIpc(message) {
           }
           streamingId = null;
           streamingBuffer = '';
+          setBusy(false);
           scheduleRender();
         }
         break;
@@ -568,7 +672,9 @@ function handleIpc(message) {
       case 'history':
         cancelPendingRender();
         messages = [];
+        messageNodes.clear();
         streamingId = null;
+        setBusy(false);
         has_more = msg.has_more || false;
         for (let e of msg.entries) {
           let role = typeof e.role === 'string' ? e.role.toLowerCase() : 'assistant';
@@ -622,6 +728,7 @@ function handleIpc(message) {
 
       case 'settings':
         document.getElementById('set-api-key').value = msg.config.api_key || '';
+        document.getElementById('set-api-key').placeholder = msg.config.api_key_saved ? '已保存；留空不变' : 'sk-...';
         document.getElementById('set-api-base').value = msg.config.api_base || '';
         document.getElementById('set-model').value = msg.config.model || '';
         document.getElementById('set-personality').value = msg.config.personality || '默认';
@@ -638,8 +745,10 @@ function handleIpc(message) {
       case 'clear':
         cancelPendingRender();
         messages = [];
+        messageNodes.clear();
         streamingId = null;
         streamingBuffer = '';
+        setBusy(false);
         render();
         break;
 
@@ -654,7 +763,7 @@ function handleIpc(message) {
             } else {
               sm.toolCalls.push({name: msg.name, count: 1});
             }
-            scheduleRender();
+            updateMessage(streamingId);
           }
         }
         break;
@@ -663,6 +772,9 @@ function handleIpc(message) {
         break;
       case 'toast':
         showToast(msg.text);
+        break;
+      case 'zoom':
+        document.getElementById('btn-zoom').classList.toggle('active', !!msg.active);
         break;
     }
   } catch(e) {
@@ -724,9 +836,9 @@ function renderTasks(tasks) {
     for (var i = 0; i < tasks.length; i++) {
       var t = tasks[i];
       var statusClass = 'task-status-' + t.status;
-      var statusLabel = {pending:'待处理',planning:'规划中',running:'执行中'}[t.status] || t.status;
+      var statusLabel = {pending:'待处理',planning:'规划中',running:'执行中',waiting_approval:'待授权'}[t.status] || t.status;
       var actions = '';
-      if (t.status === 'pending' || t.status === 'planning') {
+      if (t.status === 'pending' || t.status === 'planning' || t.status === 'waiting_approval') {
         actions = '<div class="task-actions"><button class="task-btn task-btn-cancel" onclick="cancelTask(\'' + t.id + '\')">✕</button></div>';
       } else if (t.status === 'running') {
         actions = '<div class="task-actions"><button class="task-btn task-btn-done" onclick="completeTask(\'' + t.id + '\')">✓</button><button class="task-btn task-btn-cancel" onclick="cancelTask(\'' + t.id + '\')">✕</button></div>';
@@ -761,6 +873,15 @@ document.getElementById('tasks-close').addEventListener('click', function() {
 
 // ── UI Events ──
 document.getElementById('send').addEventListener('click', sendMessage);
+document.getElementById('stop').addEventListener('click', function() {
+  sendIpc({type: 'stop'});
+});
+document.getElementById('btn-theme').addEventListener('click', function() {
+  applyTheme(document.body.classList.contains('light') ? 'dark' : 'light');
+});
+document.getElementById('btn-zoom').addEventListener('click', function() {
+  sendIpc({type: 'toggle_zoom'});
+});
 document.getElementById('btn-settings').addEventListener('click', function() {
   sendIpc({type: 'open_settings'});
 });
@@ -827,6 +948,8 @@ document.getElementById('input').addEventListener('input', function() {
 
 // ── Expose for wry IPC ──
 window.handleIpc = handleIpc;
+
+initTheme();
 
 // Signal ready
 sendIpc({type: 'ready'});

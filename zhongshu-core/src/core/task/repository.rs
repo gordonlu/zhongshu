@@ -54,6 +54,16 @@ impl TaskRepository {
         rows.collect()
     }
 
+    pub fn list_open(&self) -> rusqlite::Result<Vec<Task>> {
+        let conn = self.db.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, goal_id, title, status, input, output, error, created_at, started_at, finished_at \
+             FROM tasks WHERE status IN ('pending', 'planning', 'running', 'waiting_approval') ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map([], Self::row_to_task)?;
+        rows.collect()
+    }
+
     /// Find pending tasks that have been waiting longer than `older_than_secs`.
     /// These may have missed their TaskEvent::Triggered due to EventBus lag/drop.
     pub fn list_stale_pending(&self, older_than_secs: i64) -> rusqlite::Result<Vec<Task>> {

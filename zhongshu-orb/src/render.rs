@@ -13,6 +13,8 @@ pub enum OrbMode {
 /// Draw an orb into `buf` (row‑major 0xAARRGGBB pixels, size ww×hh).
 #[allow(dead_code)]
 pub fn draw_orb(buf: &mut [u32], ww: u32, hh: u32, cr: u8, cg: u8, cb: u8, t: f64, mode: OrbMode) {
+    let small = ww.min(hh) < 64;
+
     let (cx, cy) = (ww as f64 / 2.0, hh as f64 / 2.0);
     let max_r = (ww.min(hh) as f64 / 2.0) - 1.0;
 
@@ -32,8 +34,8 @@ pub fn draw_orb(buf: &mut [u32], ww: u32, hh: u32, cr: u8, cg: u8, cb: u8, t: f6
     // Highlight: off‑centre specular.
     let (hl_x, hl_y) = (cx - outer * 0.25, cy - outer * 0.25);
 
-    // Energy waves (active states only).
-    let wave_active = matches!(mode, OrbMode::Thinking | OrbMode::Executing);
+    // Energy waves (active states only, skip for small sizes).
+    let wave_active = !small && matches!(mode, OrbMode::Thinking | OrbMode::Executing);
     let wave_count = if wave_active { 2 } else { 0 };
 
     // Colour flow (slow hue shift for active states).
@@ -53,7 +55,7 @@ pub fn draw_orb(buf: &mut [u32], ww: u32, hh: u32, cr: u8, cg: u8, cb: u8, t: f6
             // ── Glow layer ───────────────────────────────────────────
             let mut alpha = 0.0;
 
-            if dist < glow_r {
+            if !small && dist < glow_r {
                 let gf = dist / glow_r;
                 alpha = 1.0 - gf * gf; // quadratic falloff
                 alpha *= 0.25; // glow is semi‑transparent
@@ -73,22 +75,22 @@ pub fn draw_orb(buf: &mut [u32], ww: u32, hh: u32, cr: u8, cg: u8, cb: u8, t: f6
                 alpha = alpha.max(core);
             }
 
-            // ── Highlight ────────────────────────────────────────────
-            let hdx = x as f64 - hl_x;
-            let hdy = y as f64 - hl_y;
-            let hdist = (hdx * hdx + hdy * hdy).sqrt();
-            let hl_radius = outer * 0.35;
-            if hdist < hl_radius {
-                let hn = hdist / hl_radius;
-                let hl_alpha = 1.0 - hn * hn;
-                // Blend highlight (additive, white-ish).
-                let a = (alpha * 255.0) as u32;
-                let rp = ((r as f64 * alpha * 255.0 + 200.0 * hl_alpha * 0.5) as u32).min(255);
-                let gp = ((g as f64 * alpha * 255.0 + 200.0 * hl_alpha * 0.5) as u32).min(255);
-                let bp = ((b as f64 * alpha * 255.0 + 220.0 * hl_alpha * 0.5) as u32).min(255);
-                let a = a.min(255);
-                buf[(y * ww + x) as usize] = (a << 24) | (rp << 16) | (gp << 8) | bp;
-                continue;
+            // ── Highlight (skip for very small sizes) ────────────────
+            if !small {
+                let hdx = x as f64 - hl_x;
+                let hdy = y as f64 - hl_y;
+                let hdist = (hdx * hdx + hdy * hdy).sqrt();
+                let hl_radius = outer * 0.35;
+                if hdist < hl_radius {
+                    let hn = hdist / hl_radius;
+                    let hl_alpha = 1.0 - hn * hn;
+                    let a = (alpha * 255.0) as u32;
+                    let rp = ((r as f64 * alpha * 255.0 + 200.0 * hl_alpha * 0.5) as u32).min(255);
+                    let gp = ((g as f64 * alpha * 255.0 + 200.0 * hl_alpha * 0.5) as u32).min(255);
+                    let bp = ((b as f64 * alpha * 255.0 + 220.0 * hl_alpha * 0.5) as u32).min(255);
+                    buf[(y * ww + x) as usize] = (a << 24) | (rp << 16) | (gp << 8) | bp;
+                    continue;
+                }
             }
 
             // ── Energy waves ─────────────────────────────────────────

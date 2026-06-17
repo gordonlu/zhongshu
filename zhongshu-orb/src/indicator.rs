@@ -82,6 +82,10 @@ mod orb {
         state: AgentState,
         color: ColorLerp,
         start_time: Instant,
+        /// Visual Done state held at least this long before decaying to Idle.
+        done_until: Instant,
+        /// Throttle idle redraws: counter resets on active state.
+        idle_frame: u32,
     }
 
     impl OrbIndicator {
@@ -127,6 +131,8 @@ mod orb {
                 state: AgentState::Idle,
                 color: ColorLerp::new(c.0, c.1, c.2),
                 start_time: Instant::now(),
+                done_until: Instant::now(),
+                idle_frame: 0,
             }
         }
 
@@ -135,6 +141,11 @@ mod orb {
             let c = state_color(state);
             let t = self.start_time.elapsed().as_secs_f64();
             self.color.set_target(c.0, c.1, c.2, t);
+            // Ensure Done state is visible for at least 900ms.
+            if matches!(state, AgentState::Done { .. }) {
+                self.done_until = Instant::now() + std::time::Duration::from_millis(900);
+            }
+            self.idle_frame = 0;
             self.window.request_redraw();
         }
 
@@ -155,6 +166,15 @@ mod orb {
         }
 
         pub fn render(&mut self) {
+            // Decay Done → Idle after minimum display time.
+            let effective = if matches!(self.state, AgentState::Done { .. })
+                && Instant::now() >= self.done_until
+            {
+                AgentState::Idle
+            } else {
+                self.state
+            };
+
             let sz = self.window.inner_size();
             let (ww, hh) = (sz.width, sz.height);
             if ww == 0 || hh == 0 {
@@ -170,13 +190,23 @@ mod orb {
 
             let t = self.start_time.elapsed().as_secs_f64();
             let (cr, cg, cb) = self.color.get(t);
-            let mode = to_orb_mode(self.state);
+            let mode = to_orb_mode(effective);
             render::draw_orb(&mut buf, ww, hh, cr, cg, cb, t, mode);
 
             buf.present().unwrap();
 
-            if !matches!(self.state, AgentState::Idle) {
-                self.window.request_redraw();
+            match effective {
+                AgentState::Idle => {
+                    self.idle_frame += 1;
+                    // Idle: ~8 FPS (every 8th frame at ~60 FPS draw rate).
+                    if self.idle_frame % 8 == 0 {
+                        self.window.request_redraw();
+                    }
+                }
+                _ => {
+                    self.idle_frame = 0;
+                    self.window.request_redraw();
+                }
             }
         }
     }
@@ -288,27 +318,18 @@ pub mod tray {
         }
     }
 
-    fn icon_pixmap(state: AgentState, phase: f64) -> Vec<ksni::Icon> {
-        // Provide multiple sizes for the system tray to pick the best match.
-        let sizes: &[i32] = &[16, 22, 24, 32, 48, 64];
+    fn icon_pixmap(state: AgentState, _phase: f64) -> Vec<ksni::Icon> {
+        // Smaller size set — tray is for status indication, not animation.
+        let sizes: &[i32] = &[16, 22, 32];
         let (r, g, b) = state_color(state);
 
         sizes
             .iter()
             .map(|size| {
-                let period = match state {
-                    AgentState::Idle => 2.0,
-                    AgentState::Thinking => 1.2,
-                    AgentState::Executing => 0.5,
-                    AgentState::Done { .. } => 2.0,
-                };
-                let breath =
-                    1.0 + ((phase / 50.0 * std::f64::consts::TAU / period).sin() * 0.12) as f32;
-
                 let mut data = vec![0u8; (size * size * 4) as usize];
                 let cx = *size as f32 / 2.0;
                 let cy = *size as f32 / 2.0;
-                let outer_r = (*size as f32 / 2.0 - 1.0) * breath;
+                let outer_r = *size as f32 / 2.0 - 1.0;
                 let core_r = (outer_r * 0.5).max(2.0);
                 let outer_r2 = outer_r.powi(2);
                 let core_r2 = core_r.powi(2);
@@ -322,7 +343,6 @@ pub mod tray {
                         if dist2 > outer_r2 {
                             continue;
                         }
-
                         let dist = dist2.sqrt();
                         let frac = 1.0 - (dist / outer_r);
                         let alpha = if dist2 <= core_r2 {
@@ -330,7 +350,6 @@ pub mod tray {
                         } else {
                             (255.0 * frac * frac) as u8
                         };
-
                         data[idx] = alpha;
                         data[idx + 1] = r;
                         data[idx + 2] = g;
@@ -363,7 +382,7 @@ pub mod tray {
                 .block_on(async { tray.spawn().await })
                 .expect("ksni tray spawn");
 
-            // Breathing timer: phase from real time, adaptive frequency.
+            // Breathing timer: low frequency — tray pixmap is not an animation canvas.
             let bp = breath_phase.clone();
             let h = handle.clone();
             let act = active.clone();
@@ -371,12 +390,12 @@ pub mod tray {
                 let start = tokio::time::Instant::now();
                 loop {
                     let is_active = act.load(Ordering::Relaxed);
-                    // Idle: 2 Hz (barely visible pulse), active: 20 Hz.
-                    let ms = if is_active { 50 } else { 500 };
+                    // Idle: 1 Hz, active: 10 Hz (reduced from 20 Hz).
+                    let ms = if is_active { 100 } else { 1000 };
                     tokio::time::sleep(Duration::from_millis(ms)).await;
 
                     let elapsed = start.elapsed().as_secs_f64();
-                    bp.store((elapsed * 50.0) as u32, Ordering::Relaxed);
+                    bp.store((elapsed * 10.0) as u32, Ordering::Relaxed);
                     let _ = h.update(|_: &mut KsniTray| {}).await;
                 }
             });

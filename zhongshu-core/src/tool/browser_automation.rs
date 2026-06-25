@@ -94,14 +94,19 @@ impl Tool for BrowserAutomationTool {
             "type" => type_text(arguments).await,
             "console" => console_messages(arguments).await,
             "wait" => wait(arguments).await,
-            "scroll" => eval_js(&json!({"js":"window.scrollBy(0, arguments[0] || window.innerHeight/2)","max_length":100})).await,
+            "scroll" => {
+                let y = arguments["y"].as_i64().unwrap_or(200);
+                eval_js(&json!({"js": format!("window.scrollBy(0, {y})"),"max_length":100})).await
+            }
             "back" => eval_js(&json!({"js":"window.history.back()","max_length":100})).await,
             "forward" => eval_js(&json!({"js":"window.history.forward()","max_length":100})).await,
-            "new_tab" => open_page(&json!({"url": arguments["url"].as_str().unwrap_or("about:blank")})).await,
+            "new_tab" => {
+                open_page(&json!({"url": arguments["url"].as_str().unwrap_or("about:blank")})).await
+            }
             "press" => {
                 let k = serde_json::to_string(&arguments["text"]).unwrap_or_else(|_| "\"\"".into());
                 eval_js(&json!({"js": format!("(function(){{let k={k};document.activeElement?.dispatchEvent(new KeyboardEvent('keydown',{{key:k}}));document.activeElement?.dispatchEvent(new KeyboardEvent('keyup',{{key:k}}))}})()"),"max_length":100})).await
-            },
+            }
             "wait_for_selector" => wait_for_selector(arguments).await,
             "select_option" => select_option(arguments).await,
             "network_start" => network_start(arguments).await,
@@ -313,7 +318,7 @@ async fn wait_for_selector(args: &Value) -> anyhow::Result<Value> {
     Ok(sanitize_external_value(json!({
         "action": "wait_for_selector",
         "selector": selector,
-        "found": result == "true" || result == "True",
+        "found": result.as_bool().unwrap_or(false),
     })))
 }
 
@@ -732,7 +737,8 @@ mod tests {
 /// Classify browser action risk level.
 fn action_risk(action: &str) -> &'static str {
     match action {
-        "open" | "snapshot" | "eval" | "console" | "wait" | "scroll" | "screenshot" => "read",
+        "open" | "snapshot" | "console" | "wait" | "scroll" | "screenshot" => "read",
+        "eval" => "dangerous",
         "click" | "type" | "press" | "select_option" | "wait_for_selector" => "interact",
         "new_tab" | "back" | "forward" => "navigate",
         _ => "unknown",

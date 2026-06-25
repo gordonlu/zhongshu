@@ -44,6 +44,9 @@ mod tests {
         ) -> anyhow::Result<()> {
             Ok(())
         }
+        fn change_model(&self, _model: &str) -> std::sync::Arc<dyn LlmProvider> {
+            std::sync::Arc::new(MockPlannerProvider)
+        }
         fn model_name(&self) -> &str {
             "mock"
         }

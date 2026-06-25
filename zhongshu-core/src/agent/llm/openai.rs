@@ -2,6 +2,7 @@ use crate::agent::llm::{
     ChatCompletionRequest, ChatCompletionResponse, LlmProvider, StreamEvent, StreamToolCall,
 };
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct OpenAiProvider {
@@ -299,6 +300,10 @@ impl LlmProvider for OpenAiProvider {
         });
 
         Ok(())
+    }
+
+    fn change_model(&self, model: &str) -> Arc<dyn LlmProvider> {
+        Arc::new(self.with_model(model))
     }
 
     fn model_name(&self) -> &str {

@@ -266,7 +266,10 @@ fn main() {
 
     let goal_tool = GoalTool::new(GoalRepository::new(Database::new(core_db_path.clone())));
     let task_tool = TaskTool::new(TaskRepository::new(Database::new(core_db_path.clone())));
-    let llm_registry = cfg.llm.to_registry();
+    let llm_registry = std::sync::Arc::new(cfg.llm.to_registry());
+    if let Ok(primary) = llm_registry.client_for_role("primary") {
+        tracing::info!("LLM registry: primary={}", primary.model);
+    }
 
     // ── Background services ──
     services::spawn_scheduler(scheduler);

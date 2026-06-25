@@ -152,15 +152,22 @@ impl ZhongshuApp {
             ov.show_equipment(&items);
         }
         if let Some(eq_id) = ov.take_toggle_equipment() {
-            let mut equipment = self.equipment.lock().unwrap();
-            if let Some(eq) = equipment.get_mut(&eq_id) {
-                eq.status =
-                    if matches!(eq.status, zhongshu_core::equipment::EquipmentStatus::Active) {
+            let was_active;
+            {
+                let mut equipment = self.equipment.lock().unwrap();
+                if let Some(eq) = equipment.get_mut(&eq_id) {
+                    was_active =
+                        matches!(eq.status, zhongshu_core::equipment::EquipmentStatus::Active);
+                    eq.status = if was_active {
                         zhongshu_core::equipment::EquipmentStatus::Disabled
                     } else {
                         zhongshu_core::equipment::EquipmentStatus::Active
                     };
+                } else {
+                    was_active = false;
+                }
             }
+            self.controller.refresh_skill_prompts();
         }
         if let Some(settings) = ov.take_settings() {
             let mut cfg = crate::config::load();

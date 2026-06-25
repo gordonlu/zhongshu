@@ -50,6 +50,9 @@ impl LlmProvider for MockProvider {
         Ok(())
     }
 
+    fn change_model(&self, _model: &str) -> std::sync::Arc<dyn LlmProvider> {
+        std::sync::Arc::new(MockProvider)
+    }
     fn model_name(&self) -> &str {
         "mock"
     }

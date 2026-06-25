@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -172,6 +173,9 @@ pub trait LlmProvider: Send + Sync {
         mut on_event: Box<dyn FnMut(StreamEvent) + Send>,
     ) -> anyhow::Result<()>;
     fn model_name(&self) -> &str;
+
+    /// Return a new provider with a different model (Phase 7).
+    fn change_model(&self, model: &str) -> Arc<dyn LlmProvider>;
 
     /// Generate an embedding vector for the given input text.
     /// Returns `Err` if the provider does not support embeddings.

@@ -1,5 +1,5 @@
 use crate::agent::attention::AttentionLevel;
-use crate::agent::llm::Message;
+use crate::agent::llm::{LlmProvider, Message};
 use crate::agent::loop_::{run_agent, AgentCallbacks};
 use crate::agent::profile::AgentProfile;
 use crate::agent::report::Report;
@@ -85,10 +85,15 @@ impl Worker {
             )
         };
 
+        let provider: std::sync::Arc<dyn LlmProvider> = if let Some(ref m) = profile.llm_model {
+            runtime.provider.change_model(m)
+        } else {
+            runtime.provider.clone()
+        };
         AgentRuntime {
             registry: scoped_registry,
             budget: profile.to_worker_budget(),
-            provider: runtime.provider.clone(),
+            provider,
             model: profile
                 .llm_model
                 .clone()

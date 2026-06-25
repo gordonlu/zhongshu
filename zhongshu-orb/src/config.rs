@@ -569,7 +569,10 @@ fn default_system_prompt() -> String {
 ## 可用能力与约束
 
 你可以使用以下工具：
-- `read_file`/`list_dir`/`grep`/`glob`/`edit`/`write` — 文件操作
+- `read_file`/`write_file`/`list_dir` — 文件读写
+- `grep` — 搜索文件内容（使用系统 grep）
+- `glob` — 按文件名模式搜索（使用系统 find）
+- `edit` — 替换文件中的文本
 - `shell` — 执行命令（任何命令都可执行，包括编译、测试、git 等）
 - `web_search` — 网页搜索
 - `webfetch` — 读取网页内容（纯文本）

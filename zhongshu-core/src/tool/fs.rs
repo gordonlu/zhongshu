@@ -146,3 +146,86 @@ impl Tool for ListDirTool {
         }))
     }
 }
+
+/// Search file contents for a pattern (delegates to shell grep).
+pub struct GrepTool;
+#[async_trait]
+impl Tool for GrepTool {
+    fn name(&self) -> &str {
+        "grep"
+    }
+    fn description(&self) -> &str {
+        "Search file contents using grep pattern. Use glob to find files by name."
+    }
+    fn parameters(&self) -> serde_json::Value {
+        json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string","default":"."}},"required":["pattern"]})
+    }
+    async fn execute(&self, arguments: &serde_json::Value) -> ToolOutput {
+        crate::tool::shell::ShellTool.execute(&json!({"command": format!("grep -rn '{}' {} 2>/dev/null | head -100", arguments["pattern"].as_str().unwrap_or(""), arguments["path"].as_str().unwrap_or("."))})).await
+    }
+}
+
+/// Find files by glob pattern (delegates to shell find/fd).
+pub struct GlobTool;
+#[async_trait]
+impl Tool for GlobTool {
+    fn name(&self) -> &str {
+        "glob"
+    }
+    fn description(&self) -> &str {
+        "Find files by name glob pattern."
+    }
+    fn parameters(&self) -> serde_json::Value {
+        json!({"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string","default":"."}},"required":["pattern"]})
+    }
+    async fn execute(&self, arguments: &serde_json::Value) -> ToolOutput {
+        crate::tool::shell::ShellTool.execute(&json!({"command": format!("find {} -name '{}' 2>/dev/null | head -100", arguments["path"].as_str().unwrap_or("."), arguments["pattern"].as_str().unwrap_or(""))})).await
+    }
+}
+
+/// Edit a file by replacing text (read → replace → write).
+pub struct EditTool;
+#[async_trait]
+impl Tool for EditTool {
+    fn name(&self) -> &str {
+        "edit"
+    }
+    fn description(&self) -> &str {
+        "Edit a file: replace first occurrence of old_text with new_text."
+    }
+    fn parameters(&self) -> serde_json::Value {
+        json!({"type":"object","properties":{"path":{"type":"string"},"old":{"type":"string"},"new":{"type":"string"}},"required":["path","old","new"]})
+    }
+    async fn execute(&self, arguments: &serde_json::Value) -> ToolOutput {
+        let path = match arguments["path"].as_str() {
+            Some(p) => p,
+            None => return ToolOutput::error("'path' required"),
+        };
+        let old = match arguments["old"].as_str() {
+            Some(o) => o,
+            None => return ToolOutput::error("'old' required"),
+        };
+        let new = arguments["new"].as_str().unwrap_or("");
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => return ToolOutput::error(format!("read {path}: {e}")),
+        };
+        if !content.contains(old) {
+            return ToolOutput::error(format!(
+                "'{}' not found in {path}",
+                old.chars().take(50).collect::<String>()
+            ));
+        }
+        let result = content.replacen(old, new, 1);
+        let tmp = format!("{path}.tmp");
+        match std::fs::write(&tmp, &result) {
+            Ok(_) => {}
+            Err(e) => return ToolOutput::error(format!("write tmp: {e}")),
+        }
+        match std::fs::rename(&tmp, path) {
+            Ok(_) => {}
+            Err(e) => return ToolOutput::error(format!("rename: {e}")),
+        }
+        ToolOutput::success(json!({"path": path, "replaced": 1}))
+    }
+}

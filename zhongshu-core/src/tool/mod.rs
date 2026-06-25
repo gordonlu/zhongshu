@@ -1,6 +1,7 @@
 pub mod automation;
 pub mod browser;
 pub mod browser_automation;
+pub mod browser_session;
 pub mod fs;
 pub mod memory;
 pub mod screenshot;

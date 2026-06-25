@@ -114,8 +114,11 @@ impl Tool for BrowserAutomationTool {
         };
 
         match result {
-            Ok(v) => ToolOutput::success(v),
-            Err(e) => ToolOutput::error(e.to_string()),
+            Ok(mut v) => {
+                v["risk"] = json!(action_risk(action));
+                ToolOutput::success(v)
+            }
+            Err(e) => ToolOutput::error(format!("浏览器自动化失败: {e}")),
         }
     }
 }

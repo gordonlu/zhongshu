@@ -133,6 +133,25 @@ impl Database {
                 payload     TEXT,
                 created_at  INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS runbooks (
+                id TEXT PRIMARY KEY,
+                goal TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                total_steps INTEGER NOT NULL DEFAULT 0,
+                passed INTEGER NOT NULL DEFAULT 0,
+                failed INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS runbook_steps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                runbook_id TEXT NOT NULL REFERENCES runbooks(id),
+                seq INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                tool TEXT NOT NULL,
+                input TEXT NOT NULL DEFAULT '',
+                output_status TEXT NOT NULL DEFAULT '',
+                output_preview TEXT NOT NULL DEFAULT '',
+                verification TEXT NOT NULL DEFAULT ''
+            );
             ",
         )?;
 

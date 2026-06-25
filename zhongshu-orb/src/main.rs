@@ -266,6 +266,7 @@ fn main() {
 
     let goal_tool = GoalTool::new(GoalRepository::new(Database::new(core_db_path.clone())));
     let task_tool = TaskTool::new(TaskRepository::new(Database::new(core_db_path.clone())));
+    let llm_registry = cfg.llm.to_registry();
 
     // ── Background services ──
     services::spawn_scheduler(scheduler);

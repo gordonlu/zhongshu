@@ -172,18 +172,97 @@ Header 📋 按钮 → 弹出任务列表，支持完成/取消
 
 ---
 
-# Phase 6 — Multi-Agent
+# Phase 6 — 浏览器完全自动化
 
-* Planner: 拆任务
-* Researcher: 搜索
-* Executor: 工具执行
-* Reviewer: 检查结果
-* 共享 core.db 记忆系统
+## 6A: Browser Session + 可靠页面操作
+* BrowserSession 生命周期（profile/tab/page lifecycle）
+* ElementRef 多策略定位（css/text/role/label/placeholder）
+* 操作原语：press_key / scroll / select_option / wait_for_selector / wait_for_navigation / new_tab / switch_tab
+* 操作后 DOM 验证 + console error 检测
+* 操作日志入 EventBus / task timeline
+
+## 6B: 副作用安全闭环
+* 风险分类（只读/本地输入/外部写入/高风险）
+* 提交/发布前用户确认
+* 操作计划预览
+* 失败恢复（retry → refresh → re-snapshot → ask user）
+* Tab 级安全隔离（临时 profile，不与主浏览器共享 cookie）
+
+## 6C: 视觉观测 + 网页调试
+* Network capture（failed request / HAR 导出）
+* Console / page error buffer / DOM mutation
+* Visual snapshot（screenshot + element bounding box）
+* 前端调试工作流 (FrontendDebugSession)
+
+## 6D: Web Skill 记忆
+* 记录站点操作模式
+* 成功操作 → Runbook artifact
+* Runbook → Skill 提炼
+* 用户批准后存为 equipment
 
 ---
 
-# Phase 7 — Knowledge Operating System
+# Phase 7 — 多 LLM 配置 + Worker 专业化
 
-* Personal Knowledge Graph（自动构建实体/关系图谱）
-* Memory Compaction v2（对话压缩 → 知识提取）
-* Context Streaming（边推理边检索边补充）
+## LlmRegistry
+* LlmProfileConfig：支持多个 OpenAI-compatible 端点
+* Role mapping：primary / worker.* / background.* 各指定 profile
+* API key 入系统 keyring，不落盘
+* 配置迁移兼容旧格式
+
+## AgentProfile 改造
+* profile.llm 字段（model / reasoning_effort / temperature）
+* Worker 根据 profile + role mapping 选择 LLM
+* 后台服务分配合适模型（memory 用便宜模型，planner 用强模型）
+
+## UI 设置分层
+* 基础页：默认 API base / key / model
+* 高级页：LLM Profiles 列表 + Role Mapping + Test Connection
+
+---
+
+# Phase 8 — 模式切换 + 个人工作流图谱
+
+## 助手 / 编码模式切换
+* current_mode 切换（assistant / coding）
+* System prompt 按 mode 拼接不同 overlay
+* Tool registry 按 mode select
+* UI：mode switch + 当前 mode 显示
+
+## 编码模式专属能力
+* Workspace 状态 / git diff / test result
+* 受限上下文编辑（RestrictedCodingContext）
+* 前端调试闭环
+
+## Personal Workflow Graph
+* Entity / Relation / Workflow 模型
+* 从 EventBus + task runs + browser sessions 持续学习
+* 可回答"我上次怎么做的？"
+
+---
+
+# Phase 9 — 本地 Agent Debugger + Attention 系统
+
+## Agent Debugger
+* Timeline：每轮思考摘要 / tool call / observation
+* 权限阻断 / 模型路由 / token cost
+* 任务回放
+* Debug bundle 导出
+
+## Attention System
+* 低价值事件进 digest
+* 中价值合并提醒
+* 高价值即时提醒
+* 用户行为反馈调整权重
+
+---
+
+# Phase 10 — 自我进化装备市场（Local Skill Forge）
+
+* 装备启停持久化 + 管理 UI
+* 安装前预览 + 用户确认
+* Skill 测试 / dry run
+* 装备来源追踪（来自哪些 runbook / tasks）
+* 版本化 + 回滚
+* 装备按 mode 过滤注入
+* 重复检测

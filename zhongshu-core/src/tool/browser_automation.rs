@@ -20,9 +20,20 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct BrowserAutomationTool;
 
+/// Wrapper that kills the child process on drop.
+struct KillOnDrop(Option<Child>);
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if let Some(ref mut c) = self.0 {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+}
+
 struct ManagedBrowser {
     port: u16,
-    child: Option<Child>,
+    child: KillOnDrop,
     client: reqwest::Client,
 }
 
@@ -42,7 +53,7 @@ impl Tool for BrowserAutomationTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["open", "snapshot", "eval", "click", "type", "console", "wait"]
+                    "enum": ["open", "snapshot", "eval", "click", "type", "console", "wait", "scroll", "back", "forward", "new_tab", "press"]
                 },
                 "url": {"type": "string", "description": "URL for open"},
                 "selector": {"type": "string", "description": "CSS selector for click/type"},
@@ -50,7 +61,9 @@ impl Tool for BrowserAutomationTool {
                 "clear": {"type": "boolean", "description": "Clear existing value before typing", "default": false},
                 "js": {"type": "string", "description": "JavaScript expression or async function body for eval"},
                 "max_length": {"type": "integer", "description": "Max text length for snapshot/eval string output", "default": 8000},
-                "ms": {"type": "integer", "description": "Milliseconds to wait", "default": 1000}
+                "ms": {"type": "integer", "description": "Milliseconds to wait", "default": 1000},
+                "x": {"type": "integer", "description": "X position for scroll (pixels)"},
+                "y": {"type": "integer", "description": "Y position for scroll (pixels)"}
             },
             "required": ["action"]
         })
@@ -81,6 +94,14 @@ impl Tool for BrowserAutomationTool {
             "type" => type_text(arguments).await,
             "console" => console_messages(arguments).await,
             "wait" => wait(arguments).await,
+            "scroll" => eval_js(&json!({"js":"window.scrollBy(0, arguments[0] || window.innerHeight/2)","max_length":100})).await,
+            "back" => eval_js(&json!({"js":"window.history.back()","max_length":100})).await,
+            "forward" => eval_js(&json!({"js":"window.history.forward()","max_length":100})).await,
+            "new_tab" => open_page(&json!({"url": arguments["url"].as_str().unwrap_or("about:blank")})).await,
+            "press" => {
+                let k = arguments["text"].as_str().unwrap_or("");
+                eval_js(&json!({"js": format!("document.activeElement?.dispatchEvent(new KeyboardEvent('keydown',{{key:'{k}'}}));document.activeElement?.dispatchEvent(new KeyboardEvent('keyup',{{key:'{k}'}}))"),"max_length":100})).await
+            },
             other => Err(anyhow::anyhow!(
                 "unknown browser_automation action '{other}'"
             )),
@@ -308,7 +329,7 @@ impl ManagedBrowser {
         if is_cdp_alive(&client, port).await {
             return Ok(ManagedBrowser {
                 port,
-                child: None,
+                child: KillOnDrop(None),
                 client,
             });
         }
@@ -318,7 +339,7 @@ impl ManagedBrowser {
         let profile = profile_dir();
         std::fs::create_dir_all(&profile)?;
 
-        let child = Command::new(&chrome)
+        let child_proc = Command::new(&chrome)
             .arg(format!("--remote-debugging-port={port}"))
             .arg(format!("--user-data-dir={}", profile.display()))
             .arg("--no-first-run")
@@ -335,7 +356,7 @@ impl ManagedBrowser {
             if is_cdp_alive(&client, port).await {
                 return Ok(ManagedBrowser {
                     port,
-                    child: Some(child),
+                    child: KillOnDrop(Some(child_proc)),
                     client,
                 });
             }
@@ -348,7 +369,7 @@ impl ManagedBrowser {
     }
 
     async fn is_alive(&mut self) -> bool {
-        if let Some(child) = self.child.as_mut() {
+        if let Some(ref mut child) = self.child.0 {
             if matches!(child.try_wait(), Ok(Some(_))) {
                 return false;
             }

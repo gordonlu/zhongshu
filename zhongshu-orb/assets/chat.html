@@ -546,10 +546,12 @@ function buildMessageNode(m) {
       display = m.content.slice(match[0].length);
       let tools = document.createElement('div');
       tools.className = 'tools';
-      for (let name of match[1].split(' · ')) {
+      for (let token of match[1].split(' · ')) {
+        let name = token.replace(/^✓ /, '').replace(/ ×\d+$/, '');
+        let count = token.match(/×(\d+)/);
         let item = document.createElement('span');
         item.className = 'tool-item';
-        item.innerHTML = '<span class="tool-done">✓</span> ' + escapeHtml(name);
+        item.innerHTML = '<span class="tool-done">✓</span> ' + escapeHtml(name) + (count ? ' ×' + count[1] : '');
         tools.appendChild(item);
       }
       bubble.appendChild(tools);

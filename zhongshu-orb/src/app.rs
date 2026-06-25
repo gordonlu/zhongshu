@@ -418,9 +418,26 @@ impl AgentController {
                         let history_content = if tools_used.is_empty() {
                             last.to_string()
                         } else {
-                            let badge = tools_used
+                            // Deduplicate consecutive identical tool calls.
+                            let mut deduped: Vec<(&str, u32)> = Vec::new();
+                            for name in tools_used.iter().map(|s| s.as_str()) {
+                                if let Some(last) = deduped.last_mut() {
+                                    if last.0 == name {
+                                        last.1 += 1;
+                                        continue;
+                                    }
+                                }
+                                deduped.push((name, 1));
+                            }
+                            let badge = deduped
                                 .iter()
-                                .map(|n| format!("✓ {n}"))
+                                .map(|(n, c)| {
+                                    if *c > 1 {
+                                        format!("✓ {n} ×{c}")
+                                    } else {
+                                        format!("✓ {n}")
+                                    }
+                                })
                                 .collect::<Vec<_>>()
                                 .join(" · ");
                             format!("[工具: {badge}]\n\n{last}")

@@ -21,7 +21,7 @@ use crate::config::AppConfig;
 use crate::hotkey::HotkeyManager;
 use crate::indicator::Indicator;
 use crate::overlay::{AuthRequest, OverlayHandle};
-use zhongshu_core::equipment::EquipmentObserver;
+use zhongshu_core::equipment::{EquipmentObserver, EquipmentRegistry};
 
 // ── App state ────────────────────────────────────────────────────────
 
@@ -53,6 +53,7 @@ pub struct ZhongshuApp {
     pub filter: ControlTokenFilter,
     pub task_repo: zhongshu_core::core::TaskRepository,
     pub observer: Arc<Mutex<EquipmentObserver>>,
+    pub equipment: Arc<Mutex<EquipmentRegistry>>,
     pub overlay_zoomed: bool,
 }
 
@@ -69,6 +70,7 @@ impl ZhongshuApp {
         runtime: tokio::runtime::Runtime,
         task_repo: zhongshu_core::core::TaskRepository,
         observer: Arc<Mutex<EquipmentObserver>>,
+        equipment: Arc<Mutex<EquipmentRegistry>>,
     ) -> anyhow::Result<Self> {
         let hotkey = HotkeyManager::new(&config.hotkey).unwrap_or_else(|e| {
             tracing::warn!("Global hotkey unavailable: {e:#}");
@@ -100,6 +102,7 @@ impl ZhongshuApp {
             filter: ControlTokenFilter::new(),
             task_repo,
             observer,
+            equipment,
             overlay_zoomed: false,
         })
     }
@@ -139,6 +142,25 @@ impl ZhongshuApp {
             crate::config::save(&cfg);
             self.controller
                 .set_system_prompt(cfg.agent.effective_system_prompt());
+        }
+        if ov.take_list_equipment() {
+            let equipment = self.equipment.lock().unwrap();
+            let items: Vec<serde_json::Value> = equipment.list().iter().map(|eq| serde_json::json!({
+                "id": eq.id, "name": eq.manifest.name, "version": eq.manifest.version,
+                "enabled": matches!(eq.status, zhongshu_core::equipment::EquipmentStatus::Active),
+            })).collect();
+            ov.show_equipment(&items);
+        }
+        if let Some(eq_id) = ov.take_toggle_equipment() {
+            let mut equipment = self.equipment.lock().unwrap();
+            if let Some(eq) = equipment.get_mut(&eq_id) {
+                eq.status =
+                    if matches!(eq.status, zhongshu_core::equipment::EquipmentStatus::Active) {
+                        zhongshu_core::equipment::EquipmentStatus::Disabled
+                    } else {
+                        zhongshu_core::equipment::EquipmentStatus::Active
+                    };
+            }
         }
         if let Some(settings) = ov.take_settings() {
             let mut cfg = crate::config::load();
@@ -186,7 +208,7 @@ impl ZhongshuApp {
             }
             if let Some(ref mode) = settings.mode {
                 cfg.agent.mode = mode.clone();
-                self.controller.refresh_skill_prompts();
+                self.controller.set_mode(mode.clone());
             }
             if settings.personality != "默认" && !settings.personality.is_empty() {
                 cfg.agent.personality = settings.personality;

@@ -469,6 +469,7 @@ fn main() {
         r,
         task_repo,
         observer.clone(),
+        equipment.clone(),
     ) {
         Ok(app) => app,
         Err(e) => {

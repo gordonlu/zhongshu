@@ -747,7 +747,7 @@ async fn network_start(_args: &Value) -> anyhow::Result<Value> {
         .command(&tab.websocket_url, "Network.enable", json!({}))
         .await?;
     let result = browser.evaluate(&tab.websocket_url,
-        r#"if(!window.__zhongshuNetwork)window.__zhongshuNetwork=[];(()=>{const orig=fetch;window.fetch=function(){const args=arguments;return orig.apply(this,arguments).then(r=>{window.__zhongshuNetwork.push({url:args[0],status:r.status,ok:r.ok,time:Date.now()});return r}).catch(e=>{window.__zhongshuNetwork.push({url:args[0],error:e.message,time:Date.now()});throw e})}})();(()=>{const orig=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(){const url=arguments[1];this.addEventListener('loadend',function(){window.__zhongshuNetwork.push({url:url,status:this.status,ok:this.status>=200&&this.status<300,time:Date.now()})});return orig.apply(this,arguments)}})();true"#, true).await?;
+        r#"if(window.__zhongshuNetwork)true;else{window.__zhongshuNetwork=[];(()=>{const orig=fetch;window.fetch=function(){const args=arguments;return orig.apply(this,arguments).then(r=>{window.__zhongshuNetwork.push({url:args[0],status:r.status,ok:r.ok,time:Date.now()});return r}).catch(e=>{window.__zhongshuNetwork.push({url:args[0],error:e.message,time:Date.now()});throw e})}})();(()=>{const orig=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(){const url=arguments[1];this.addEventListener('loadend',function(){window.__zhongshuNetwork.push({url:url,status:this.status,ok:this.status>=200&&this.status<300,time:Date.now()})});return orig.apply(this,arguments)}})();true}"#, true).await?;
     Ok(sanitize_external_value(
         json!({"action":"network_start","result":result}),
     ))
@@ -769,7 +769,7 @@ async fn page_errors(_args: &Value) -> anyhow::Result<Value> {
     let browser = browser.as_mut().expect("browser initialized");
     let tab = browser.active_tab().await?;
     let result = browser.evaluate(&tab.websocket_url,
-        r#"(()=>{const arr=window.__zhongshuErrors||[];window.__zhongshuErrors=[];try{window.onerror=(m,s,l,c,e)=>{window.__zhongshuErrors.push({msg:m,source:s,line:l,col:c,time:Date.now()})};window.addEventListener('unhandledrejection',e=>{window.__zhongshuErrors.push({msg:e.reason?.message||String(e.reason),type:'unhandledrejection',time:Date.now()})})}catch(e){}return JSON.stringify(arr.slice(-30))})()"#, true).await?;
+        r#"(()=>{const arr=window.__zhongshuErrors||[];window.__zhongshuErrors=[];try{if(!window.__zhongshuErrorInit){window.__zhongshuErrorInit=true;window.addEventListener('error',function(e){window.__zhongshuErrors.push({msg:e.message||String(e),source:e.filename,line:e.lineno,col:e.colno,time:Date.now()})});window.addEventListener('unhandledrejection',e=>{window.__zhongshuErrors.push({msg:e.reason?.message||String(e.reason),type:'unhandledrejection',time:Date.now()})})}}catch(e){}return JSON.stringify(arr.slice(-30))})()"#, true).await?;
     Ok(sanitize_external_value(
         json!({"action":"page_errors","errors":result}),
     ))

@@ -153,6 +153,8 @@ pub struct OverlayHandle {
     pub pending_open_settings: Arc<Mutex<bool>>,
     pub pending_load_more: Arc<Mutex<bool>>,
     pub pending_list_tasks: Arc<Mutex<bool>>,
+    pub pending_list_equipment: Arc<Mutex<bool>>,
+    pub pending_toggle_equipment: Arc<Mutex<Option<String>>>,
     pub pending_toggle_zoom: Arc<Mutex<bool>>,
     pub pending_cancel_task: Arc<Mutex<Option<String>>>,
     pub pending_complete_task: Arc<Mutex<Option<String>>>,
@@ -265,7 +267,12 @@ impl OverlayHandle {
     pub fn take_list_tasks(&self) -> bool {
         std::mem::take(&mut *self.pending_list_tasks.lock().unwrap())
     }
-
+    pub fn take_list_equipment(&self) -> bool {
+        std::mem::take(&mut *self.pending_list_equipment.lock().unwrap())
+    }
+    pub fn take_toggle_equipment(&self) -> Option<String> {
+        self.pending_toggle_equipment.lock().unwrap().take()
+    }
     pub fn take_toggle_zoom(&self) -> bool {
         std::mem::take(&mut *self.pending_toggle_zoom.lock().unwrap())
     }
@@ -280,6 +287,9 @@ impl OverlayHandle {
 
     pub fn show_tasks(&self, tasks: &[serde_json::Value]) {
         self.send(&json!({ "type": "tasks", "tasks": tasks }));
+    }
+    pub fn show_equipment(&self, items: &[serde_json::Value]) {
+        self.send(&json!({ "type": "equipment", "items": items }));
     }
 }
 
@@ -304,6 +314,8 @@ pub fn show(width: f32, height: f32) -> OverlayHandle {
     let pending_open_settings: Arc<Mutex<bool>> = Default::default();
     let pending_load_more: Arc<Mutex<bool>> = Default::default();
     let pending_list_tasks: Arc<Mutex<bool>> = Default::default();
+    let pending_list_equipment: Arc<Mutex<bool>> = Default::default();
+    let pending_toggle_equipment: Arc<Mutex<Option<String>>> = Default::default();
     let pending_toggle_zoom: Arc<Mutex<bool>> = Default::default();
     let pending_cancel_task: Arc<Mutex<Option<String>>> = Default::default();
     let pending_complete_task: Arc<Mutex<Option<String>>> = Default::default();
@@ -318,6 +330,8 @@ pub fn show(width: f32, height: f32) -> OverlayHandle {
     let pos = pending_open_settings.clone();
     let plm = pending_load_more.clone();
     let plt = pending_list_tasks.clone();
+    let ple = pending_list_equipment.clone();
+    let pte = pending_toggle_equipment.clone();
     let ptz = pending_toggle_zoom.clone();
     let pct = pending_cancel_task.clone();
     let pcmt = pending_complete_task.clone();
@@ -414,6 +428,15 @@ pub fn show(width: f32, height: f32) -> OverlayHandle {
                 Some("list_tasks") => {
                     *plt.lock().unwrap() = true;
                 }
+                Some("list_equipment") => {
+                    *ple.lock().unwrap() = true;
+                }
+                Some("toggle_equipment") => {
+                    *pte.lock().unwrap() = msg
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                }
                 Some("toggle_zoom") => {
                     *ptz.lock().unwrap() = true;
                 }
@@ -445,6 +468,8 @@ pub fn show(width: f32, height: f32) -> OverlayHandle {
         pending_open_settings,
         pending_load_more,
         pending_list_tasks,
+        pending_list_equipment,
+        pending_toggle_equipment,
         pending_toggle_zoom,
         pending_cancel_task,
         pending_complete_task,

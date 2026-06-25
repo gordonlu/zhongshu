@@ -62,6 +62,7 @@ pub struct AgentController {
     equipment: Arc<Mutex<zhongshu_core::equipment::EquipmentRegistry>>,
     max_context_tokens: AtomicU32,
     pub auto_evolve_enabled: AtomicBool,
+    pub mode: Mutex<String>,
 }
 
 impl AgentController {
@@ -102,6 +103,7 @@ impl AgentController {
             reasoning_agent: Mutex::new(reasoning_agent),
             max_context_tokens: AtomicU32::new(max_context_tokens),
             auto_evolve_enabled: AtomicBool::new(false),
+            mode: Mutex::new("assistant".into()),
             equipment,
         }
     }
@@ -124,12 +126,26 @@ impl AgentController {
         let base = self.base_system_prompt.lock().unwrap().clone();
         let mut full = base;
         if let Ok(reg) = self.equipment.lock() {
+            let current_mode = self.mode.lock().unwrap().clone();
             for (_id, prompt) in &reg.skill_prompts() {
+                // Simple mode filter: skip skills tagged for other mode.
+                let is_coding = prompt.contains("[coding]");
+                let is_assistant = prompt.contains("[assistant]");
+                if (current_mode == "coding" && is_assistant)
+                    || (current_mode != "coding" && is_coding)
+                {
+                    continue;
+                }
                 full.push_str("\n\n");
                 full.push_str(prompt);
             }
         }
         *self.system_prompt.lock().unwrap() = full;
+    }
+
+    pub fn set_mode(&self, mode: String) {
+        *self.mode.lock().unwrap() = mode;
+        self.refresh_skill_prompts();
     }
 
     pub fn set_max_context_tokens(&self, val: u32) {

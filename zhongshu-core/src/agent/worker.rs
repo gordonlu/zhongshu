@@ -89,8 +89,11 @@ impl Worker {
             registry: scoped_registry,
             budget: profile.to_worker_budget(),
             provider: runtime.provider.clone(),
-            model: runtime.model.clone(),
-            reasoning_effort: None,
+            model: profile
+                .llm_model
+                .clone()
+                .unwrap_or_else(|| runtime.model.clone()),
+            reasoning_effort: profile.llm_reasoning_effort.clone(),
         }
     }
 

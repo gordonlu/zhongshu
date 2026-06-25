@@ -33,6 +33,13 @@ pub struct AgentProfile {
     /// Token / 步数预算
     #[serde(default)]
     pub budget: AgentBudgetProfile,
+    /// LLM profile selector (Phase 7).
+    #[serde(default)]
+    pub llm_profile: Option<String>,
+    #[serde(default)]
+    pub llm_model: Option<String>,
+    #[serde(default)]
+    pub llm_reasoning_effort: Option<String>,
 }
 
 fn default_authority() -> String {
@@ -53,6 +60,9 @@ impl AgentProfile {
             tool_names,
             authority: default_authority(),
             budget: AgentBudgetProfile::from_budget(&budget),
+            llm_profile: None,
+            llm_model: None,
+            llm_reasoning_effort: None,
         }
     }
 

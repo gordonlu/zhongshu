@@ -20,5 +20,6 @@ pub use scheduler::Scheduler;
 pub use suggestion::{SuggestionEngine, SuggestionTool};
 pub use task::{TaskPlanner, TaskRepository, TaskTool};
 
+pub mod runbook;
 #[cfg(test)]
 mod tests;

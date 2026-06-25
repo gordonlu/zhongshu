@@ -184,6 +184,10 @@ impl ZhongshuApp {
                     self.controller.set_max_context_tokens(ctx);
                 }
             }
+            if let Some(ref mode) = settings.mode {
+                cfg.agent.mode = mode.clone();
+                self.controller.refresh_skill_prompts();
+            }
             if settings.personality != "默认" && !settings.personality.is_empty() {
                 cfg.agent.personality = settings.personality;
                 cfg.agent.personality_selected = true;
@@ -244,6 +248,7 @@ impl ZhongshuApp {
                 bg_interval: Some(cfg.agent.background.interval_secs.to_string()),
                 bg_prompt: Some(cfg.agent.background.prompt.clone()),
                 auto_evolve: Some(cfg.agent.auto_evolve),
+                mode: Some(cfg.agent.mode.clone()),
             });
         }
         if ov.take_load_more() {

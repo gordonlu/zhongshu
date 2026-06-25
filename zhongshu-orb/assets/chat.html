@@ -303,6 +303,7 @@ body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMac
     </span>
     <div style="margin-top:8px">
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text);letter-spacing:0">
+        <input id="set-mode" type="hidden" value="assistant">
         <input id="set-auto-evolve" type="checkbox" style="width:auto"> 自我进化装备
       </label>
       <span style="font-size:11px;color:var(--text-muted);display:block;margin-top:4px;line-height:1.4">根据中书内部使用模式，自动提议并安装可复用的 skill 装备</span>
@@ -457,6 +458,7 @@ let messageNodes = new Map();
 let streamingId = null;
 let streamingBuffer = '';
 let has_more = false;
+let currentMode = 'assistant';
 let loading_more = false;
 let currentAuthRequestId = '';
 
@@ -881,7 +883,11 @@ document.getElementById('stop').addEventListener('click', function() {
   sendIpc({type: 'stop'});
 });
 document.getElementById('btn-mode').addEventListener('click', function() {
-  sendIpc({type: 'toggle_mode'});
+  var next = currentMode === 'coding' ? 'assistant' : 'coding';
+  currentMode = next;
+  document.getElementById('mode-badge').textContent = next === 'coding' ? '💻 编码模式' : '💬 助手模式';
+  document.getElementById('mode-badge').style.display = 'block';
+  sendIpc({type: 'save_settings', config: {mode: next}});
 });
 document.getElementById('btn-theme').addEventListener('click', function() {
   applyTheme(document.body.classList.contains('light') ? 'dark' : 'light');

@@ -168,101 +168,83 @@ Header 📋 按钮 → 弹出任务列表，支持完成/取消
 * ✅ **Wayland 兼容** — desktop 工具 ydotool/wtype fallback
 * ✅ **Windows orb** — 纯数学渲染的 Siri 风格球体，softbuffer + wry
 * ✅ **Tray 优化** — 自适应呼吸频率（idle 2Hz / active 20Hz）
-* ⬜ **Chrome CDP 集成** — 通过 DevTools Protocol 控制浏览器
+* ✅ **Chrome CDP 集成** — 通过 DevTools Protocol 控制浏览器
 
 ---
 
-# Phase 6 — 浏览器完全自动化
+# Phase 6 — 浏览器完全自动化 ✅
 
-## 6A: Browser Session + 可靠页面操作
-* BrowserSession 生命周期（profile/tab/page lifecycle）
-* ElementRef 多策略定位（css/text/role/label/placeholder）
-* 操作原语：press_key / scroll / select_option / wait_for_selector / wait_for_navigation / new_tab / switch_tab
-* 操作后 DOM 验证 + console error 检测
-* 操作日志入 EventBus / task timeline
+## 6A: Browser Session + 可靠页面操作 ✅
+* ✅ 16 个 CDP 操作原语（open/snapshot/eval/click/type/console/wait/scroll/back/forward/new_tab/press/wait_for_selector/select_option/screenshot）
+* ✅ CDP 截图、network 捕获、page errors 捕获
+* ✅ KillOnDrop 防 Chrome 进程泄漏
+* ✅ action_risk 风险分类
+* ✅ action 后工具输出自动 attach risk metadata
 
-## 6B: 副作用安全闭环
-* 风险分类（只读/本地输入/外部写入/高风险）
-* 提交/发布前用户确认
-* 操作计划预览
-* 失败恢复（retry → refresh → re-snapshot → ask user）
-* Tab 级安全隔离（临时 profile，不与主浏览器共享 cookie）
+## 6B: 副作用安全闭环 ✅
+* ✅ `action_risk()` 函数分类 read/interact/navigate/dangerous
+* ✅ eval 标记为 dangerous（可执行任意 JS）
+* ✅ 各操作通过 authority gate 统一授权审批
+* ⬜ 外部写入前用户确认 UI（Phase 6A 工具层已备，UI 层待补）
 
-## 6C: 视觉观测 + 网页调试
-* Network capture（failed request / HAR 导出）
-* Console / page error buffer / DOM mutation
-* Visual snapshot（screenshot + element bounding box）
-* 前端调试工作流 (FrontendDebugSession)
+## 6C: 视觉观测 + 网页调试 ✅
+* ✅ CDP 截图（base64 PNG）
+* ✅ network_start / network_events（fetch/XHR 拦截，防重复包装）
+* ✅ page_errors（addEventListener 防覆盖、守夜人初始化）
+* ⬜ HAR 导出
+* ⬜ 前端调试工作流（FrontendDebugSession）
 
-## 6D: Web Skill 记忆
-* 记录站点操作模式
-* 成功操作 → Runbook artifact
-* Runbook → Skill 提炼
-* 用户批准后存为 equipment
-
----
-
-# Phase 7 — 多 LLM 配置 + Worker 专业化
-
-## LlmRegistry
-* LlmProfileConfig：支持多个 OpenAI-compatible 端点
-* Role mapping：primary / worker.* / background.* 各指定 profile
-* API key 入系统 keyring，不落盘
-* 配置迁移兼容旧格式
-
-## AgentProfile 改造
-* profile.llm 字段（model / reasoning_effort / temperature）
-* Worker 根据 profile + role mapping 选择 LLM
-* 后台服务分配合适模型（memory 用便宜模型，planner 用强模型）
-
-## UI 设置分层
-* 基础页：默认 API base / key / model
-* 高级页：LLM Profiles 列表 + Role Mapping + Test Connection
+## 6D: Web Skill 记忆 ✅
+* ✅ Runbook 数据结构 + SQLite 持久化（runbooks + runbook_steps 表）
+* ✅ Runner 自动写入（task executor 完成后保存 Runbook）
+* ⬜ skill 提炼（Runbook→Equipment）
 
 ---
 
-# Phase 8 — 模式切换 + 个人工作流图谱
+# Phase 7 — 多 LLM 配置 + Worker 专业化 ✅
 
-## 助手 / 编码模式切换
-* current_mode 切换（assistant / coding）
-* System prompt 按 mode 拼接不同 overlay
-* Tool registry 按 mode select
-* UI：mode switch + 当前 mode 显示
+## LlmRegistry ✅
+* ✅ LlmProfileConfig 多 profile 配置
+* ✅ Role mapping（primary / worker.* / background.*）
+* ✅ Fallback 链（role → worker.default → default）
+* ✅ 配置迁移（旧单 profile 格式兼容）
+* ✅ LlmRegistry 在 main.rs 实例化
 
-## 编码模式专属能力
-* Workspace 状态 / git diff / test result
-* 受限上下文编辑（RestrictedCodingContext）
-* 前端调试闭环
+## AgentProfile 改造 ✅
+* ✅ profile.llm 字段（llm_profile / llm_model / llm_reasoning_effort）
+* ✅ Worker 根据 profile 切换 provider（change_model trait 方法）
+* ✅ Provider model 唯一权威来源（build_body 用自身 model）
+* ⬜ 后台服务按 role 取模型（memory / suggestion / auto-evolve 仍用同一 provider）
 
-## Personal Workflow Graph
-* Entity / Relation / Workflow 模型
-* 从 EventBus + task runs + browser sessions 持续学习
-* 可回答"我上次怎么做的？"
-
----
-
-# Phase 9 — 本地 Agent Debugger + Attention 系统
-
-## Agent Debugger
-* Timeline：每轮思考摘要 / tool call / observation
-* 权限阻断 / 模型路由 / token cost
-* 任务回放
-* Debug bundle 导出
-
-## Attention System
-* 低价值事件进 digest
-* 中价值合并提醒
-* 高价值即时提醒
-* 用户行为反馈调整权重
+## UI 设置分层 ⬜
+* 基础页/高级页尚未实现
 
 ---
 
-# Phase 10 — 自我进化装备市场（Local Skill Forge）
+# Phase 8 — 模式切换 ✅
 
-* 装备启停持久化 + 管理 UI
-* 安装前预览 + 用户确认
-* Skill 测试 / dry run
-* 装备来源追踪（来自哪些 runbook / tasks）
-* 版本化 + 回滚
-* 装备按 mode 过滤注入
-* 重复检测
+## 助手 / 编码模式切换 ✅
+* ✅ mode 配置字段 + UI 切换按钮
+* ✅ IPC 全链路（button → overlay → handler → config → prompt refresh）
+* ✅ System prompt 按 mode 过滤 skill（`[coding]` / `[assistant]` 标签）
+* ✅ 编码模式窗口 860×900 vs 助手 520×800
+* ⬜ Tool registry 按 mode select
+* ⬜ 编码模式专属 UI（git diff / test result / workspace）
+
+---
+
+# Phase 9 — 本地 Agent Debugger （骨架）
+
+* ✅ Debug 面板 UI（chat.html renderDebug）
+* ✅ IPC push_debug overlay 方法
+* ⬜ 时间线 / tool call 回放 / cost / latency
+
+---
+
+# Phase 10 — 自我进化装备市场（骨架）
+
+* ✅ 装备管理 UI（列表 + 启用/禁用按钮）
+* ✅ list_equipment / toggle_equipment IPC 全链路
+* ✅ toggle 后自动 refresh_skill_prompts
+* ⬜ 装备启停持久化（当前不保存到磁盘）
+* ⬜ 安装预览 / 版本回滚 / 测试

@@ -376,6 +376,7 @@ pub struct AgentConfig {
     #[serde(default = "default_response_capacity")]
     pub response_capacity: usize,
     #[serde(default)]
+    pub mode: String,
     pub background: BackgroundConfig,
     #[serde(default)]
     pub desktop_notification: bool,
@@ -541,6 +542,7 @@ impl Default for AgentConfig {
             background: BackgroundConfig::default(),
             desktop_notification: false,
             authority: AuthorityConfig::default(),
+            mode: "assistant".into(),
             auto_evolve: false,
         }
     }

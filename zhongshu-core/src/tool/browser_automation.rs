@@ -53,7 +53,7 @@ impl Tool for BrowserAutomationTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["open", "snapshot", "eval", "click", "type", "console", "wait", "scroll", "back", "forward", "new_tab", "press", "wait_for_selector", "select_option", "screenshot"]
+                    "enum": ["open", "snapshot", "eval", "click", "type", "console", "wait", "scroll", "back", "forward", "new_tab", "press", "wait_for_selector", "select_option", "screenshot", "network_start", "network_events", "page_errors"]
                 },
                 "url": {"type": "string", "description": "URL for open"},
                 "selector": {"type": "string", "description": "CSS selector for click/type"},
@@ -104,6 +104,9 @@ impl Tool for BrowserAutomationTool {
             },
             "wait_for_selector" => wait_for_selector(arguments).await,
             "select_option" => select_option(arguments).await,
+            "network_start" => network_start(arguments).await,
+            "network_events" => network_events(arguments).await,
+            "page_errors" => page_errors(arguments).await,
             "screenshot" => screenshot(arguments).await,
             other => Err(anyhow::anyhow!(
                 "unknown browser_automation action '{other}'"
@@ -721,4 +724,50 @@ mod tests {
         assert_eq!(cleaned["page"]["text"], "helloworld");
         assert_eq!(cleaned["page"]["elements"][0]["label"], "提交");
     }
+}
+
+/// Classify browser action risk level.
+fn action_risk(action: &str) -> &'static str {
+    match action {
+        "open" | "snapshot" | "eval" | "console" | "wait" | "scroll" | "screenshot" => "read",
+        "click" | "type" | "press" | "select_option" | "wait_for_selector" => "interact",
+        "new_tab" | "back" | "forward" => "navigate",
+        _ => "unknown",
+    }
+}
+
+async fn network_start(_args: &Value) -> anyhow::Result<Value> {
+    let mut browser = ensure_browser().await?;
+    let browser = browser.as_mut().expect("browser initialized");
+    let tab = browser.active_tab().await?;
+    browser
+        .command(&tab.websocket_url, "Network.enable", json!({}))
+        .await?;
+    let result = browser.evaluate(&tab.websocket_url,
+        r#"if(!window.__zhongshuNetwork)window.__zhongshuNetwork=[];(()=>{const orig=fetch;window.fetch=function(){const args=arguments;return orig.apply(this,arguments).then(r=>{window.__zhongshuNetwork.push({url:args[0],status:r.status,ok:r.ok,time:Date.now()});return r}).catch(e=>{window.__zhongshuNetwork.push({url:args[0],error:e.message,time:Date.now()});throw e})}})();(()=>{const orig=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(){const url=arguments[1];this.addEventListener('loadend',function(){window.__zhongshuNetwork.push({url:url,status:this.status,ok:this.status>=200&&this.status<300,time:Date.now()})});return orig.apply(this,arguments)}})();true"#, true).await?;
+    Ok(sanitize_external_value(
+        json!({"action":"network_start","result":result}),
+    ))
+}
+
+async fn network_events(_args: &Value) -> anyhow::Result<Value> {
+    let mut browser = ensure_browser().await?;
+    let browser = browser.as_mut().expect("browser initialized");
+    let tab = browser.active_tab().await?;
+    let result = browser.evaluate(&tab.websocket_url,
+        r#"(()=>{const arr=window.__zhongshuNetwork||[];window.__zhongshuNetwork=[];return JSON.stringify(arr.slice(-50))})()"#, true).await?;
+    Ok(sanitize_external_value(
+        json!({"action":"network_events","events":result}),
+    ))
+}
+
+async fn page_errors(_args: &Value) -> anyhow::Result<Value> {
+    let mut browser = ensure_browser().await?;
+    let browser = browser.as_mut().expect("browser initialized");
+    let tab = browser.active_tab().await?;
+    let result = browser.evaluate(&tab.websocket_url,
+        r#"(()=>{const arr=window.__zhongshuErrors||[];window.__zhongshuErrors=[];try{window.onerror=(m,s,l,c,e)=>{window.__zhongshuErrors.push({msg:m,source:s,line:l,col:c,time:Date.now()})};window.addEventListener('unhandledrejection',e=>{window.__zhongshuErrors.push({msg:e.reason?.message||String(e.reason),type:'unhandledrejection',time:Date.now()})})}catch(e){}return JSON.stringify(arr.slice(-30))})()"#, true).await?;
+    Ok(sanitize_external_value(
+        json!({"action":"page_errors","errors":result}),
+    ))
 }

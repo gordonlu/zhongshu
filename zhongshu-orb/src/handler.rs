@@ -350,15 +350,15 @@ impl ZhongshuApp {
                     &title,
                     &format!("{} - {}", req.tool, req.command),
                 );
-            }
-            let request = AuthRequest {
-                request_id: req.id.clone(),
-                tool: req.tool.clone(),
-                source: req.source.clone(),
-                command: req.command.clone(),
-            };
-            if let Some(ref ov) = self.overlay {
-                ov.show_auth(&request);
+                let request = AuthRequest {
+                    request_id: req.id.clone(),
+                    tool: req.tool.clone(),
+                    source: req.source.clone(),
+                    command: req.command.clone(),
+                };
+                if let Some(ref ov) = self.overlay {
+                    ov.show_auth(&request);
+                }
             }
         } else {
             self.pending_auth_notified = false;

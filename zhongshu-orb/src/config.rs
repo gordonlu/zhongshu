@@ -306,6 +306,10 @@ pub struct UiConfig {
     pub overlay_width: f32,
     #[serde(default = "default_overlay_height")]
     pub overlay_height: f32,
+    #[serde(default = "default_coding_overlay_width")]
+    pub coding_overlay_width: f32,
+    #[serde(default = "default_coding_overlay_height")]
+    pub coding_overlay_height: f32,
     #[serde(default = "default_max_chat_entries")]
     pub max_chat_entries: usize,
     #[serde(default)]
@@ -318,6 +322,8 @@ impl Default for UiConfig {
             orb_size: default_orb_size(),
             overlay_width: default_overlay_width(),
             overlay_height: default_overlay_height(),
+            coding_overlay_width: default_coding_overlay_width(),
+            coding_overlay_height: default_coding_overlay_height(),
             max_chat_entries: default_max_chat_entries(),
             font_search_paths: vec![
                 // Linux common paths
@@ -349,6 +355,12 @@ fn default_overlay_width() -> f32 {
 }
 fn default_overlay_height() -> f32 {
     800.0
+}
+fn default_coding_overlay_width() -> f32 {
+    860.0
+}
+fn default_coding_overlay_height() -> f32 {
+    900.0
 }
 fn default_max_chat_entries() -> usize {
     500

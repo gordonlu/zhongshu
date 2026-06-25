@@ -9,6 +9,7 @@ const CDP_PORT: u16 = 9222;
 
 pub struct BrowserSession {
     browser: Arc<Browser>,
+    #[allow(dead_code)]
     profile_dir: PathBuf,
     pub port: u16,
 }

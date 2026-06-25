@@ -152,19 +152,16 @@ impl ZhongshuApp {
             ov.show_equipment(&items);
         }
         if let Some(eq_id) = ov.take_toggle_equipment() {
-            let was_active;
             {
                 let mut equipment = self.equipment.lock().unwrap();
                 if let Some(eq) = equipment.get_mut(&eq_id) {
-                    was_active =
+                    let is_active =
                         matches!(eq.status, zhongshu_core::equipment::EquipmentStatus::Active);
-                    eq.status = if was_active {
+                    eq.status = if is_active {
                         zhongshu_core::equipment::EquipmentStatus::Disabled
                     } else {
                         zhongshu_core::equipment::EquipmentStatus::Active
                     };
-                } else {
-                    was_active = false;
                 }
             }
             self.controller.refresh_skill_prompts();
@@ -503,12 +500,24 @@ impl ZhongshuApp {
         }
     }
 
+    fn overlay_size(&self) -> (f32, f32) {
+        if self.config.agent.mode == "coding" {
+            (
+                self.config.ui.coding_overlay_width,
+                self.config.ui.coding_overlay_height,
+            )
+        } else {
+            (self.config.ui.overlay_width, self.config.ui.overlay_height)
+        }
+    }
+
     pub fn try_open_overlay(&mut self, _el: &ActiveEventLoop) {
+        let (w, h) = self.overlay_size();
         if let Some(ref ov) = self.overlay {
-            ov.show_window(self.config.ui.overlay_width, self.config.ui.overlay_height);
+            ov.show_window(w, h);
             return;
         }
-        let ov = crate::overlay::show(self.config.ui.overlay_width, self.config.ui.overlay_height);
+        let ov = crate::overlay::show(w, h);
         // Load previous conversation from lcm.db and send to JS
         let proxy = self.proxy.clone();
         let history = self

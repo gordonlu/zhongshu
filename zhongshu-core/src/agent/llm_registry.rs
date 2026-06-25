@@ -1,4 +1,4 @@
-use crate::agent::llm::{ChatCompletionRequest, LlmProvider, Message, OpenAiProvider};
+use crate::agent::llm::{LlmProvider, OpenAiProvider};
 use std::collections::HashMap;
 use std::sync::Arc;
 

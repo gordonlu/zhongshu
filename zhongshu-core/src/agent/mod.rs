@@ -2,6 +2,7 @@ pub mod attention;
 pub mod attention_manager;
 pub mod dispatcher;
 pub mod llm;
+pub mod llm_registry;
 pub mod loop_;
 pub mod profile;
 pub mod report;

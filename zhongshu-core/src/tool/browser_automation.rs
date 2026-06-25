@@ -53,7 +53,7 @@ impl Tool for BrowserAutomationTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["open", "snapshot", "eval", "click", "type", "console", "wait", "scroll", "back", "forward", "new_tab", "press"]
+                    "enum": ["open", "snapshot", "eval", "click", "type", "console", "wait", "scroll", "back", "forward", "new_tab", "press", "wait_for_selector", "select_option"]
                 },
                 "url": {"type": "string", "description": "URL for open"},
                 "selector": {"type": "string", "description": "CSS selector for click/type"},
@@ -102,6 +102,8 @@ impl Tool for BrowserAutomationTool {
                 let k = arguments["text"].as_str().unwrap_or("");
                 eval_js(&json!({"js": format!("document.activeElement?.dispatchEvent(new KeyboardEvent('keydown',{{key:'{k}'}}));document.activeElement?.dispatchEvent(new KeyboardEvent('keyup',{{key:'{k}'}}))"),"max_length":100})).await
             },
+            "wait_for_selector" => wait_for_selector(arguments).await,
+            "select_option" => select_option(arguments).await,
             other => Err(anyhow::anyhow!(
                 "unknown browser_automation action '{other}'"
             )),
@@ -279,6 +281,62 @@ async fn type_text(args: &Value) -> anyhow::Result<Value> {
     Ok(sanitize_external_value(
         json!({"action": "type", "tab_id": tab.id, "result": result}),
     ))
+}
+
+async fn wait_for_selector(args: &Value) -> anyhow::Result<Value> {
+    let selector = args["selector"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("'selector' must be a string"))?;
+    let timeout_ms = args["ms"].as_u64().unwrap_or(5000);
+    let mut browser = ensure_browser().await?;
+    let browser = browser.as_mut().expect("browser initialized");
+    let tab = browser.active_tab().await?;
+    let result = browser
+        .evaluate(
+            &tab.websocket_url,
+            &format!(
+                "new Promise((resolve,reject) => {{const el=document.querySelector('{}');if(el)return resolve(true);const t=setTimeout(()=>{{observer.disconnect();resolve(false)}},{});const observer=new MutationObserver(()=>{{if(document.querySelector('{}')){{clearTimeout(t);observer.disconnect();resolve(true)}}}});observer.observe(document.body,{{childList:true,subtree:true}})}})",
+                selector.replace('\\', "\\\\").replace('\'', "\\'"),
+                timeout_ms,
+                selector.replace('\\', "\\\\").replace('\'', "\\'"),
+            ),
+            true,
+        )
+        .await?;
+    Ok(sanitize_external_value(json!({
+        "action": "wait_for_selector",
+        "selector": selector,
+        "found": result == "true" || result == "True",
+    })))
+}
+
+async fn select_option(args: &Value) -> anyhow::Result<Value> {
+    let selector = args["selector"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("'selector' must be a string"))?;
+    let value = args["text"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("'text' (option value/label) must be a string"))?;
+    let mut browser = ensure_browser().await?;
+    let browser = browser.as_mut().expect("browser initialized");
+    let tab = browser.active_tab().await?;
+    let escaped_sel = selector.replace('\\', "\\\\").replace('\'', "\\'");
+    let escaped_val = value.replace('\\', "\\\\").replace('\'', "\\'");
+    let result = browser
+        .evaluate(
+            &tab.websocket_url,
+            &format!(
+                "(()=>{{const sel=document.querySelector('{sel}');if(!sel)return'not found';const opt=Array.from(sel.options).find(o=>o.value==='{val}'||o.text==='{val}');if(!opt)return'option not found';sel.value=opt.value;sel.dispatchEvent(new Event('change',{{bubbles:true}}));return opt.value}})()",
+                sel = escaped_sel, val = escaped_val,
+            ),
+            true,
+        )
+        .await?;
+    Ok(sanitize_external_value(json!({
+        "action": "select_option",
+        "selector": selector,
+        "selected": result,
+    })))
 }
 
 async fn console_messages(_args: &Value) -> anyhow::Result<Value> {

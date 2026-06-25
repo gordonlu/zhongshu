@@ -568,17 +568,6 @@ fn default_system_prompt() -> String {
 
 ## 可用能力与约束
 
-### 工具选择优先级
-优先使用专用工具，而不是 shell 命令：
-- 读文件 → `read_file`（不要用 `cat`、`head`、`tail`）
-- 写文件 → `write_file`（不要用 `echo >`、`tee`）
-- 搜索文件内容 → `grep` 或 `search_files`（不要用 `shell grep`）
-- 搜索文件名 → `glob` 或 `search_files`（不要用 `shell find`）
-- 替换文件内容 → `edit`（不要用 `sed -i`）
-- 系统信息 → `system_info`（不要用 `shell cat /proc/cpuinfo`）
-- 列目录 → `list_dir`（不要用 `ls`）
-- 只在没有对应工具时才使用 `shell`。
-
 你可以使用以下工具：
 - `read_file`/`write_file`/`list_dir` — 文件读写
 - `grep` — 搜索文件内容（使用系统 grep）

@@ -63,21 +63,102 @@ pub struct LlmConfig {
     /// Max context tokens before triggering compression (0 = unlimited).
     #[serde(default = "default_max_context_tokens")]
     pub max_context_tokens: u32,
+    /// Multi-LLM profiles (Phase 7).
+    #[serde(default)]
+    pub profiles: std::collections::HashMap<String, LlmProfileData>,
+    /// Role → profile name mapping.
+    #[serde(default)]
+    pub roles: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LlmProfileData {
+    #[serde(default = "default_api_key_env")]
+    pub api_key_env: String,
+    #[serde(default = "default_api_base")]
+    pub api_base: String,
+    #[serde(default = "default_model")]
+    pub chat_model: String,
+    pub reasoning_model: Option<String>,
+    pub embedding_model: Option<String>,
+    pub temperature: Option<f32>,
+    pub max_context_tokens: Option<u32>,
 }
 
 impl Default for LlmConfig {
     fn default() -> Self {
+        let mut profiles = std::collections::HashMap::new();
+        profiles.insert(
+            "default".into(),
+            LlmProfileData {
+                api_key_env: default_api_key_env(),
+                api_base: default_api_base(),
+                chat_model: default_model(),
+                reasoning_model: Some("deepseek-v4-pro".into()),
+                embedding_model: None,
+                temperature: None,
+                max_context_tokens: None,
+            },
+        );
+        let mut roles = std::collections::HashMap::new();
+        roles.insert("primary".into(), "default".into());
+        roles.insert("worker.default".into(), "default".into());
         LlmConfig {
             api_key_env: default_api_key_env(),
             model: default_model(),
             api_base: default_api_base(),
             model_routing: ModelRoutingConfig::default(),
             max_context_tokens: default_max_context_tokens(),
+            profiles,
+            roles,
         }
     }
 }
 
 impl LlmConfig {
+    /// Build a LlmRegistry from this config, preserving backwards compat.
+    pub fn to_registry(&self) -> zhongshu_core::agent::llm_registry::LlmRegistry {
+        let mut reg = zhongshu_core::agent::llm_registry::LlmRegistry::new();
+        let profiles = if self.profiles.is_empty() {
+            // Migrate old single-profile format.
+            let mut p = std::collections::HashMap::new();
+            p.insert(
+                "default".into(),
+                LlmProfileData {
+                    api_key_env: self.api_key_env.clone(),
+                    api_base: self.api_base.clone(),
+                    chat_model: self.model.clone(),
+                    reasoning_model: None,
+                    embedding_model: None,
+                    temperature: None,
+                    max_context_tokens: Some(self.max_context_tokens),
+                },
+            );
+            reg.set_role("primary", "default");
+            reg.set_default("default");
+            p
+        } else {
+            for (role, profile) in &self.roles {
+                reg.set_role(role, profile);
+            }
+            reg.set_default("default");
+            self.profiles.clone()
+        };
+        for (name, cfg) in &profiles {
+            reg.register_raw(
+                name,
+                &cfg.api_key_env,
+                &cfg.api_base,
+                &cfg.chat_model,
+                cfg.reasoning_model.clone(),
+                cfg.embedding_model.clone(),
+                cfg.temperature,
+                cfg.max_context_tokens,
+            );
+        }
+        reg
+    }
+
     /// Resolved API key: env var takes priority, then OS keyring.
     /// The key is intentionally never read from or written to config.json.
     pub fn api_key(&self) -> String {

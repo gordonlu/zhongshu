@@ -53,7 +53,7 @@ impl Tool for BrowserAutomationTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["open", "snapshot", "eval", "click", "type", "console", "wait", "scroll", "back", "forward", "new_tab", "press", "wait_for_selector", "select_option"]
+                    "enum": ["open", "snapshot", "eval", "click", "type", "console", "wait", "scroll", "back", "forward", "new_tab", "press", "wait_for_selector", "select_option", "screenshot"]
                 },
                 "url": {"type": "string", "description": "URL for open"},
                 "selector": {"type": "string", "description": "CSS selector for click/type"},
@@ -104,6 +104,7 @@ impl Tool for BrowserAutomationTool {
             },
             "wait_for_selector" => wait_for_selector(arguments).await,
             "select_option" => select_option(arguments).await,
+            "screenshot" => screenshot(arguments).await,
             other => Err(anyhow::anyhow!(
                 "unknown browser_automation action '{other}'"
             )),
@@ -336,6 +337,28 @@ async fn select_option(args: &Value) -> anyhow::Result<Value> {
         "action": "select_option",
         "selector": selector,
         "selected": result,
+    })))
+}
+
+async fn screenshot(_args: &Value) -> anyhow::Result<Value> {
+    let mut browser = ensure_browser().await?;
+    let browser = browser.as_mut().expect("browser initialized");
+    let tab = browser.active_tab().await?;
+    let result = browser
+        .command(
+            &tab.websocket_url,
+            "Page.captureScreenshot",
+            json!({"format":"png"}),
+        )
+        .await?;
+    let data = result["data"].as_str().unwrap_or("");
+    let preview_len = data.len().min(200);
+    Ok(sanitize_external_value(json!({
+        "action": "screenshot",
+        "tab_id": tab.id,
+        "mime": "image/png",
+        "data_length": data.len(),
+        "base64_preview": &data[..preview_len],
     })))
 }
 

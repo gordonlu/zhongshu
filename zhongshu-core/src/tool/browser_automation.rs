@@ -99,8 +99,8 @@ impl Tool for BrowserAutomationTool {
             "forward" => eval_js(&json!({"js":"window.history.forward()","max_length":100})).await,
             "new_tab" => open_page(&json!({"url": arguments["url"].as_str().unwrap_or("about:blank")})).await,
             "press" => {
-                let k = arguments["text"].as_str().unwrap_or("");
-                eval_js(&json!({"js": format!("document.activeElement?.dispatchEvent(new KeyboardEvent('keydown',{{key:'{k}'}}));document.activeElement?.dispatchEvent(new KeyboardEvent('keyup',{{key:'{k}'}}))"),"max_length":100})).await
+                let k = serde_json::to_string(&arguments["text"]).unwrap_or_else(|_| "\"\"".into());
+                eval_js(&json!({"js": format!("(function(){{let k={k};document.activeElement?.dispatchEvent(new KeyboardEvent('keydown',{{key:k}}));document.activeElement?.dispatchEvent(new KeyboardEvent('keyup',{{key:k}}))}})()"),"max_length":100})).await
             },
             "wait_for_selector" => wait_for_selector(arguments).await,
             "select_option" => select_option(arguments).await,

@@ -813,6 +813,12 @@ function handleIpc(message) {
           }
         }
         break;
+      case 'mode_change':
+        currentMode = msg.mode || 'assistant';
+        var badge = document.getElementById('mode-badge');
+        badge.textContent = currentMode === 'coding' ? '💻 编码模式' : '💬 助手模式';
+        badge.style.display = 'block';
+        break;
       case 'model':
         document.getElementById('header-model').textContent = msg.label || '';
         break;

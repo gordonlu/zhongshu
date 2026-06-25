@@ -213,6 +213,12 @@ impl ZhongshuApp {
             if let Some(ref mode) = settings.mode {
                 cfg.agent.mode = mode.clone();
                 self.controller.set_mode(mode.clone());
+                // Resize window and notify frontend.
+                if let Some(ref ov) = self.overlay {
+                    let (w, h) = self.overlay_size();
+                    ov.show_window(w, h);
+                    ov.send(&serde_json::json!({"type":"mode_change","mode":mode}));
+                }
             }
             if settings.personality != "默认" && !settings.personality.is_empty() {
                 cfg.agent.personality = settings.personality;
@@ -559,6 +565,9 @@ impl ZhongshuApp {
             .collect();
         if !entries.is_empty() {
             ov.set_history(&entries, has_more);
+        }
+        if let Some(ref ov) = self.overlay.as_ref() {
+            ov.send(&serde_json::json!({"type":"mode_change","mode":self.config.agent.mode}));
         }
         self.overlay = Some(ov);
     }

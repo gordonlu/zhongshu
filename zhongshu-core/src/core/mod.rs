@@ -21,5 +21,6 @@ pub use suggestion::{SuggestionEngine, SuggestionTool};
 pub use task::{TaskPlanner, TaskRepository, TaskTool};
 
 pub mod runbook;
+pub use runbook::{Runbook, RunbookStep, RunbookStore};
 #[cfg(test)]
 mod tests;

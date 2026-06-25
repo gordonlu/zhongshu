@@ -18,13 +18,10 @@ impl BrowserSession {
         std::fs::create_dir_all(&profile_dir)?;
 
         let browser = match try_connect().await {
-            Ok(b) => {
-                info!("connected to existing Chrome on port {CDP_PORT}");
-                b
-            }
+            Ok(b) => b,
             Err(_) => {
                 info!("starting Chrome with CDP on port {CDP_PORT}");
-                let config = BrowserConfig::builder()
+                let config: BrowserConfig = BrowserConfig::builder()
                     .port(CDP_PORT)
                     .user_data_dir(&profile_dir)
                     .build()
@@ -47,11 +44,11 @@ impl BrowserSession {
 }
 
 async fn try_connect() -> Result<Browser> {
-    let config = BrowserConfig::builder()
+    let config: BrowserConfig = BrowserConfig::builder()
         .port(CDP_PORT)
         .build()
         .map_err(|e| anyhow!("connect: {e}"))?;
-    let (b, _handler) = Browser::launch(config).await?;
+    let (b, _h) = Browser::launch(config).await?;
     Ok(b)
 }
 

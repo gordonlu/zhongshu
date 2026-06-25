@@ -10,8 +10,8 @@ use zhongshu_core::equipment::{
 use crate::app::AgentController;
 use zhongshu_core::core::{
     ArtifactRepository, ArtifactType, Database, GoalRepository, GoalType, MemoryCandidateStore,
-    MemoryPolicy, ObservationStore, ObservationType, Scheduler, StepStatus, SuggestionEngine,
-    SuggestionStatus, TaskPlanner, TaskRepository, TaskStatus,
+    MemoryPolicy, ObservationStore, ObservationType, RunbookStore, Scheduler, StepStatus,
+    SuggestionEngine, SuggestionStatus, TaskPlanner, TaskRepository, TaskStatus,
 };
 use zhongshu_core::event::{Event, EventBus, GoalEvent, SuggestionEvent, TaskEvent};
 
@@ -138,6 +138,7 @@ pub fn spawn_task_executor(eb: Arc<EventBus>, provider: OpenAiProvider, core_db_
         let task_repo = TaskRepository::new(Database::new(core_db_path.clone()));
         let planner = TaskPlanner::new(Database::new(core_db_path.clone()));
         let artifact_repo = ArtifactRepository::new(Database::new(core_db_path.clone()));
+        let db_path = core_db_path.clone();
         let memory_candidates = MemoryCandidateStore::new(Database::new(core_db_path));
         let p = provider;
         while let Ok(event) = rx.recv().await {
@@ -259,15 +260,46 @@ pub fn spawn_task_executor(eb: Arc<EventBus>, provider: OpenAiProvider, core_db_
             let out = all_output.clone();
 
             if failed {
+                let _dbp = db_path.clone();
                 tokio::task::spawn_blocking(move || {
                     let _ = trepo.set_output(&tid, &out, Some("execution failed"));
                     let _ = trepo.update_status(&tid, TaskStatus::Failed);
+                    let _ = _dbp;
                     tracing::warn!("executor: task '{}' failed", ttl);
                 });
             } else {
+                let steps_for_runbook = plan_steps.clone();
+                let _dbp = db_path.clone();
                 tokio::task::spawn_blocking(move || {
                     let _ = trepo.set_output(&tid, &out, None);
                     let _ = trepo.update_status(&tid, TaskStatus::Completed);
+                    // Save runbook
+                    let rstore = RunbookStore::new(Database::new(_dbp));
+                    let _ = rstore.save(&zhongshu_core::core::Runbook {
+                        id: format!("rb-{tid}"),
+                        goal: ttl.clone(),
+                        created_at: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs().to_string())
+                            .unwrap_or_default(),
+                        total_steps: steps_for_runbook.len(),
+                        passed: steps_for_runbook
+                            .len()
+                            .saturating_sub(if failed { 0 } else { 0 }),
+                        failed: if failed { 1 } else { 0 },
+                        steps: steps_for_runbook
+                            .iter()
+                            .enumerate()
+                            .map(|(i, s)| zhongshu_core::core::RunbookStep {
+                                action: format!("step_{}", i + 1),
+                                tool: "task".into(),
+                                input: s.action.clone(),
+                                output_status: if failed { "failed" } else { "completed" }.into(),
+                                output_preview: out.chars().take(200).collect(),
+                                verification: "".into(),
+                            })
+                            .collect(),
+                    });
                     if let Ok(a) = arepo.insert(
                         ArtifactType::Report,
                         Some(&ttl),

@@ -147,6 +147,18 @@ body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMac
 /* Tasks */
 #tasks-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:1000;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
 #tasks-overlay.active{display:flex}
+#equipment-overlay,#debug-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:1000;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
+#equipment-overlay.active,#debug-overlay.active{display:flex}
+#equipment-card,#debug-card{background:var(--surface);border:1px solid var(--border-light);border-radius:12px;padding:20px;max-width:420px;width:90%;max-height:70vh;overflow-y:auto;box-shadow:0 16px 48px rgba(0,0,0,0.6)}
+.eq-item{display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:12.5px}
+.eq-item:last-child{border-bottom:none}
+.eq-name{font-weight:500}
+.eq-toggle{padding:2px 10px;border-radius:4px;cursor:pointer;font-size:11px;border:1px solid var(--border)}
+.eq-toggle.on{background:var(--success);color:#fff;border-color:var(--success)}
+.eq-toggle.off{background:transparent;color:var(--text-muted)}
+.db-event{padding:4px 0;font-size:11px;color:var(--text-dim);border-bottom:1px solid var(--border-light);font-family:monospace;line-height:1.4}
+.db-event:last-child{border-bottom:none}
+.db-time{color:var(--text-muted);margin-right:6px}
 #tasks-card{background:var(--surface);border:1px solid var(--border-light);border-radius:12px;padding:20px;max-width:400px;width:90%;max-height:70vh;overflow-y:auto;box-shadow:0 16px 48px var(--shadow)}
 #tasks-list{display:flex;flex-direction:column;gap:6px}
 .task-item{display:flex;justify-content:space-between;align-items:center;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);font-size:12.5px}
@@ -219,6 +231,7 @@ body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMac
       <svg viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.3a2 2 0 1 1-4 0V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1A2 2 0 1 1 4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.5 7A2 2 0 1 1 7.3 4.2l.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.6V3a2 2 0 1 1 4 0v.3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 1 1 20.1 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.3a2 2 0 1 1 0 4h-.3a1.7 1.7 0 0 0-1.6 1Z"/></svg>
     </button>
     <button id="btn-mode" class="icon-btn" title="切换模式">💬</button>
+    <button id="btn-equipment" class="icon-btn" title="装备" aria-label="装备">⚙</button>
   </div>
 </div>
 <div id="mode-badge" style="display:none;padding:2px 10px;font-size:11px;color:var(--text-muted);background:var(--surface);border-bottom:1px solid var(--border)"></div>
@@ -253,6 +266,24 @@ body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMac
       <button id="tasks-close" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:18px;padding:0 3px;line-height:1;opacity:0.6">✕</button>
     </div>
     <div id="tasks-list"></div>
+  </div>
+</div>
+<div id="equipment-overlay">
+  <div id="equipment-card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <h3 style="margin:0;font-size:14px;font-weight:600">装备管理</h3>
+      <button id="equipment-close" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:18px;padding:0 3px;line-height:1;opacity:0.6">✕</button>
+    </div>
+    <div id="equipment-list"></div>
+  </div>
+</div>
+<div id="debug-overlay">
+  <div id="debug-card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <h3 style="margin:0;font-size:14px;font-weight:600">Agent 调试</h3>
+      <button id="debug-close" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:18px;padding:0 3px;line-height:1;opacity:0.6">✕</button>
+    </div>
+    <div id="debug-list"></div>
   </div>
 </div>
 
@@ -732,6 +763,15 @@ function handleIpc(message) {
         document.getElementById('tasks-overlay').classList.add('active');
         break;
 
+      case 'equipment':
+        renderEquipment(msg.items);
+        document.getElementById('equipment-overlay').classList.add('active');
+        break;
+
+      case 'debug':
+        renderDebug(msg.event);
+        break;
+
       case 'settings':
         document.getElementById('set-api-key').value = msg.config.api_key || '';
         document.getElementById('set-api-key').placeholder = msg.config.api_key_saved ? '已保存；留空不变' : 'sk-...';
@@ -866,8 +906,25 @@ function cancelTask(id) {
   sendIpc({type: 'cancel_task', task_id: id});
 }
 function completeTask(id) {
-  // Complete via IPC — main.rs will handle it
   sendIpc({type: 'complete_task', task_id: id});
+}
+function renderEquipment(items) {
+  var el = document.getElementById('equipment-list');
+  if (!items || items.length === 0) { el.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:8px 0">暂无已安装装备</div>'; return; }
+  el.innerHTML = items.map(function(eq) {
+    var cls = eq.enabled ? 'on' : 'off';
+    return '<div class="eq-item"><span class="eq-name">' + escapeHtml(eq.name) + '</span><span style="font-size:11px;color:var(--text-muted)">v' + escapeHtml(eq.version) + '</span><button class="eq-toggle ' + cls + '" onclick="toggleEq(\'' + eq.id + '\')">' + (eq.enabled ? '启用' : '禁用') + '</button></div>';
+  }).join('');
+}
+function toggleEq(id) { sendIpc({type: 'toggle_equipment', id: id}); }
+var debugEvents = [];
+function renderDebug(event) {
+  debugEvents.push(event); if (debugEvents.length > 100) debugEvents.shift();
+  var el = document.getElementById('debug-list');
+  el.innerHTML = debugEvents.slice(-50).reverse().map(function(e) {
+    var time = new Date(e.time || Date.now()).toLocaleTimeString();
+    return '<div class="db-event"><span class="db-time">' + time + '</span>' + escapeHtml(e.text || e.action || JSON.stringify(e)) + '</div>';
+  }).join('');
 }
 
 document.getElementById('btn-tasks').addEventListener('click', function() {
@@ -876,11 +933,20 @@ document.getElementById('btn-tasks').addEventListener('click', function() {
 document.getElementById('tasks-close').addEventListener('click', function() {
   document.getElementById('tasks-overlay').classList.remove('active');
 });
+document.getElementById('equipment-close').addEventListener('click', function() {
+  document.getElementById('equipment-overlay').classList.remove('active');
+});
+document.getElementById('debug-close').addEventListener('click', function() {
+  document.getElementById('debug-overlay').classList.remove('active');
+});
 
 // ── UI Events ──
 document.getElementById('send').addEventListener('click', sendMessage);
 document.getElementById('stop').addEventListener('click', function() {
   sendIpc({type: 'stop'});
+});
+document.getElementById('btn-equipment').addEventListener('click', function() {
+  sendIpc({type: 'list_equipment'});
 });
 document.getElementById('btn-mode').addEventListener('click', function() {
   var next = currentMode === 'coding' ? 'assistant' : 'coding';

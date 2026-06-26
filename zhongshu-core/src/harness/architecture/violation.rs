@@ -1,7 +1,7 @@
 use std::hash::Hash;
 use std::path::PathBuf;
 
-use crate::harness::state::{OpenViolation, ViolationStatus};
+use crate::harness::state::{OpenViolation, ViolationKey, ViolationStatus};
 
 /// Deduplication key for architecture violations.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -17,6 +17,26 @@ impl From<&OpenViolation> for ViolationDedupKey {
             rule_id: v.key.rule_id.clone(),
             file_path: v.key.file_path.clone(),
             symbol_id: v.key.symbol_id.clone(),
+        }
+    }
+}
+
+impl From<&ViolationKey> for ViolationDedupKey {
+    fn from(key: &ViolationKey) -> Self {
+        ViolationDedupKey {
+            rule_id: key.rule_id.clone(),
+            file_path: key.file_path.clone(),
+            symbol_id: key.symbol_id.clone(),
+        }
+    }
+}
+
+impl From<ViolationKey> for ViolationDedupKey {
+    fn from(key: ViolationKey) -> Self {
+        ViolationDedupKey {
+            rule_id: key.rule_id,
+            file_path: key.file_path,
+            symbol_id: key.symbol_id,
         }
     }
 }

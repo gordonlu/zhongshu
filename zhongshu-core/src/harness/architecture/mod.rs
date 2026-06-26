@@ -1,5 +1,13 @@
+pub mod api;
 pub mod config;
+pub mod diff;
+pub mod feedback;
+pub mod graph;
+pub mod impact;
 pub mod index;
+pub mod layer;
+pub mod rules;
 pub mod rust_ast;
+pub mod semantic;
 pub mod symbol;
 pub mod violation;

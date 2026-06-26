@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use tokio::sync::watch;
 
 // ── Risk levels ─────────────────────────────────────────────────────
 
@@ -714,6 +715,7 @@ fn timestamp() -> String {
 
 static GLOBAL_GATE: OnceLock<Mutex<AuthorityGate>> = OnceLock::new();
 static PENDING_AUTH: OnceLock<Mutex<Option<PendingRequest>>> = OnceLock::new();
+static AUTH_TX: OnceLock<watch::Sender<Option<PendingRequest>>> = OnceLock::new();
 
 /// Full detail of a pending authorisation request (stored for UI display).
 #[derive(Debug, Clone)]
@@ -735,6 +737,16 @@ fn generate_id() -> String {
 /// Initialise the global authority gate (called once at startup).
 pub fn init(gate: AuthorityGate) {
     let _ = GLOBAL_GATE.set(Mutex::new(gate));
+}
+
+/// Get a receiver for auth state changes. The receiver yields `Some(request)`
+/// when a new auth request arrives and `None` when it is resolved.
+pub fn subscribe_auth() -> watch::Receiver<Option<PendingRequest>> {
+    let tx = AUTH_TX.get_or_init(|| {
+        let (tx, _rx) = watch::channel(None);
+        tx
+    });
+    tx.subscribe()
 }
 
 /// Approve a (tool, program) pair in the global gate.
@@ -763,13 +775,17 @@ pub fn check_tool(tool: &str) -> CheckResult {
 /// Remember the last tool / command that asked for authorisation.
 pub fn set_pending(tool: &str, program: &str, command: &str, source: &str) {
     let cell = PENDING_AUTH.get_or_init(|| Mutex::new(None));
-    *cell.lock().unwrap() = Some(PendingRequest {
+    let req = PendingRequest {
         id: generate_id(),
         tool: tool.to_string(),
         program: program.to_string(),
         command: command.to_string(),
         source: source.to_string(),
-    });
+    };
+    *cell.lock().unwrap() = Some(req.clone());
+    if let Some(tx) = AUTH_TX.get() {
+        let _ = tx.send(Some(req));
+    }
 }
 
 /// Override the source on the current pending request (called by agent loop).
@@ -777,6 +793,9 @@ pub fn set_pending_source(source: &str) {
     let cell = PENDING_AUTH.get_or_init(|| Mutex::new(None));
     if let Some(ref mut req) = *cell.lock().unwrap() {
         req.source = source.to_string();
+        if let Some(tx) = AUTH_TX.get() {
+            let _ = tx.send(Some(req.clone()));
+        }
     }
 }
 
@@ -795,7 +814,13 @@ pub fn peek_pending() -> Option<PendingRequest> {
 /// Take the most recent pending request (i.e. consume it).
 pub fn take_pending() -> Option<PendingRequest> {
     let cell = PENDING_AUTH.get_or_init(|| Mutex::new(None));
-    cell.lock().unwrap().take()
+    let req = cell.lock().unwrap().take();
+    if req.is_some() {
+        if let Some(tx) = AUTH_TX.get() {
+            let _ = tx.send(None);
+        }
+    }
+    req
 }
 
 /// Deny a pending auth request matching the given id.
@@ -806,6 +831,10 @@ pub fn deny_pending(id: &str) {
     if let Some(ref req) = *guard {
         if req.id == id {
             let _ = guard.take();
+            drop(guard);
+            if let Some(tx) = AUTH_TX.get() {
+                let _ = tx.send(None);
+            }
         } else {
             tracing::debug!(expected = %id, actual = %req.id, "deny_pending: id mismatch");
         }
@@ -819,7 +848,11 @@ pub fn approve_pending(id: &str) {
     let mut guard = cell.lock().unwrap();
     if let Some(req) = guard.take() {
         if req.id == id {
+            drop(guard);
             approve(&req.tool, &req.program);
+            if let Some(tx) = AUTH_TX.get() {
+                let _ = tx.send(None);
+            }
         } else {
             tracing::debug!(expected = %id, actual = %req.id, "approve_pending: id mismatch, restoring");
             *guard = Some(req);

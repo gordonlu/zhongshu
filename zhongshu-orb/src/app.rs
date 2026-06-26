@@ -16,9 +16,7 @@ use zhongshu_core::agent::{
     run_agent_with_context, AgentBudget, AgentCallbacks, AgentProfile, AgentRuntime, ModelRouter,
     Worker,
 };
-use zhongshu_core::core::context::{
-    ContextMessage, ContextPackBuilder, ContextRole, RecentUnit,
-};
+use zhongshu_core::core::context::{ContextMessage, ContextPackBuilder, ContextRole, RecentUnit};
 use zhongshu_core::event::{
     AgentEvent, AgentState, Event, EventBus, MessageId, ResponseEvent, ResponseRole, ResponseTx,
     ToolEvent,
@@ -337,8 +335,7 @@ impl AgentController {
             // Context compression: drop oldest history pairs when over 80%.
             if max_ctx > 0 {
                 let trigger = (max_ctx as f64 * 0.8) as usize;
-                let base_est =
-                    (sys.len() / 4) + 1 + (input.len() / 4) + 1;
+                let base_est = (sys.len() / 4) + 1 + (input.len() / 4) + 1;
 
                 // Compute how many to drop — history lock is scoped so it's
                 // released before the async proxy lock below.
@@ -488,12 +485,7 @@ impl AgentController {
 
             let r = tokio::time::timeout(
                 AGENT_TIMEOUT,
-                run_agent_with_context(
-                    &runtime,
-                    context_pack,
-                    Some(Arc::new(callbacks)),
-                    &input,
-                ),
+                run_agent_with_context(&runtime, context_pack, Some(Arc::new(callbacks)), &input),
             )
             .await;
 

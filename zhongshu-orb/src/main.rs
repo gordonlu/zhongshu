@@ -273,12 +273,12 @@ fn main() {
 
     // ── Background services ──
     services::spawn_scheduler(scheduler);
-    services::spawn_memory_evaluation(memory_policy.clone(), provider.clone());
+    services::spawn_memory_evaluation(memory_policy.clone(), llm_registry.clone());
     services::spawn_suggestion_analysis(observation_store.clone(), suggestion_engine.clone());
     services::spawn_event_observation_feed(eb.clone(), observation_store.clone());
     services::spawn_event_workflow(eb.clone(), core_db_path.clone());
-    services::spawn_task_executor(eb.clone(), provider.clone(), core_db_path.clone());
-    services::spawn_llm_suggestion_engine(provider.clone(), core_db_path.clone());
+    services::spawn_task_executor(eb.clone(), llm_registry.clone(), core_db_path.clone());
+    services::spawn_llm_suggestion_engine(llm_registry.clone(), core_db_path.clone());
     services::spawn_compensation(eb.clone(), core_db_path.clone());
 
     let memory_tool =
@@ -325,6 +325,13 @@ fn main() {
     let inbox = Arc::new(AgentInbox::new(controller.clone()));
     inbox.start();
     services::spawn_auto_evolution(observer.clone(), controller.clone(), equipment.clone());
+    services::spawn_runbook_to_skill(
+        eb.clone(),
+        llm_registry.clone(),
+        core_db_path.clone(),
+        equipment.clone(),
+        controller.clone(),
+    );
 
     let mut task_scheduler = TaskScheduler::new(Duration::from_secs(1));
 

@@ -289,26 +289,24 @@ async fn smoke_attention_manager_drains_digest_queue() {
 // realistic inputs: system prompt, state block, evidence, history, input.
 
 use zhongshu_core::core::context::{
-    ContextPackBuilder, ContextMessage, ContextRole, EvidenceBlock, EvidenceSource, RecentUnit,
+    ContextMessage, ContextPackBuilder, ContextRole, EvidenceBlock, EvidenceSource, RecentUnit,
     StateBlock, TrustLevel,
 };
 
 #[test]
 fn smoke_context_pack_full_pipeline() {
-    let evidence = vec![
-        EvidenceBlock {
-            id: "ev1".into(),
-            source: EvidenceSource::WebSearch,
-            source_id: None,
-            locator: Some("https://example.com".into()),
-            chunk_id: None,
-            span: None,
-            content: "Rust & C++ are systems languages.".into(),
-            confidence: 0.9,
-            relevance: 0.8,
-            trust: TrustLevel::Untrusted,
-        },
-    ];
+    let evidence = vec![EvidenceBlock {
+        id: "ev1".into(),
+        source: EvidenceSource::WebSearch,
+        source_id: None,
+        locator: Some("https://example.com".into()),
+        chunk_id: None,
+        span: None,
+        content: "Rust & C++ are systems languages.".into(),
+        confidence: 0.9,
+        relevance: 0.8,
+        trust: TrustLevel::Untrusted,
+    }];
 
     let state = StateBlock {
         goals: vec!["Answer the user's question".into()],
@@ -316,22 +314,20 @@ fn smoke_context_pack_full_pipeline() {
         memories: vec![],
     };
 
-    let recent = vec![
-        RecentUnit::UserAssistant {
-            user: ContextMessage {
-                role: ContextRole::User,
-                content: "What is Rust?".into(),
-                tool_call_id: None,
-                tool_calls: vec![],
-            },
-            assistant: Some(ContextMessage {
-                role: ContextRole::Assistant,
-                content: "Rust is a systems language.".into(),
-                tool_call_id: None,
-                tool_calls: vec![],
-            }),
+    let recent = vec![RecentUnit::UserAssistant {
+        user: ContextMessage {
+            role: ContextRole::User,
+            content: "What is Rust?".into(),
+            tool_call_id: None,
+            tool_calls: vec![],
         },
-    ];
+        assistant: Some(ContextMessage {
+            role: ContextRole::Assistant,
+            content: "Rust is a systems language.".into(),
+            tool_call_id: None,
+            tool_calls: vec![],
+        }),
+    }];
 
     let (pack, report) = ContextPackBuilder::new()
         .stable_system("You are a helpful assistant.".into())
@@ -357,8 +353,14 @@ fn smoke_context_pack_full_pipeline() {
     assert_eq!(msgs[1].content, "What is Rust?");
     assert_eq!(msgs[2].content, "Rust is a systems language.");
     assert!(msgs[3].content.contains("Tell me more"));
-    assert!(msgs[3].content.contains("<context>"), "input should contain context block");
-    assert!(msgs[3].content.contains("&amp;"), "evidence & should be escaped");
+    assert!(
+        msgs[3].content.contains("<context>"),
+        "input should contain context block"
+    );
+    assert!(
+        msgs[3].content.contains("&amp;"),
+        "evidence & should be escaped"
+    );
 }
 
 #[test]
@@ -386,11 +388,16 @@ fn smoke_context_pack_crops_excess_evidence() {
         .expect("build should succeed with tight budget");
 
     // Low-scored evidence should be dropped
-    assert!(!report.dropped_evidence_ids.is_empty(), "some evidence should be dropped at tight budget");
+    assert!(
+        !report.dropped_evidence_ids.is_empty(),
+        "some evidence should be dropped at tight budget"
+    );
     // All dropped IDs should be from the low-confidence group (indices 3-9)
     // Note: ev0, ev1, ev2 have same score (0.486) — if budget fits 2,
     // ev0 and ev1 kept (stable sort), ev2 also dropped.
-    let high_confidence_kept: Vec<&String> = report.dropped_evidence_ids.iter()
+    let high_confidence_kept: Vec<&String> = report
+        .dropped_evidence_ids
+        .iter()
         .filter(|id| {
             let num: u32 = id.trim_start_matches("ev").parse().unwrap_or(99);
             num < 3
@@ -400,7 +407,8 @@ fn smoke_context_pack_crops_excess_evidence() {
     assert!(
         high_confidence_kept.len() <= 1,
         "at most 1 high-confidence evidence should be dropped, got {}: {:?}",
-        high_confidence_kept.len(), high_confidence_kept,
+        high_confidence_kept.len(),
+        high_confidence_kept,
     );
     // All low-confidence evidence (3-9) should be dropped
     for i in 3..10 {

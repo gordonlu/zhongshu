@@ -103,6 +103,9 @@ impl Default for LlmConfig {
         let mut roles = std::collections::HashMap::new();
         roles.insert("primary".into(), "default".into());
         roles.insert("worker.default".into(), "default".into());
+        roles.insert("memory".into(), "default".into());
+        roles.insert("worker".into(), "default".into());
+        roles.insert("suggestion".into(), "default".into());
         LlmConfig {
             api_key_env: default_api_key_env(),
             model: default_model(),

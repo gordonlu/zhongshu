@@ -195,7 +195,9 @@ pub async fn run_agent(
 
             let output = match tokio::time::timeout(
                 runtime.budget.tool_timeout,
-                runtime.registry.execute(&tc.function.name, &tc.function.arguments),
+                runtime
+                    .registry
+                    .execute(&tc.function.name, &tc.function.arguments),
             )
             .await
             {
@@ -349,32 +351,30 @@ async fn stream_step(
 
     tokio::time::timeout(
         runtime.budget.llm_timeout,
-        runtime
-            .provider
-            .stream_chat(
-                build_request(runtime, messages),
-                Box::new(move |event| match event {
-                    StreamEvent::TextDelta(text) => {
-                        (cb.on_text)(&text);
-                        c.lock().unwrap().push_str(&text);
+        runtime.provider.stream_chat(
+            build_request(runtime, messages),
+            Box::new(move |event| match event {
+                StreamEvent::TextDelta(text) => {
+                    (cb.on_text)(&text);
+                    c.lock().unwrap().push_str(&text);
+                }
+                StreamEvent::ToolCallDelta {
+                    index: _,
+                    id: _,
+                    name,
+                    arguments: _,
+                } => {
+                    if let Some(n) = name {
+                        (cb.on_tool_start)(&n);
                     }
-                    StreamEvent::ToolCallDelta {
-                        index: _,
-                        id: _,
-                        name,
-                        arguments: _,
-                    } => {
-                        if let Some(n) = name {
-                            (cb.on_tool_start)(&n);
-                        }
-                    }
-                    StreamEvent::Finished {
-                        tool_calls: tcs, ..
-                    } => {
-                        *tc.lock().unwrap() = tcs;
-                    }
-                }),
-            ),
+                }
+                StreamEvent::Finished {
+                    tool_calls: tcs, ..
+                } => {
+                    *tc.lock().unwrap() = tcs;
+                }
+            }),
+        ),
     )
     .await
     .map_err(|_elapsed| {

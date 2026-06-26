@@ -2,7 +2,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use zhongshu_core::agent::llm::{ChatCompletionRequest, LlmProvider, OpenAiProvider};
+use zhongshu_core::agent::llm::{ChatCompletionRequest, LlmProvider};
+use zhongshu_core::agent::llm_registry::LlmRegistry;
 use zhongshu_core::equipment::{
     parse_proposal_response, EquipmentObserver, EquipmentRegistry, EquipmentType, Manifest,
 };
@@ -21,12 +22,19 @@ pub fn spawn_scheduler(scheduler: Scheduler) {
 }
 
 /// Evaluate memory candidates every 10 minutes.
-pub fn spawn_memory_evaluation(memory_policy: MemoryPolicy, provider: OpenAiProvider) {
+pub fn spawn_memory_evaluation(memory_policy: MemoryPolicy, registry: Arc<LlmRegistry>) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(600)).await;
+            let client = match registry.client_for_role("memory") {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("memory: no LLM provider: {e}");
+                    continue;
+                }
+            };
             let m = memory_policy.clone();
-            match m.evaluate_with(&provider).await {
+            match m.evaluate_with(&*client.provider).await {
                 Ok(accepted) => {
                     if !accepted.is_empty() {
                         tracing::info!(
@@ -132,7 +140,7 @@ pub fn spawn_event_workflow(eb: Arc<EventBus>, core_db_path: PathBuf) {
 }
 
 /// Listen for Task::Triggered → plan steps → run LLM per step → save output + artifact + memory.
-pub fn spawn_task_executor(eb: Arc<EventBus>, provider: OpenAiProvider, core_db_path: PathBuf) {
+pub fn spawn_task_executor(eb: Arc<EventBus>, registry: Arc<LlmRegistry>, core_db_path: PathBuf) {
     tokio::spawn(async move {
         let mut rx = eb.subscribe();
         let task_repo = TaskRepository::new(Database::new(core_db_path.clone()));
@@ -140,7 +148,6 @@ pub fn spawn_task_executor(eb: Arc<EventBus>, provider: OpenAiProvider, core_db_
         let artifact_repo = ArtifactRepository::new(Database::new(core_db_path.clone()));
         let db_path = core_db_path.clone();
         let memory_candidates = MemoryCandidateStore::new(Database::new(core_db_path));
-        let p = provider;
         while let Ok(event) = rx.recv().await {
             let (task_id, title) = match &event {
                 Event::Task(TaskEvent::Triggered { task_id, title }) => {
@@ -148,10 +155,17 @@ pub fn spawn_task_executor(eb: Arc<EventBus>, provider: OpenAiProvider, core_db_
                 }
                 _ => continue,
             };
+            let client = match registry.client_for_role("worker") {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("executor: no LLM provider: {e}");
+                    continue;
+                }
+            };
             let plnr = planner.clone();
 
             // 1. Plan the task (async LLM call)
-            let plan_steps = match plnr.plan(&task_id, &p).await {
+            let plan_steps = match plnr.plan(&task_id, &*client.provider).await {
                 Ok(steps) if !steps.is_empty() => steps,
                 Ok(_) => continue,
                 Err(e) => {
@@ -199,7 +213,7 @@ pub fn spawn_task_executor(eb: Arc<EventBus>, provider: OpenAiProvider, core_db_
                 };
 
                 let req = ChatCompletionRequest {
-                    model: "deepseek-chat".into(),
+                    model: client.model.clone(),
                     messages: vec![zhongshu_core::agent::llm::Message {
                         role: zhongshu_core::agent::llm::Role::User,
                         content: prompt,
@@ -213,7 +227,7 @@ pub fn spawn_task_executor(eb: Arc<EventBus>, provider: OpenAiProvider, core_db_
                     max_tokens: Some(2000),
                     reasoning_effort: None,
                 };
-                let step_output = match p.chat(req).await {
+                let step_output = match client.provider.chat(req).await {
                     Ok(r) => r
                         .choices
                         .into_iter()
@@ -327,13 +341,11 @@ pub fn spawn_task_executor(eb: Arc<EventBus>, provider: OpenAiProvider, core_db_
 }
 
 /// LLM-based suggestion analysis: read recent observations every 30 min.
-pub fn spawn_llm_suggestion_engine(provider: OpenAiProvider, core_db_path: PathBuf) {
+pub fn spawn_llm_suggestion_engine(registry: Arc<LlmRegistry>, core_db_path: PathBuf) {
     tokio::spawn(async move {
         let observation_store = ObservationStore::new(Database::new(core_db_path.clone()));
         let suggestion_engine = SuggestionEngine::new(Database::new(core_db_path));
-        let p = provider;
         loop {
-            use zhongshu_core::agent::llm::LlmProvider;
             tokio::time::sleep(Duration::from_secs(1800)).await;
             let recent_obs = tokio::task::spawn_blocking({
                 let o = observation_store.clone();
@@ -360,8 +372,15 @@ pub fn spawn_llm_suggestion_engine(provider: OpenAiProvider, core_db_path: PathB
                  如果没有值得关注的，返回空数组 [].\n\n观察:\n{}",
                 obs_text.join("\n"),
             );
+            let client = match registry.client_for_role("suggestion") {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("suggestion: no LLM provider: {e}");
+                    continue;
+                }
+            };
             let req = ChatCompletionRequest {
-                model: "deepseek-chat".into(),
+                model: client.model.clone(),
                 messages: vec![zhongshu_core::agent::llm::Message {
                     role: zhongshu_core::agent::llm::Role::User,
                     content: prompt,
@@ -375,7 +394,7 @@ pub fn spawn_llm_suggestion_engine(provider: OpenAiProvider, core_db_path: PathB
                 max_tokens: Some(1000),
                 reasoning_effort: None,
             };
-            let response = match p.chat(req).await {
+            let response = match client.provider.chat(req).await {
                 Ok(r) => r
                     .choices
                     .into_iter()
@@ -577,6 +596,146 @@ fn write_auto_evolve_package(
         std::fs::write(dir.join("prompt.md"), auto_evolve_prompt_md(manifest))?;
     }
     Ok(())
+}
+
+/// Extract reusable skills from completed runbooks.
+/// Listens for TaskEvent::Completed, loads the runbook, and asks the LLM
+/// to generate a skill manifest for installation.
+pub fn spawn_runbook_to_skill(
+    eb: Arc<EventBus>,
+    registry: Arc<LlmRegistry>,
+    core_db_path: PathBuf,
+    equipment: Arc<Mutex<EquipmentRegistry>>,
+    controller: Arc<AgentController>,
+) {
+    tokio::spawn(async move {
+        let mut rx = eb.subscribe();
+        while let Ok(event) = rx.recv().await {
+            let task_id = match &event {
+                Event::Task(TaskEvent::Completed { task_id, .. }) => task_id.clone(),
+                _ => continue,
+            };
+            let rb_id = format!("rb-{task_id}");
+            let rb_store = RunbookStore::new(Database::new(core_db_path.clone()));
+            let runbooks = match rb_store.list() {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!("runbook2skill: list failed: {e}");
+                    continue;
+                }
+            };
+            let runbook = match runbooks.into_iter().find(|rb| rb.id == rb_id) {
+                Some(rb) => rb,
+                None => continue,
+            };
+            // Skip trivial runbooks (too few steps to extract meaningful skill).
+            if runbook.steps.len() < 2 {
+                continue;
+            }
+            // Skip if any step failed.
+            if runbook.failed > 0 {
+                continue;
+            }
+            let client = match registry.client_for_role("worker") {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("runbook2skill: no LLM provider: {e}");
+                    continue;
+                }
+            };
+            let steps_text: String = runbook
+                .steps
+                .iter()
+                .enumerate()
+                .map(|(i, s)| format!("{}. [{}] {} — {}", i + 1, s.tool, s.action, s.input))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let prompt = format!(
+                r#"根据以下 Runbook（任务执行记录），提取一个可复用的技能。
+
+Runbook 目标：{goal}
+
+执行步骤：
+{steps}
+
+请分析这些步骤，生成一个技能 Manifest JSON。要求：
+- name：简短英文技能名（kebab-case，如 "data-analysis"）
+- version："1.0.0"
+- description：中文描述技能用途
+- type："skill"
+- tools：用到的工具列表（如 ["shell", "grep"]）
+- entry：使用默认值
+
+只返回 JSON，放在 ```json 代码块中，不要包含其他文字。
+"#,
+                goal = runbook.goal,
+                steps = steps_text,
+            );
+            let req = ChatCompletionRequest {
+                model: client.model.clone(),
+                messages: vec![zhongshu_core::agent::llm::Message::user(&prompt)],
+                stream: false,
+                temperature: Some(0.3),
+                max_tokens: Some(1500),
+                reasoning_effort: None,
+                tools: None,
+                tool_choice: None,
+            };
+            let response = match client.provider.chat(req).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!("runbook2skill: LLM call failed: {e}");
+                    continue;
+                }
+            };
+            let text = response
+                .choices
+                .first()
+                .map(|c| c.message.content.as_str())
+                .unwrap_or("");
+            let manifest = match parse_proposal_response(text) {
+                Some(m) => m,
+                None => {
+                    tracing::info!("runbook2skill: LLM declined or invalid proposal");
+                    continue;
+                }
+            };
+            if !matches!(manifest.equipment_type, EquipmentType::Skill) {
+                tracing::warn!("runbook2skill: non-skill type, skipping");
+                continue;
+            }
+            // Write package to temp dir and install.
+            let tmp = std::env::temp_dir().join(format!("zhongshu_rb2skill_{}", manifest.name));
+            if let Err(e) = std::fs::create_dir_all(&tmp) {
+                tracing::warn!("runbook2skill: failed to create temp dir: {e}");
+                continue;
+            }
+            let manifest_json = match serde_json::to_string_pretty(&manifest) {
+                Ok(j) => j,
+                Err(e) => {
+                    tracing::warn!("runbook2skill: serialize failed: {e}");
+                    let _ = std::fs::remove_dir_all(&tmp);
+                    continue;
+                }
+            };
+            if let Err(e) = write_auto_evolve_package(&tmp, &manifest, &manifest_json) {
+                tracing::warn!("runbook2skill: write package failed: {e}");
+                let _ = std::fs::remove_dir_all(&tmp);
+                continue;
+            }
+            let name = manifest.name.clone();
+            match equipment.lock().unwrap().install_from(&tmp) {
+                Ok(id) => {
+                    tracing::info!("runbook2skill: installed skill '{}' from runbook", id);
+                    controller.refresh_skill_prompts();
+                }
+                Err(e) => {
+                    tracing::warn!("runbook2skill: install failed for '{name}': {e}");
+                }
+            }
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+    });
 }
 
 fn auto_evolve_prompt_md(manifest: &Manifest) -> String {

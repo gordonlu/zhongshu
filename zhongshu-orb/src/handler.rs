@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::sync::watch;
 
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -55,6 +56,7 @@ pub struct ZhongshuApp {
     pub observer: Arc<Mutex<EquipmentObserver>>,
     pub equipment: Arc<Mutex<EquipmentRegistry>>,
     pub overlay_zoomed: bool,
+    pub auth_watch: watch::Receiver<Option<zhongshu_core::authority::PendingRequest>>,
 }
 
 impl ZhongshuApp {
@@ -76,6 +78,7 @@ impl ZhongshuApp {
             tracing::warn!("Global hotkey unavailable: {e:#}");
             HotkeyManager::passive()
         });
+        let auth_watch = zhongshu_core::authority::subscribe_auth();
         Ok(ZhongshuApp {
             config,
             controller,
@@ -104,6 +107,7 @@ impl ZhongshuApp {
             observer,
             equipment,
             overlay_zoomed: false,
+            auth_watch,
         })
     }
 
@@ -342,32 +346,35 @@ impl ZhongshuApp {
         }
     }
 
-    /// Poll for pending authority requests and show in overlay.
+    /// Check for pending authority requests via watch channel and show in overlay.
     fn poll_pending_auth(&mut self) {
-        if let Some(req) = zhongshu_core::authority::peek_pending() {
-            if !self.pending_auth_notified {
-                self.pending_auth_notified = true;
-                let title = if req.source.is_empty() {
-                    "需要授权".into()
-                } else {
-                    format!("需要授权 · {}", req.source)
-                };
-                let _ = zhongshu_core::desktop::notification::show_urgent(
-                    &title,
-                    &format!("{} - {}", req.tool, req.command),
-                );
-                let request = AuthRequest {
-                    request_id: req.id.clone(),
-                    tool: req.tool.clone(),
-                    source: req.source.clone(),
-                    command: req.command.clone(),
-                };
-                if let Some(ref ov) = self.overlay {
-                    ov.show_auth(&request);
+        if self.auth_watch.has_changed().unwrap_or(false) {
+            let req = self.auth_watch.borrow_and_update().clone();
+            if let Some(req) = req {
+                if !self.pending_auth_notified {
+                    self.pending_auth_notified = true;
+                    let title = if req.source.is_empty() {
+                        "需要授权".into()
+                    } else {
+                        format!("需要授权 · {}", req.source)
+                    };
+                    let _ = zhongshu_core::desktop::notification::show_urgent(
+                        &title,
+                        &format!("{} - {}", req.tool, req.command),
+                    );
+                    let request = AuthRequest {
+                        request_id: req.id.clone(),
+                        tool: req.tool.clone(),
+                        source: req.source.clone(),
+                        command: req.command.clone(),
+                    };
+                    if let Some(ref ov) = self.overlay {
+                        ov.show_auth(&request);
+                    }
                 }
+            } else {
+                self.pending_auth_notified = false;
             }
-        } else {
-            self.pending_auth_notified = false;
         }
     }
 

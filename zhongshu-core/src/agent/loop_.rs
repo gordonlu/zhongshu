@@ -50,14 +50,11 @@ impl Default for AgentBudget {
 }
 
 fn check_budget(
-    step: u32,
+    _step: u32,
     tool_calls_made: usize,
     consecutive_failures: u32,
     budget: &AgentBudget,
 ) -> Result<(), StopReason> {
-    if step >= budget.max_steps {
-        return Err(StopReason::MaxStepsReached);
-    }
     if tool_calls_made >= budget.max_tool_calls as usize {
         return Err(StopReason::MaxToolCallsReached);
     }
@@ -237,7 +234,7 @@ pub async fn run_agent(
                 continue;
             }
 
-            if tool_calls_made > runtime.budget.max_tool_calls as usize {
+            if tool_calls_made >= runtime.budget.max_tool_calls as usize {
                 warn!(
                     made = tool_calls_made,
                     limit = runtime.budget.max_tool_calls,
@@ -351,34 +348,41 @@ async fn stream_step(
     let c = content.clone();
     let tc = tool_calls.clone();
 
-    runtime
-        .provider
-        .stream_chat(
-            build_request(runtime, messages),
-            Box::new(move |event| match event {
-                StreamEvent::TextDelta(text) => {
-                    (cb.on_text)(&text);
-                    c.lock().unwrap().push_str(&text);
-                }
-                StreamEvent::ToolCallDelta {
-                    index: _,
-                    id: _,
-                    name,
-                    arguments: _,
-                } => {
-                    if let Some(n) = name {
-                        (cb.on_tool_start)(&n);
+    tokio::time::timeout(
+        runtime.budget.llm_timeout,
+        runtime
+            .provider
+            .stream_chat(
+                build_request(runtime, messages),
+                Box::new(move |event| match event {
+                    StreamEvent::TextDelta(text) => {
+                        (cb.on_text)(&text);
+                        c.lock().unwrap().push_str(&text);
                     }
-                }
-                StreamEvent::Finished {
-                    tool_calls: tcs, ..
-                } => {
-                    *tc.lock().unwrap() = tcs;
-                }
-            }),
-        )
-        .await
-        .context("stream chat failed")?;
+                    StreamEvent::ToolCallDelta {
+                        index: _,
+                        id: _,
+                        name,
+                        arguments: _,
+                    } => {
+                        if let Some(n) = name {
+                            (cb.on_tool_start)(&n);
+                        }
+                    }
+                    StreamEvent::Finished {
+                        tool_calls: tcs, ..
+                    } => {
+                        *tc.lock().unwrap() = tcs;
+                    }
+                }),
+            ),
+    )
+    .await
+    .map_err(|_elapsed| {
+        tracing::warn!("LLM timeout after {:?}", runtime.budget.llm_timeout);
+        anyhow::anyhow!("LLM timeout after {:?}", runtime.budget.llm_timeout)
+    })?
+    .context("stream chat failed")?;
 
     let calls: Vec<ToolCall> = tool_calls
         .lock()

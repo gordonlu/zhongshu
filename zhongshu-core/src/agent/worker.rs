@@ -33,7 +33,7 @@ impl Worker {
         task: Task,
         callbacks: Option<std::sync::Arc<AgentCallbacks>>,
     ) -> anyhow::Result<Report> {
-        let scoped_runtime = Worker::build_scoped_runtime(runtime, profile);
+        let mut scoped_runtime = Worker::build_scoped_runtime(runtime, profile);
 
         let messages = vec![
             Message::system(&profile.system_prompt),
@@ -47,7 +47,7 @@ impl Worker {
             )),
         ];
 
-        let result = run_agent(&scoped_runtime, messages, callbacks, &task.source).await?;
+        let result = run_agent(&mut scoped_runtime, messages, callbacks, &task.source).await?;
 
         let last_content = result
             .messages
@@ -99,6 +99,7 @@ impl Worker {
                 .clone()
                 .unwrap_or_else(|| runtime.model.clone()),
             reasoning_effort: profile.llm_reasoning_effort.clone(),
+            harness_state: crate::harness::HarnessState::new(),
         }
     }
 

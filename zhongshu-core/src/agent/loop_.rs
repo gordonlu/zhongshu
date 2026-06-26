@@ -93,7 +93,7 @@ pub struct AgentCallbacks {
 /// context engine, user input — everything) and passes it in.
 /// After completion the final message list is returned inside `LoopResult`.
 pub async fn run_agent(
-    runtime: &AgentRuntime,
+    runtime: &mut AgentRuntime,
     mut messages: Vec<Message>,
     callbacks: Option<Arc<AgentCallbacks>>,
     source: &str,
@@ -114,6 +114,36 @@ pub async fn run_agent(
                 tool_calls_made,
                 estimated_tokens: tokens,
             });
+        }
+
+        // Harness: pre-turn checks
+        {
+            let _ctx = crate::harness::context::HarnessContext {
+                input: messages.iter().find_map(|m| {
+                    if m.role == crate::agent::llm::Role::User { Some(m.content.clone()) } else { None }
+                }).unwrap_or_default(),
+                coding_mode: true,
+                task_description: None,
+                verification_required: false,
+            };
+
+            let phase_fb = crate::harness::phase::validate_transition(
+                runtime.harness_state.phase,
+                runtime.harness_state.phase,
+            );
+            for fb in phase_fb {
+                let text = crate::harness::render::render_feedback(&fb);
+                messages.push(Message::system(text));
+            }
+
+            let hints = crate::harness::architecture::feedback::generate_hints(
+                &crate::harness::architecture::config::default_rules(),
+                &crate::harness::architecture::layer::LayerGraph::default(),
+            );
+            for fb in hints {
+                let text = crate::harness::render::render_feedback(&fb);
+                messages.push(Message::system(text));
+            }
         }
 
         let current_tokens = estimate_total_tokens(&messages);
@@ -160,14 +190,31 @@ pub async fn run_agent(
         };
 
         if tool_calls.is_empty() {
-            messages.push(Message::assistant(content));
-            let tokens = estimate_total_tokens(&messages);
-            return Ok(LoopResult {
-                messages: std::mem::take(&mut messages),
-                stop_reason: StopReason::Finished,
-                tool_calls_made,
-                estimated_tokens: tokens,
-            });
+            // Harness: pre-finalize checks
+            let mut needs_finalize = true;
+            let finalize_actions = crate::harness::verification::gate::check(
+                &runtime.harness_state.verification,
+                &content,
+            );
+            for action in &finalize_actions {
+                if let crate::harness::action::HarnessAction::BlockFinalize { feedback } = action {
+                    let text = crate::harness::render::render_feedback(feedback);
+                    messages.push(Message::system(text));
+                    needs_finalize = false;
+                    break;
+                }
+            }
+            if needs_finalize {
+                messages.push(Message::assistant(content));
+                let tokens = estimate_total_tokens(&messages);
+                return Ok(LoopResult {
+                    messages: std::mem::take(&mut messages),
+                    stop_reason: StopReason::Finished,
+                    tool_calls_made,
+                    estimated_tokens: tokens,
+                });
+            }
+            continue;
         }
 
         messages.push(Message::assistant_with_tools(content, tool_calls.clone()));
@@ -191,6 +238,30 @@ pub async fn run_agent(
                 );
                 messages.push(Message::assistant(msg));
                 continue;
+            }
+
+            // Harness: pre-tool checks
+            {
+                let args_hash = {
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    tc.function.arguments.hash(&mut hasher);
+                    format!("{:x}", hasher.finish())
+                };
+                if let crate::harness::action::HarnessAction::BlockTool { feedback } =
+                    crate::harness::tool::loop_guard::check_duplicate(
+                        &mut runtime.harness_state.tool_loop,
+                        &tc.function.name,
+                        &args_hash,
+                    )
+                {
+                    let text = crate::harness::render::render_feedback(&feedback);
+                    messages.push(Message::tool_result(
+                        &tc.id,
+                        format!("[Harness 拦截] {}", text),
+                    ));
+                    continue;
+                }
             }
 
             let output = match tokio::time::timeout(
@@ -290,6 +361,38 @@ pub async fn run_agent(
                     ));
                 }
             }
+
+            // Harness: post-tool checks
+            {
+                let tool_success = matches!(output.status, ToolStatus::Success);
+                // Phase inference
+                if let Some(new_phase) = crate::harness::phase::infer_phase_from_event(
+                    &tc.function.name, tool_success,
+                ) {
+                    runtime.harness_state.phase = new_phase;
+                }
+
+                // Verification ledger
+                crate::harness::verification::ledger::record(
+                    &mut runtime.harness_state.verification,
+                    &tc.function.name,
+                    &tc.function.arguments,
+                    if tool_success { Some(0) } else { Some(1) },
+                    step,
+                );
+
+                // Recovery: failure fingerprint
+                if !tool_success {
+                    let err_text = output.error.as_deref().unwrap_or("unknown error");
+                    crate::harness::recovery::fingerprint::record(
+                        &mut runtime.harness_state.recovery,
+                        &tc.function.name,
+                        &tc.function.arguments,
+                        err_text,
+                        step,
+                    );
+                }
+            }
         }
     }
 
@@ -304,7 +407,7 @@ pub async fn run_agent(
 }
 
 pub async fn run_agent_with_context(
-    runtime: &AgentRuntime,
+    runtime: &mut AgentRuntime,
     context: ContextPack,
     callbacks: Option<Arc<AgentCallbacks>>,
     source: &str,

@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
 /// Cross-turn memory for all harness checkers.
+#[derive(Clone)]
 pub struct HarnessState {
     pub phase: CodingPhase,
     pub verification: VerificationState,
@@ -69,6 +70,7 @@ pub struct VerificationRecord {
     pub step: u32,
 }
 
+#[derive(Clone)]
 pub struct VerificationState {
     pub required: bool,
     pub records: Vec<VerificationRecord>,
@@ -87,6 +89,7 @@ pub struct ToolCallFingerprint {
     pub args_hash: String,
 }
 
+#[derive(Clone)]
 pub struct ToolLoopState {
     pub recent_calls: VecDeque<ToolCallFingerprint>,
     pub counts: HashMap<ToolCallFingerprint, u32>,
@@ -102,6 +105,7 @@ pub struct FailureSignature {
     pub first_seen_step: u32,
 }
 
+#[derive(Clone)]
 pub struct RecoveryState {
     pub failures: Vec<FailureSignature>,
     pub last_feedback_step: u32,
@@ -117,6 +121,7 @@ pub struct ViolationKey {
     pub symbol_id: String,
 }
 
+#[derive(Debug, Clone)]
 pub enum ViolationStatus {
     Open,
     Acknowledged,
@@ -124,6 +129,7 @@ pub enum ViolationStatus {
     Dismissed,
 }
 
+#[derive(Clone)]
 pub struct OpenViolation {
     pub key: ViolationKey,
     pub status: ViolationStatus,
@@ -132,16 +138,16 @@ pub struct OpenViolation {
     pub raised_step: u32,
 }
 
+#[derive(Clone)]
 pub struct ArchitectureState {
     pub violations: Vec<OpenViolation>,
     pub emitted_hint_ids: Vec<String>,
 }
 
 // ── Trace ────────────────────────────────────────────────────────────
-// Note: events field uses String as placeholder.
-// Task 8 replaces it with crate::harness::trace::event::HarnessEvent.
 
+#[derive(Clone)]
 pub struct TraceState {
-    pub events: Vec<String>,
+    pub events: Vec<crate::harness::trace::event::HarnessEvent>,
     pub trace_file: Option<std::path::PathBuf>,
 }

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::agent::llm::LlmProvider;
 use crate::agent::loop_::AgentBudget;
+use crate::harness::HarnessState;
 use crate::tool::ToolRegistry;
 
 /// Long-lived execution context for an agent.
@@ -19,6 +20,7 @@ pub struct AgentRuntime {
     pub model: String,
     pub budget: AgentBudget,
     pub reasoning_effort: Option<String>,
+    pub harness_state: HarnessState,
 }
 
 impl AgentRuntime {
@@ -34,6 +36,7 @@ impl AgentRuntime {
             model: model.into(),
             budget,
             reasoning_effort: None,
+            harness_state: HarnessState::new(),
         }
     }
 
@@ -50,6 +53,7 @@ impl AgentRuntime {
             model,
             budget,
             reasoning_effort: None,
+            harness_state: HarnessState::new(),
         }
     }
 

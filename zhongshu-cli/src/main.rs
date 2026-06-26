@@ -1,5 +1,6 @@
 use std::io::{self, Write};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 
@@ -74,6 +75,8 @@ async fn main() -> anyhow::Result<()> {
         max_tool_calls: 200,
         per_tool_limit: 50,
         token_limit: 384_000,
+        llm_timeout: Duration::from_secs(240),
+        tool_timeout: Duration::from_secs(120),
     };
 
     loop {

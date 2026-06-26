@@ -4,13 +4,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::loop_::AgentBudget;
 
-const MIN_STEPS: usize = 1;
-const MAX_STEPS: usize = 100;
-const MIN_TOOL_CALLS: usize = 1;
-const MAX_TOOL_CALLS: usize = 200;
-const MIN_TOKEN_LIMIT: usize = 1_000;
-const MAX_TOKEN_LIMIT: usize = 1_000_000;
-
 /// Agent 的静态配置（Profile）。
 ///
 /// Profile 不是 Agent 实现，而是 Agent 配置。
@@ -69,8 +62,7 @@ impl AgentProfile {
     /// 从 JSON 文件加载单个 Profile。
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let mut profile: AgentProfile = serde_json::from_str(&content)?;
-        profile.budget.validate(&path.display().to_string());
+        let profile: AgentProfile = serde_json::from_str(&content)?;
         Ok(profile)
     }
 
@@ -106,88 +98,30 @@ impl AgentProfile {
     /// 转换为 Worker 运行时使用的 `AgentBudget`。
     pub fn to_worker_budget(&self) -> AgentBudget {
         AgentBudget {
-            max_steps: self.budget.max_steps,
-            max_tool_calls: self.budget.max_tool_calls,
-            per_tool_limit: self.budget.per_tool_limit,
             token_limit: self.budget.token_limit,
+            ..AgentBudget::assistant_default()
         }
     }
 }
 
 /// Profile 中可序列化的预算配置。
 ///
-/// 与 `AgentBudget` 字段对应，但多了 `#[serde(default)]` 方便配置。
+/// 仅保留 `token_limit` 用于覆盖默认值，其余字段由 `AgentBudget` 的默认方法决定。
+/// 使用 `#[serde(default)]` 确保旧配置文件的向后兼容性。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentBudgetProfile {
-    #[serde(default = "default_max_steps")]
-    pub max_steps: usize,
-    #[serde(default = "default_max_tool_calls")]
-    pub max_tool_calls: usize,
-    #[serde(default = "default_per_tool_limit")]
-    pub per_tool_limit: usize,
     #[serde(default = "default_token_limit")]
     pub token_limit: usize,
 }
 
-fn default_max_steps() -> usize {
-    10
-}
-fn default_max_tool_calls() -> usize {
-    5
-}
-fn default_per_tool_limit() -> usize {
-    20
-}
 fn default_token_limit() -> usize {
     32_000
 }
 
 impl AgentBudgetProfile {
     fn from_budget(budget: &AgentBudget) -> Self {
-        let mut p = AgentBudgetProfile {
-            max_steps: budget.max_steps,
-            max_tool_calls: budget.max_tool_calls,
-            per_tool_limit: budget.per_tool_limit,
+        AgentBudgetProfile {
             token_limit: budget.token_limit,
-        };
-        p.validate("from_budget");
-        p
-    }
-
-    /// 校验预算值是否在合理范围内，越界则 clamp 并记录警告。
-    fn validate(&mut self, context: &str) {
-        if self.max_steps < MIN_STEPS || self.max_steps > MAX_STEPS {
-            tracing::warn!(
-                context,
-                field = "max_steps",
-                value = self.max_steps,
-                min = MIN_STEPS,
-                max = MAX_STEPS,
-                "clamping to range"
-            );
-            self.max_steps = self.max_steps.clamp(MIN_STEPS, MAX_STEPS);
-        }
-        if self.max_tool_calls < MIN_TOOL_CALLS || self.max_tool_calls > MAX_TOOL_CALLS {
-            tracing::warn!(
-                context,
-                field = "max_tool_calls",
-                value = self.max_tool_calls,
-                min = MIN_TOOL_CALLS,
-                max = MAX_TOOL_CALLS,
-                "clamping to range"
-            );
-            self.max_tool_calls = self.max_tool_calls.clamp(MIN_TOOL_CALLS, MAX_TOOL_CALLS);
-        }
-        if self.token_limit < MIN_TOKEN_LIMIT || self.token_limit > MAX_TOKEN_LIMIT {
-            tracing::warn!(
-                context,
-                field = "token_limit",
-                value = self.token_limit,
-                min = MIN_TOKEN_LIMIT,
-                max = MAX_TOKEN_LIMIT,
-                "clamping to range"
-            );
-            self.token_limit = self.token_limit.clamp(MIN_TOKEN_LIMIT, MAX_TOKEN_LIMIT);
         }
     }
 }
@@ -195,9 +129,6 @@ impl AgentBudgetProfile {
 impl Default for AgentBudgetProfile {
     fn default() -> Self {
         AgentBudgetProfile {
-            max_steps: default_max_steps(),
-            max_tool_calls: default_max_tool_calls(),
-            per_tool_limit: default_per_tool_limit(),
             token_limit: default_token_limit(),
         }
     }
@@ -206,6 +137,7 @@ impl Default for AgentBudgetProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn profile_default_budget() {
@@ -237,12 +169,13 @@ mod tests {
                 max_tool_calls: 3,
                 per_tool_limit: 3,
                 token_limit: 10_000,
+                llm_timeout: Duration::from_secs(60),
+                tool_timeout: Duration::from_secs(30),
             },
         );
         let json = serde_json::to_string(&p).unwrap();
         let loaded: AgentProfile = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded.name, "qintianjian");
-        assert_eq!(loaded.budget.max_steps, 5);
         assert_eq!(loaded.budget.token_limit, 10_000);
     }
 
@@ -289,11 +222,14 @@ mod tests {
                 max_tool_calls: 2,
                 per_tool_limit: 2,
                 token_limit: 5000,
+                llm_timeout: Duration::from_secs(60),
+                tool_timeout: Duration::from_secs(30),
             },
         );
         let b = p.to_worker_budget();
-        assert_eq!(b.max_steps, 3);
-        assert_eq!(b.max_tool_calls, 2);
+        // Profile only overrides token_limit; other fields use assistant_default
+        assert_eq!(b.max_steps, 80);
+        assert_eq!(b.max_tool_calls, 160);
         assert_eq!(b.token_limit, 5000);
     }
 }

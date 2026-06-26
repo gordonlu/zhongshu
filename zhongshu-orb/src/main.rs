@@ -371,6 +371,8 @@ fn main() {
             max_tool_calls: 100,
             per_tool_limit: 30,
             token_limit: 128_000,
+            llm_timeout: Duration::from_secs(240),
+            tool_timeout: Duration::from_secs(120),
         },
     ));
 

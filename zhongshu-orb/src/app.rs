@@ -314,6 +314,17 @@ impl AgentController {
         // Snapshot profile for the prompt — non‑blocking read.
         let state_block = memory.to_state_block();
 
+        // Select budget by mode.
+        let mode_str = self.mode.lock().unwrap().clone();
+        let budget = match mode_str.as_str() {
+            "coding" => AgentBudget::coding_default(),
+            _ => AgentBudget::assistant_default(),
+        };
+        let budget = AgentBudget {
+            token_limit: (max_ctx as usize).min(budget.token_limit),
+            ..budget
+        };
+
         let handle = tokio::spawn(async move {
             let aid = MessageId::new();
             let _ = tx
@@ -430,7 +441,7 @@ impl AgentController {
                 report.stable_prefix_hash,
             );
 
-            let mut runtime = AgentRuntime::new(p, t, m, AgentBudget::default());
+            let mut runtime = AgentRuntime::new(p, t, m, budget);
             runtime.reasoning_effort = reasoning_str;
 
             let tool_names = Arc::new(Mutex::new(Vec::<String>::new()));

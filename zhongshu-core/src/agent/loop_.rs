@@ -4,33 +4,67 @@ use std::time::Duration;
 use crate::agent::llm::{Message, StreamEvent, StreamToolCall, ToolCall};
 use crate::agent::runtime::AgentRuntime;
 use crate::core::context::ContextPack;
-use crate::tool::ToolStatus;
+use crate::tool::{ToolOutput, ToolStatus};
 use anyhow::Context;
 use tracing::{debug, info, warn};
-
-const DEFAULT_MAX_STEPS: usize = 100;
-const DEFAULT_MAX_TOOL_CALLS: usize = 200;
-const DEFAULT_PER_TOOL_LIMIT: usize = 50;
-const DEFAULT_TOKEN_LIMIT: usize = 384_000;
 
 /// Per-agent resource budget.
 #[derive(Debug, Clone)]
 pub struct AgentBudget {
-    pub max_steps: usize,
-    pub max_tool_calls: usize,
-    pub per_tool_limit: usize,
+    pub max_steps: u32,
+    pub max_tool_calls: u32,
+    pub per_tool_limit: u32,
     pub token_limit: usize,
+    pub llm_timeout: Duration,
+    pub tool_timeout: Duration,
+}
+
+impl AgentBudget {
+    pub fn assistant_default() -> Self {
+        Self {
+            max_steps: 80,
+            max_tool_calls: 160,
+            per_tool_limit: 40,
+            token_limit: 500_000,
+            llm_timeout: Duration::from_secs(240),
+            tool_timeout: Duration::from_secs(120),
+        }
+    }
+
+    pub fn coding_default() -> Self {
+        Self {
+            max_steps: 200,
+            max_tool_calls: 400,
+            per_tool_limit: 200,
+            token_limit: 1_000_000,
+            llm_timeout: Duration::from_secs(600),
+            tool_timeout: Duration::from_secs(300),
+        }
+    }
 }
 
 impl Default for AgentBudget {
     fn default() -> Self {
-        AgentBudget {
-            max_steps: DEFAULT_MAX_STEPS,
-            max_tool_calls: DEFAULT_MAX_TOOL_CALLS,
-            per_tool_limit: DEFAULT_PER_TOOL_LIMIT,
-            token_limit: DEFAULT_TOKEN_LIMIT,
-        }
+        Self::assistant_default()
     }
+}
+
+fn check_budget(
+    step: u32,
+    tool_calls_made: usize,
+    consecutive_failures: u32,
+    budget: &AgentBudget,
+) -> Result<(), StopReason> {
+    if step >= budget.max_steps {
+        return Err(StopReason::MaxStepsReached);
+    }
+    if tool_calls_made >= budget.max_tool_calls as usize {
+        return Err(StopReason::MaxToolCallsReached);
+    }
+    if consecutive_failures >= 3 {
+        return Err(StopReason::ToolFailurePersistent);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +108,18 @@ pub async fn run_agent(
         std::collections::HashMap::new();
 
     for step in 0..runtime.budget.max_steps {
+        if let Err(stop_reason) =
+            check_budget(step, tool_calls_made, consecutive_tool_failures, &runtime.budget)
+        {
+            let tokens = estimate_total_tokens(&messages);
+            return Ok(LoopResult {
+                messages: std::mem::take(&mut messages),
+                stop_reason,
+                tool_calls_made,
+                estimated_tokens: tokens,
+            });
+        }
+
         let current_tokens = estimate_total_tokens(&messages);
 
         if current_tokens > runtime.budget.token_limit {
@@ -140,7 +186,7 @@ pub async fn run_agent(
                 .entry(tc.function.name.clone())
                 .or_insert(0);
             *count += 1;
-            if *count >= runtime.budget.per_tool_limit as u32 {
+            if *count >= runtime.budget.per_tool_limit {
                 warn!(tool = %tc.function.name, total = *count, "tool called too many times, skipping");
                 let msg = format!(
                     "[系统：工具 {tool} 已被调用 {count} 次，跳过本次调用，请换用其他方法。]",
@@ -151,10 +197,25 @@ pub async fn run_agent(
                 continue;
             }
 
-            let output = runtime
-                .registry
-                .execute(&tc.function.name, &tc.function.arguments)
-                .await;
+            let output = match tokio::time::timeout(
+                runtime.budget.tool_timeout,
+                runtime.registry.execute(&tc.function.name, &tc.function.arguments),
+            )
+            .await
+            {
+                Ok(output) => output,
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        "Tool '{}' timed out after {:?}",
+                        tc.function.name,
+                        runtime.budget.tool_timeout
+                    );
+                    ToolOutput::error(format!(
+                        "tool '{}' timed out after {:?}",
+                        tc.function.name, runtime.budget.tool_timeout
+                    ))
+                }
+            };
 
             // AuthRequired means the tool was not actually executed.
             // Wait for the user to approve/deny before continuing.
@@ -176,7 +237,7 @@ pub async fn run_agent(
                 continue;
             }
 
-            if tool_calls_made > runtime.budget.max_tool_calls {
+            if tool_calls_made > runtime.budget.max_tool_calls as usize {
                 warn!(
                     made = tool_calls_made,
                     limit = runtime.budget.max_tool_calls,
@@ -258,11 +319,16 @@ async fn sync_step(
     runtime: &AgentRuntime,
     messages: &[Message],
 ) -> anyhow::Result<(String, Vec<ToolCall>)> {
-    let response = runtime
-        .provider
-        .chat(build_request(runtime, messages))
-        .await
-        .context("LLM chat failed")?;
+    let response = tokio::time::timeout(
+        runtime.budget.llm_timeout,
+        runtime.provider.chat(build_request(runtime, messages)),
+    )
+    .await
+    .map_err(|_elapsed| {
+        tracing::warn!("LLM timeout after {:?}", runtime.budget.llm_timeout);
+        anyhow::anyhow!("LLM timeout after {:?}", runtime.budget.llm_timeout)
+    })?;
+    let response = response.context("LLM chat failed")?;
     let choice = response
         .choices
         .into_iter()

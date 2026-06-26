@@ -39,6 +39,7 @@ rand = "0.8"
 once_cell = "1"
 tokio-tungstenite = "0.26"
 walkdir = "2"
+syn = { version = "2", features = ["full", "extra-traits"] }
 globset = "0.4"
 cargo_metadata = "0.19"
 

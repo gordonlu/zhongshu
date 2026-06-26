@@ -13,7 +13,7 @@ pub mod worker;
 pub use attention::AttentionLevel;
 pub use attention_manager::AttentionManager;
 pub use dispatcher::AttentionDispatcher;
-pub use loop_::{run_agent, AgentBudget, AgentCallbacks, LoopResult, StopReason};
+pub use loop_::{run_agent, run_agent_with_context, AgentBudget, AgentCallbacks, LoopResult, StopReason};
 pub use profile::AgentProfile;
 pub use report::Report;
 pub use router::{Complexity, ModelRouter};

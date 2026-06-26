@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use zhongshu_core::core::context::{MemorySnippet, StateBlock};
 
 // ── Data model ──────────────────────────────────────────────────────
 
@@ -68,41 +69,29 @@ impl AgentProfile {
         }
     }
 
-    pub fn to_prompt_context(&self) -> String {
-        let active_goals: Vec<_> = self
-            .goals
-            .iter()
-            .filter(|g| g.status == GoalStatus::Active)
-            .collect();
-        let pending_todos: Vec<_> = self.todos.iter().filter(|t| !t.done).collect();
-        if active_goals.is_empty() && pending_todos.is_empty() && self.long_term_memory.is_empty() {
-            return String::new();
-        }
-        let mut ctx = String::from("## 当前状态\n");
-        if !active_goals.is_empty() {
-            ctx.push_str("活跃目标:\n");
-            for g in &active_goals {
-                ctx.push_str(&format!("- {}\n", g.text));
-            }
-        }
-        if !pending_todos.is_empty() {
-            ctx.push_str("待办:\n");
-            for t in &pending_todos {
-                ctx.push_str(&format!("- [ ] {}\n", t.text));
-            }
-        }
-        if !self.long_term_memory.is_empty() {
-            let total_chars: usize = self
+    pub fn to_state_block(&self) -> StateBlock {
+        StateBlock {
+            goals: self
+                .goals
+                .iter()
+                .filter(|g| g.status == GoalStatus::Active)
+                .map(|g| g.text.clone())
+                .collect(),
+            todos: self
+                .todos
+                .iter()
+                .filter(|t| !t.done)
+                .map(|t| t.text.clone())
+                .collect(),
+            memories: self
                 .long_term_memory
                 .iter()
-                .map(|m| m.text.chars().count())
-                .sum();
-            ctx.push_str(&format!("长期记忆（{} 字符 / 上限 2000）:\n", total_chars));
-            for m in &self.long_term_memory {
-                ctx.push_str(&format!("- {}\n", m.text));
-            }
+                .map(|m| MemorySnippet {
+                    content: m.text.clone(),
+                    confidence: 1.0,
+                })
+                .collect(),
         }
-        ctx
     }
 }
 
@@ -142,11 +131,15 @@ impl AgentMemory {
         }
     }
 
-    pub fn prompt_context(&self) -> String {
+    pub fn to_state_block(&self) -> StateBlock {
         self.profile
             .try_read()
-            .map(|p| p.to_prompt_context())
-            .unwrap_or_default()
+            .map(|p| p.to_state_block())
+            .unwrap_or_else(|_| StateBlock {
+                goals: vec![],
+                todos: vec![],
+                memories: vec![],
+            })
     }
 
     /// Add a new active goal.  Deduplicates by text.
@@ -368,14 +361,14 @@ mod tests {
     }
 
     #[test]
-    fn prompt_context_shows_only_active_goals() {
+    fn state_block_shows_only_active_goals() {
         let mem = test_memory();
         mem.add_goal("active goal");
         mem.add_goal("done goal");
         mem.complete_goal("done goal");
-        let ctx = mem.prompt_context();
-        assert!(ctx.contains("active goal"));
-        assert!(!ctx.contains("done goal"));
+        let block = mem.to_state_block();
+        assert_eq!(block.goals.len(), 1);
+        assert_eq!(block.goals[0], "active goal");
     }
 
     #[test]

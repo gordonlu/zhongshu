@@ -11,9 +11,13 @@ const AGENT_TIMEOUT: Duration = Duration::from_secs(300);
 use crate::agent::AgentMemory;
 use crate::config;
 use tokio::sync::RwLock;
-use zhongshu_core::agent::llm::{Message, OpenAiProvider};
+use zhongshu_core::agent::llm::OpenAiProvider;
 use zhongshu_core::agent::{
-    run_agent, AgentBudget, AgentCallbacks, AgentProfile, AgentRuntime, ModelRouter, Worker,
+    run_agent_with_context, AgentBudget, AgentCallbacks, AgentProfile, AgentRuntime, ModelRouter,
+    Worker,
+};
+use zhongshu_core::core::context::{
+    ContextMessage, ContextPackBuilder, ContextRole, RecentUnit,
 };
 use zhongshu_core::event::{
     AgentEvent, AgentState, Event, EventBus, MessageId, ResponseEvent, ResponseRole, ResponseTx,
@@ -308,7 +312,7 @@ impl AgentController {
         let proxy = self.proxy.clone();
 
         // Snapshot profile for the prompt — non‑blocking read.
-        let profile_ctx = memory.prompt_context();
+        let state_block = memory.to_state_block();
 
         let handle = tokio::spawn(async move {
             let aid = MessageId::new();
@@ -322,15 +326,8 @@ impl AgentController {
             // Context compression: drop oldest history pairs when over 80%.
             if max_ctx > 0 {
                 let trigger = (max_ctx as f64 * 0.8) as usize;
-                let base_est = (sys.len() / 4)
-                    + 1
-                    + (input.len() / 4)
-                    + 1
-                    + if !profile_ctx.is_empty() {
-                        (profile_ctx.len() / 4) + 1
-                    } else {
-                        0
-                    };
+                let base_est =
+                    (sys.len() / 4) + 1 + (input.len() / 4) + 1;
 
                 // Compute how many to drop — history lock is scoped so it's
                 // released before the async proxy lock below.
@@ -361,21 +358,77 @@ impl AgentController {
                 }
             }
 
-            let mut msgs = vec![Message::system(&sys)];
-            if !profile_ctx.is_empty() {
-                msgs.push(Message::system(&profile_ctx));
-            }
-            {
+            let recent: Vec<RecentUnit> = {
                 let history = history_arc.lock().unwrap();
-                for (role, content) in history.iter() {
-                    match role.as_str() {
-                        "user" => msgs.push(Message::user(content)),
-                        "assistant" => msgs.push(Message::assistant(content)),
-                        _ => {}
+                let mut units = Vec::new();
+                let mut i = 0;
+                while i < history.len() {
+                    let (role, content) = &history[i];
+                    if role == "user" {
+                        if i + 1 < history.len() && history[i + 1].0 == "assistant" {
+                            let assistant_content = history[i + 1].1.clone();
+                            units.push(RecentUnit::UserAssistant {
+                                user: ContextMessage {
+                                    role: ContextRole::User,
+                                    content: content.clone(),
+                                    tool_call_id: None,
+                                    tool_calls: vec![],
+                                },
+                                assistant: Some(ContextMessage {
+                                    role: ContextRole::Assistant,
+                                    content: assistant_content,
+                                    tool_call_id: None,
+                                    tool_calls: vec![],
+                                }),
+                            });
+                            i += 2;
+                        } else {
+                            units.push(RecentUnit::Single(ContextMessage {
+                                role: ContextRole::User,
+                                content: content.clone(),
+                                tool_call_id: None,
+                                tool_calls: vec![],
+                            }));
+                            i += 1;
+                        }
+                    } else {
+                        units.push(RecentUnit::Single(ContextMessage {
+                            role: ContextRole::Assistant,
+                            content: content.clone(),
+                            tool_call_id: None,
+                            tool_calls: vec![],
+                        }));
+                        i += 1;
                     }
                 }
-            }
-            msgs.push(Message::user(input.clone()));
+                units
+            };
+
+            let (context_pack, report) = match ContextPackBuilder::new()
+                .stable_system(sys.clone())
+                .state(state_block)
+                .with_evidence(Vec::new())
+                .with_recent(recent)
+                .input(input.clone())
+                .build(max_ctx as usize)
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!("ContextPack build error: {}", e);
+                    return;
+                }
+            };
+
+            tracing::debug!(
+                "ContextPack: sys={} state={} ev={} recent={} input={} total={} hash={}",
+                report.stable_system_tokens,
+                report.state_tokens,
+                report.evidence_tokens,
+                report.recent_tokens,
+                report.input_tokens,
+                report.total_tokens,
+                report.stable_prefix_hash,
+            );
 
             let mut runtime = AgentRuntime::new(p, t, m, AgentBudget::default());
             runtime.reasoning_effort = reasoning_str;
@@ -417,7 +470,12 @@ impl AgentController {
 
             let r = tokio::time::timeout(
                 AGENT_TIMEOUT,
-                run_agent(&runtime, msgs, Some(Arc::new(callbacks)), &input),
+                run_agent_with_context(
+                    &runtime,
+                    context_pack,
+                    Some(Arc::new(callbacks)),
+                    &input,
+                ),
             )
             .await;
 

@@ -131,9 +131,9 @@ impl ContextPack {
             ];
             for block in &self.evidence {
                 let escaped = block.content
+                    .replace('&', "&amp;")
                     .replace('<', "&lt;")
-                    .replace('>', "&gt;")
-                    .replace('&', "&amp;");
+                    .replace('>', "&gt;");
                 ev_lines.push(format!(
                     "\n[{}]\nsource={} locator={} confidence={} relevance={}\n---\n{}\n---",
                     block.id,

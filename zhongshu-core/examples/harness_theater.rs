@@ -12,10 +12,10 @@
 use std::path::PathBuf;
 
 use zhongshu_core::harness::action::{Confidence, HarnessAction, Severity};
-use zhongshu_core::harness::state::{HarnessState, OpenViolation, ViolationKey, ViolationStatus};
-use zhongshu_core::harness::verification::{gate, ledger};
-use zhongshu_core::harness::tool::loop_guard as tool_loop;
 use zhongshu_core::harness::phase;
+use zhongshu_core::harness::state::{HarnessState, OpenViolation, ViolationKey, ViolationStatus};
+use zhongshu_core::harness::tool::loop_guard as tool_loop;
+use zhongshu_core::harness::verification::{gate, ledger};
 
 // ── Scenario types ───────────────────────────────────────────────────
 
@@ -39,10 +39,18 @@ struct DemoToolResult {
 
 impl DemoToolResult {
     fn ok() -> Self {
-        DemoToolResult { success: true, exit_code: Some(0), changed_files: vec![] }
+        DemoToolResult {
+            success: true,
+            exit_code: Some(0),
+            changed_files: vec![],
+        }
     }
     fn mutation(files: Vec<&'static str>) -> Self {
-        DemoToolResult { success: true, exit_code: Some(0), changed_files: files }
+        DemoToolResult {
+            success: true,
+            exit_code: Some(0),
+            changed_files: files,
+        }
     }
 }
 
@@ -61,8 +69,16 @@ fn scenario_fake_completion() -> Scenario {
         seed_violations: vec![],
         steps: vec![
             DemoStep::User("修复 bug，并确认测试通过"),
-            DemoStep::Tool { name: "read_file", args: "src/lib.rs", result: DemoToolResult::ok() },
-            DemoStep::Tool { name: "edit_file", args: "src/lib.rs", result: DemoToolResult::mutation(vec!["src/lib.rs"]) },
+            DemoStep::Tool {
+                name: "read_file",
+                args: "src/lib.rs",
+                result: DemoToolResult::ok(),
+            },
+            DemoStep::Tool {
+                name: "edit_file",
+                args: "src/lib.rs",
+                result: DemoToolResult::mutation(vec!["src/lib.rs"]),
+            },
             DemoStep::Final("已修复，cargo test 已通过。"),
         ],
     }
@@ -74,8 +90,16 @@ fn scenario_stale_verification() -> Scenario {
         seed_violations: vec![],
         steps: vec![
             DemoStep::User("修复 bug，并确认测试通过"),
-            DemoStep::Tool { name: "shell", args: "cargo test", result: DemoToolResult::ok() },
-            DemoStep::Tool { name: "edit_file", args: "src/lib.rs", result: DemoToolResult::mutation(vec!["src/lib.rs"]) },
+            DemoStep::Tool {
+                name: "shell",
+                args: "cargo test",
+                result: DemoToolResult::ok(),
+            },
+            DemoStep::Tool {
+                name: "edit_file",
+                args: "src/lib.rs",
+                result: DemoToolResult::mutation(vec!["src/lib.rs"]),
+            },
             DemoStep::Final("测试通过，任务完成。"),
         ],
     }
@@ -87,9 +111,21 @@ fn scenario_duplicate_tool() -> Scenario {
         seed_violations: vec![],
         steps: vec![
             DemoStep::User("找一下 HarnessState 的定义"),
-            DemoStep::Tool { name: "grep", args: "HarnessState", result: DemoToolResult::ok() },
-            DemoStep::Tool { name: "grep", args: "HarnessState", result: DemoToolResult::ok() },
-            DemoStep::Tool { name: "grep", args: "HarnessState", result: DemoToolResult::ok() },
+            DemoStep::Tool {
+                name: "grep",
+                args: "HarnessState",
+                result: DemoToolResult::ok(),
+            },
+            DemoStep::Tool {
+                name: "grep",
+                args: "HarnessState",
+                result: DemoToolResult::ok(),
+            },
+            DemoStep::Tool {
+                name: "grep",
+                args: "HarnessState",
+                result: DemoToolResult::ok(),
+            },
             DemoStep::Final("找到了。"),
         ],
     }
@@ -116,7 +152,11 @@ fn scenario_architecture_violation() -> Scenario {
         seed_violations: violations,
         steps: vec![
             DemoStep::User("添加一个 utility 函数"),
-            DemoStep::Tool { name: "edit_file", args: "zhongshu-core/src/lib.rs", result: DemoToolResult::mutation(vec!["zhongshu-core/src/lib.rs"]) },
+            DemoStep::Tool {
+                name: "edit_file",
+                args: "zhongshu-core/src/lib.rs",
+                result: DemoToolResult::mutation(vec!["zhongshu-core/src/lib.rs"]),
+            },
             DemoStep::Final("完成。"),
         ],
     }
@@ -128,7 +168,11 @@ fn scenario_explicitly_unverified() -> Scenario {
         seed_violations: vec![],
         steps: vec![
             DemoStep::User("先给我草稿，不用跑测试"),
-            DemoStep::Tool { name: "edit_file", args: "src/lib.rs", result: DemoToolResult::mutation(vec!["src/lib.rs"]) },
+            DemoStep::Tool {
+                name: "edit_file",
+                args: "src/lib.rs",
+                result: DemoToolResult::mutation(vec!["src/lib.rs"]),
+            },
             DemoStep::Final("已完成代码草稿，未运行测试。"),
         ],
     }
@@ -159,10 +203,7 @@ fn run_with_harness(scenario: &Scenario) -> &'static str {
         match step {
             DemoStep::User(_input) => {
                 // pre_turn: phase validation and architecture hints
-                let phase_fb = phase::validate_transition(
-                    state.previous_phase,
-                    state.phase,
-                );
+                let phase_fb = phase::validate_transition(state.previous_phase, state.phase);
                 for fb in &phase_fb {
                     if fb.severity == Severity::Fatal {
                         any_blocking = true;
@@ -173,11 +214,8 @@ fn run_with_harness(scenario: &Scenario) -> &'static str {
                 step_seq += 1;
 
                 // pre_tool: loop guard check
-                let tool_action = tool_loop::check_duplicate(
-                    &mut state.tool_loop,
-                    name,
-                    &simple_hash(args),
-                );
+                let tool_action =
+                    tool_loop::check_duplicate(&mut state.tool_loop, name, &simple_hash(args));
                 if let HarnessAction::BlockTool { .. } = tool_action {
                     any_blocking = true;
                 }
@@ -234,7 +272,9 @@ fn run_with_harness(scenario: &Scenario) -> &'static str {
                 }
 
                 // pre_finalize: architecture violations
-                let blocking_violations: Vec<&OpenViolation> = state.architecture.violations
+                let blocking_violations: Vec<&OpenViolation> = state
+                    .architecture
+                    .violations
                     .iter()
                     .filter(|v| {
                         v.status == ViolationStatus::Open
@@ -250,7 +290,11 @@ fn run_with_harness(scenario: &Scenario) -> &'static str {
         }
     }
 
-    if any_blocking { "❌ blocked" } else { "✅ accepted" }
+    if any_blocking {
+        "❌ blocked"
+    } else {
+        "✅ accepted"
+    }
 }
 
 fn simple_hash(s: &str) -> String {
@@ -270,7 +314,11 @@ fn render_timeline(scenario: &Scenario) {
                 println!("  {seq:>2}. USER      {text}");
             }
             DemoStep::Tool { name, args, result } => {
-                let icon = if result.success { "✅ success" } else { "❌ failed" };
+                let icon = if result.success {
+                    "✅ success"
+                } else {
+                    "❌ failed"
+                };
                 let mutation = if result.changed_files.is_empty() {
                     String::new()
                 } else {
@@ -389,8 +437,14 @@ fn main() {
         println!("{:<44} {:>12} {:>12}", name, off, on);
     }
 
-    let bad_allowed = results.iter().filter(|(_, off, _)| *off == "✅ accepted").count();
-    let bad_blocked = results.iter().filter(|(_, _, on)| *on == "❌ blocked").count();
+    let bad_allowed = results
+        .iter()
+        .filter(|(_, off, _)| *off == "✅ accepted")
+        .count();
+    let bad_blocked = results
+        .iter()
+        .filter(|(_, _, on)| *on == "❌ blocked")
+        .count();
     println!("\nHarness prevented: {bad_blocked} / {bad_allowed} bad completions");
     println!("False positives: {} / {} allowed cases", 0, 1);
     println!();

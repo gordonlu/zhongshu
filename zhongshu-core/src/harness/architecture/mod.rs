@@ -6,6 +6,7 @@ pub mod graph;
 pub mod impact;
 pub mod index;
 pub mod layer;
+pub mod parser;
 pub mod rules;
 pub mod rust_ast;
 pub mod semantic;

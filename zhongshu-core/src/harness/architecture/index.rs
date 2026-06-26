@@ -29,15 +29,16 @@ impl ProjectIndex {
         }
     }
 
-    /// Insert or update a single file's index.
+    /// Insert or update a single file's index. Dispatches to the
+    /// appropriate language parser based on file extension.
     pub fn update_file(&mut self, path: PathBuf, content: &str) {
-        let index = super::rust_ast::parse_file(&path, content);
+        let index = super::parser::parse_file(&path, content);
         let items = index.items.clone();
         self.symbols.update_file(&path, &items);
         self.files.insert(path, index);
     }
 
-    /// Scan a directory recursively for .rs files.
+    /// Scan a directory recursively for supported source files.
     pub fn scan_dir(&mut self, dir: &PathBuf) {
         if !dir.exists() {
             return;
@@ -47,7 +48,7 @@ impl ProjectIndex {
             .filter_map(|e| e.ok())
         {
             let path = entry.path().to_path_buf();
-            if path.extension().map(|e| e == "rs").unwrap_or(false) {
+            if super::parser::detect_language(&path).is_some() {
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     self.update_file(path, &content);
                 }

@@ -118,17 +118,10 @@ pub async fn run_agent(
 
         // Harness: pre-turn checks
         {
-            let _ctx = crate::harness::context::HarnessContext {
-                input: messages.iter().find_map(|m| {
-                    if m.role == crate::agent::llm::Role::User { Some(m.content.clone()) } else { None }
-                }).unwrap_or_default(),
-                coding_mode: true,
-                task_description: None,
-                verification_required: false,
-            };
-
+            // Phase transitions: compare phase from BEFORE this turn's post-tool
+            // updates (saved in previous_phase) with the current phase.
             let phase_fb = crate::harness::phase::validate_transition(
-                runtime.harness_state.phase,
+                runtime.harness_state.previous_phase,
                 runtime.harness_state.phase,
             );
             for fb in phase_fb {
@@ -192,16 +185,40 @@ pub async fn run_agent(
         if tool_calls.is_empty() {
             // Harness: pre-finalize checks
             let mut needs_finalize = true;
-            let finalize_actions = crate::harness::verification::gate::check(
+
+            // Check verification gate (anti-fake-completion)
+            let v_actions = crate::harness::verification::gate::check(
                 &runtime.harness_state.verification,
                 &content,
             );
-            for action in &finalize_actions {
+            for action in &v_actions {
                 if let crate::harness::action::HarnessAction::BlockFinalize { feedback } = action {
                     let text = crate::harness::render::render_feedback(feedback);
                     messages.push(Message::system(text));
                     needs_finalize = false;
                     break;
+                }
+            }
+
+            // Check unresolved architecture violations
+            if needs_finalize {
+                let open_count = runtime.harness_state.architecture.violations
+                    .iter()
+                    .filter(|v| matches!(v.status, crate::harness::state::ViolationStatus::Open | crate::harness::state::ViolationStatus::Acknowledged))
+                    .count();
+                if open_count > 0 {
+                    let text = crate::harness::render::render_feedback(
+                        &crate::harness::action::HarnessFeedback {
+                            source: crate::harness::action::FeedbackSource::Architecture,
+                            severity: crate::harness::action::Severity::Fatal,
+                            rule_id: "arch/unresolved_violations".into(),
+                            message: format!("还有 {} 个架构违规未解决。", open_count),
+                            suggestion: "请先修复架构违规问题。".into(),
+                            evidence: None,
+                        },
+                    );
+                    messages.push(Message::system(text));
+                    needs_finalize = false;
                 }
             }
             if needs_finalize {
@@ -365,6 +382,16 @@ pub async fn run_agent(
             // Harness: post-tool checks
             {
                 let tool_success = matches!(output.status, ToolStatus::Success);
+
+                // Update last_edit_step for mutation tools
+                let is_mutation = matches!(tc.function.name.as_str(), "edit" | "write_file");
+                if is_mutation {
+                    runtime.harness_state.verification.last_edit_step = step;
+                }
+
+                // Save previous phase before inference (for next pre_turn)
+                runtime.harness_state.previous_phase = runtime.harness_state.phase;
+
                 // Phase inference
                 if let Some(new_phase) = crate::harness::phase::infer_phase_from_event(
                     &tc.function.name, tool_success,

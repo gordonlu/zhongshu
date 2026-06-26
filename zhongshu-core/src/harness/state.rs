@@ -5,6 +5,9 @@ use std::path::PathBuf;
 #[derive(Clone)]
 pub struct HarnessState {
     pub phase: CodingPhase,
+    /// Phase before the most recent post-tool inference, used by pre_turn
+    /// to detect phase transitions.
+    pub previous_phase: CodingPhase,
     pub verification: VerificationState,
     pub tool_loop: ToolLoopState,
     pub recovery: RecoveryState,
@@ -16,6 +19,7 @@ impl HarnessState {
     pub fn new() -> Self {
         HarnessState {
             phase: CodingPhase::Understand,
+            previous_phase: CodingPhase::Understand,
             verification: VerificationState {
                 required: false,
                 records: Vec::new(),

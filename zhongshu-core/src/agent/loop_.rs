@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use crate::agent::llm::{Message, StreamEvent, StreamToolCall, ToolCall};
 use crate::agent::runtime::AgentRuntime;
+use crate::core::context::ContextPack;
 use crate::tool::ToolStatus;
 use anyhow::Context;
 use tracing::{debug, info, warn};
@@ -241,6 +242,16 @@ pub async fn run_agent(
         tool_calls_made,
         estimated_tokens: tokens,
     })
+}
+
+pub async fn run_agent_with_context(
+    runtime: &AgentRuntime,
+    context: ContextPack,
+    callbacks: Option<Arc<AgentCallbacks>>,
+    source: &str,
+) -> anyhow::Result<LoopResult> {
+    let messages = context.into_llm_messages();
+    run_agent(runtime, messages, callbacks, source).await
 }
 
 async fn sync_step(

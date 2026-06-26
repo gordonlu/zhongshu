@@ -1,3 +1,5 @@
+pub mod context;
+
 pub mod artifact;
 pub mod db;
 pub mod event;

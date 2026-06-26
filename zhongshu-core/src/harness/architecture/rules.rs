@@ -72,7 +72,9 @@ fn check_forbid_dependency(
                     key,
                     status: crate::harness::state::ViolationStatus::Open,
                     severity,
+                    confidence: crate::harness::action::Confidence::High,
                     message: format!("forbidden dependency: {} → {}", from, to),
+                    introduced_this_run: true,
                     raised_step: 0,
                 });
             }
@@ -124,7 +126,9 @@ fn check_require_symbol(
             key,
             status: crate::harness::state::ViolationStatus::Open,
             severity,
+            confidence: crate::harness::action::Confidence::High,
             message: format!("missing required symbols: {}", missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")),
+            introduced_this_run: true,
             raised_step: 0,
         });
     }

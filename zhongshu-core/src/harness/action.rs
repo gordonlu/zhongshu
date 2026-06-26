@@ -32,3 +32,10 @@ pub enum Severity {
     Fatal,
     BlockTool,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Confidence {
+    High,
+    Medium,
+    Low,
+}

@@ -67,7 +67,9 @@ mod tests {
             },
             status: ViolationStatus::Open,
             severity: Severity::Warning,
+            confidence: crate::harness::action::Confidence::High,
             message: "test".into(),
+            introduced_this_run: true,
             raised_step: 0,
         }
     }

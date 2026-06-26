@@ -125,7 +125,7 @@ pub struct ViolationKey {
     pub symbol_id: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViolationStatus {
     Open,
     Acknowledged,
@@ -138,7 +138,9 @@ pub struct OpenViolation {
     pub key: ViolationKey,
     pub status: ViolationStatus,
     pub severity: crate::harness::action::Severity,
+    pub confidence: crate::harness::action::Confidence,
     pub message: String,
+    pub introduced_this_run: bool,
     pub raised_step: u32,
 }
 

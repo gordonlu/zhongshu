@@ -200,19 +200,23 @@ pub async fn run_agent(
                 }
             }
 
-            // Check unresolved architecture violations
+            // Check unresolved architecture violations (only fatal, current-run)
             if needs_finalize {
-                let open_count = runtime.harness_state.architecture.violations
+                let blocking_count = runtime.harness_state.architecture.violations
                     .iter()
-                    .filter(|v| matches!(v.status, crate::harness::state::ViolationStatus::Open | crate::harness::state::ViolationStatus::Acknowledged))
+                    .filter(|v| {
+                        v.status == crate::harness::state::ViolationStatus::Open
+                            && v.severity == crate::harness::action::Severity::Fatal
+                            && v.introduced_this_run
+                    })
                     .count();
-                if open_count > 0 {
+                if blocking_count > 0 {
                     let text = crate::harness::render::render_feedback(
                         &crate::harness::action::HarnessFeedback {
                             source: crate::harness::action::FeedbackSource::Architecture,
                             severity: crate::harness::action::Severity::Fatal,
                             rule_id: "arch/unresolved_violations".into(),
-                            message: format!("还有 {} 个架构违规未解决。", open_count),
+                            message: format!("还有 {} 个致命架构违规未解决。", blocking_count),
                             suggestion: "请先修复架构违规问题。".into(),
                             evidence: None,
                         },
@@ -383,8 +387,12 @@ pub async fn run_agent(
             {
                 let tool_success = matches!(output.status, ToolStatus::Success);
 
-                // Update last_edit_step for mutation tools
-                let is_mutation = matches!(tc.function.name.as_str(), "edit" | "write_file");
+                // Update last_edit_step for mutation tools and shell mutations
+                let is_mutation = matches!(tc.function.name.as_str(), "edit" | "write_file")
+                    || (tc.function.name == "shell"
+                        && crate::harness::tool::transaction::workspace_has_mutations(
+                            &std::env::current_dir().unwrap_or_default(),
+                        ));
                 if is_mutation {
                     runtime.harness_state.verification.last_edit_step = step;
                 }

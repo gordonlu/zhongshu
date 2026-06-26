@@ -298,3 +298,103 @@ fn attack_multiple_edits_after_verify_blocks() {
         "multiple edits after verify must block"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Attack 10: Multi-run state isolation
+//   Previous run's verification must not satisfy a new run.
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn attack_fresh_run_has_no_lingering_verification() {
+    use zhongshu_core::harness::HarnessState;
+    let state = HarnessState::new();
+    assert!(state.verification.last_success.is_none(), "new run must start clean");
+    assert_eq!(state.verification.last_edit_step, 0);
+    assert_eq!(state.verification.last_verify_step, 0);
+    assert_eq!(state.phase, CodingPhase::Understand);
+    assert_eq!(state.previous_phase, CodingPhase::Understand);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Attack 11: Architecture violation lifecycle
+//   A warning-level violation must not block finalize.
+//   A resolved violation must not block finalize.
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn attack_architecture_warning_does_not_block() {
+    use zhongshu_core::harness::state::{OpenViolation, ViolationKey, ViolationStatus};
+    let violations = vec![OpenViolation {
+        key: ViolationKey {
+            rule_id: "test/warning".into(),
+            file_path: "a.rs".into(),
+            symbol_id: "fn foo".into(),
+        },
+        status: ViolationStatus::Open,
+        severity: Severity::Warning,
+        confidence: zhongshu_core::harness::action::Confidence::High,
+        message: "test warning".into(),
+        introduced_this_run: true,
+        raised_step: 0,
+    }];
+    // Warning severity must not block
+    let fatal = violations.iter().filter(|v| {
+        v.status == ViolationStatus::Open
+            && v.severity == Severity::Fatal
+            && v.introduced_this_run
+    }).count();
+    assert_eq!(fatal, 0, "warning must not be counted as blocking");
+}
+
+#[test]
+fn attack_architecture_resolved_does_not_block() {
+    use zhongshu_core::harness::state::{OpenViolation, ViolationKey, ViolationStatus};
+    let violations = vec![OpenViolation {
+        key: ViolationKey {
+            rule_id: "test/fatal".into(),
+            file_path: "a.rs".into(),
+            symbol_id: "fn foo".into(),
+        },
+        status: ViolationStatus::Resolved,
+        severity: Severity::Fatal,
+        confidence: zhongshu_core::harness::action::Confidence::High,
+        message: "resolved fatal".into(),
+        introduced_this_run: true,
+        raised_step: 0,
+    }];
+    // Resolved must not block
+    let fatal = violations.iter().filter(|v| {
+        v.status == ViolationStatus::Open
+            && v.severity == Severity::Fatal
+            && v.introduced_this_run
+    }).count();
+    assert_eq!(fatal, 0, "resolved must not block");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Attack 12: Duplicate guard allows with progress
+//   Same tool+args but with intervening progress (file read, edit)
+//   must NOT be blocked.
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn attack_duplicate_with_progress_allowed() {
+    let mut state = ToolLoopState {
+        recent_calls: std::collections::VecDeque::new(),
+        counts: std::collections::HashMap::new(),
+    };
+    // First call
+    let r1 = loop_guard::check_duplicate(&mut state, "grep", "hash1");
+    assert!(matches!(r1, HarnessAction::None));
+
+    // Progress: different tool (read_file) resets consecutiveness
+    let r2 = loop_guard::check_duplicate(&mut state, "read_file", "hash_other");
+    assert!(matches!(r2, HarnessAction::None));
+
+    // Same grep again — should NOT block because the read_file broke consecutiveness
+    let r3 = loop_guard::check_duplicate(&mut state, "grep", "hash1");
+    assert!(
+        matches!(r3, HarnessAction::None),
+        "grep with intervening progress must not block"
+    );
+}

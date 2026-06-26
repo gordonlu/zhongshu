@@ -19,7 +19,6 @@ pub struct ContextPackReport {
 #[derive(Debug, Clone)]
 pub enum ContextWarning {
     StableSystemExceedsCap { tokens: usize },
-    InputTruncated { original: usize, kept: usize },
     EvidenceContentTruncated { id: String },
     ContextTooLong { total: usize, limit: usize },
 }
@@ -249,7 +248,7 @@ impl ContextPackBuilder {
 
         // Sort by score ascending (lowest first), but crop from lowest
         let mut sorted: Vec<_> = evidence_with_scores;
-        sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let evidence_budget = max_context_tokens.saturating_sub(system_plus_input) / 4;
         let mut budget_remaining = evidence_budget;
@@ -342,13 +341,34 @@ impl ContextPackBuilder {
     }
 }
 
+fn estimate_tool_calls(tool_calls: &[ContextToolCall]) -> usize {
+    tool_calls
+        .iter()
+        .map(|tc| {
+            estimate_tokens(&tc.name)
+                + estimate_tokens(&tc.arguments)
+                + tc.output.as_ref().map(|o| estimate_tokens(o)).unwrap_or(0)
+        })
+        .sum()
+}
+
+fn estimate_message_tokens(msg: &ContextMessage) -> usize {
+    estimate_tokens(&msg.content)
+        + msg
+            .tool_call_id
+            .as_ref()
+            .map(|id| estimate_tokens(id))
+            .unwrap_or(0)
+        + estimate_tool_calls(&msg.tool_calls)
+}
+
 fn estimate_recent_unit_tokens(unit: &RecentUnit) -> usize {
     match unit {
         RecentUnit::UserAssistant { user, assistant } => {
-            estimate_tokens(&user.content)
+            estimate_message_tokens(user)
                 + assistant
                     .as_ref()
-                    .map(|a| estimate_tokens(&a.content))
+                    .map(estimate_message_tokens)
                     .unwrap_or(0)
         }
         RecentUnit::ToolChain {
@@ -356,17 +376,14 @@ fn estimate_recent_unit_tokens(unit: &RecentUnit) -> usize {
             tool_results,
             followup,
         } => {
-            estimate_tokens(&assistant.content)
-                + tool_results
-                    .iter()
-                    .map(|r| estimate_tokens(&r.content))
-                    .sum::<usize>()
+            estimate_message_tokens(assistant)
+                + tool_results.iter().map(estimate_message_tokens).sum::<usize>()
                 + followup
                     .as_ref()
-                    .map(|f| estimate_tokens(&f.content))
+                    .map(estimate_message_tokens)
                     .unwrap_or(0)
         }
-        RecentUnit::Single(msg) => estimate_tokens(&msg.content),
+        RecentUnit::Single(msg) => estimate_message_tokens(msg),
     }
 }
 
@@ -374,7 +391,6 @@ fn estimate_recent_unit_tokens(unit: &RecentUnit) -> usize {
 pub enum ContextBuildError {
     StableSystemTooLong(usize),
     ContextTooLong { total: usize, limit: usize },
-    MissingField(&'static str),
 }
 
 impl std::fmt::Display for ContextBuildError {
@@ -385,9 +401,6 @@ impl std::fmt::Display for ContextBuildError {
             }
             ContextBuildError::ContextTooLong { total, limit } => {
                 write!(f, "context too long: {} > {} tokens", total, limit)
-            }
-            ContextBuildError::MissingField(name) => {
-                write!(f, "required field missing: {}", name)
             }
         }
     }
@@ -463,6 +476,33 @@ mod tests {
     fn test_estimate_tokens() {
         assert!(estimate_tokens("hello") > 0);
         assert!(estimate_tokens(&"x".repeat(350)) == 100);
+    }
+
+    #[test]
+    fn test_evidence_crops_low_score_first() {
+        let evidence = vec![
+            sample_evidence("low", 0.1, 0.1),
+            sample_evidence("high", 0.9, 0.9),
+        ];
+
+        let (_pack, report) = ContextPackBuilder::new()
+            .stable_system("sys".to_string())
+            .with_evidence(evidence)
+            .input("Hi".to_string())
+            .build(200)
+            .unwrap();
+
+        assert!(!report.dropped_evidence_ids.contains(&"high".to_string()));
+    }
+
+    #[test]
+    fn test_stable_system_exceeds_cap() {
+        let long_system = "x".repeat(28_001);
+        let result = ContextPackBuilder::new()
+            .stable_system(long_system)
+            .input("Hi".to_string())
+            .build(100_000);
+        assert!(matches!(result, Err(ContextBuildError::StableSystemTooLong(_))));
     }
 
     #[test]

@@ -371,6 +371,8 @@ impl ContextPackBuilder {
             .into_iter()
             .enumerate()
             .map(|(i, e)| {
+                // Note: recency factor not yet implemented. score = relevance × confidence × source_weight.
+                // Add recency when EvidenceBlock gains a timestamp field.
                 let score = e.relevance * e.confidence * e.source.source_weight();
                 (i, score, e)
             })
@@ -699,5 +701,73 @@ mod tests {
         assert_eq!(msgs[1].content, "What is Rust?");
         assert_eq!(msgs[2].role, crate::agent::llm::Role::Assistant);
         assert_eq!(msgs[2].content, "A systems language.");
+    }
+
+    #[test]
+    fn test_into_llm_messages_tool_chain() {
+        let tool_results = vec![
+            ContextMessage {
+                role: ContextRole::Tool,
+                content: "Result: 42".to_string(),
+                tool_call_id: Some("call_1".to_string()),
+                tool_calls: vec![],
+            },
+        ];
+
+        let assistant = ContextMessage {
+            role: ContextRole::Assistant,
+            content: "Let me calculate...".to_string(),
+            tool_call_id: None,
+            tool_calls: vec![ContextToolCall {
+                id: "call_1".to_string(),
+                name: "calculate".to_string(),
+                arguments: r#"{"expr": "6*7"}"#.to_string(),
+                output: Some("42".to_string()),
+            }],
+        };
+
+        let recent = vec![RecentUnit::ToolChain {
+            assistant,
+            tool_results,
+            followup: Some(ContextMessage {
+                role: ContextRole::Assistant,
+                content: "The answer is 42.".to_string(),
+                tool_call_id: None,
+                tool_calls: vec![],
+            }),
+        }];
+
+        let pack = ContextPackBuilder::new()
+            .stable_system("sys".to_string())
+            .with_recent(recent)
+            .input("What's 6*7?".to_string())
+            .build(100_000)
+            .unwrap()
+            .0;
+
+        let msgs = pack.into_llm_messages();
+        // system + assistant(tool_calls) + tool(result) + assistant(followup) + user
+        assert!(msgs.len() >= 4, "expected at least 4 messages, got {}", msgs.len());
+
+        // Verify tool_call was attached to assistant message
+        let assistant_idx = msgs.iter().position(|m| {
+            matches!(m.role, crate::agent::llm::Role::Assistant)
+                && m.tool_calls.is_some()
+        });
+        assert!(assistant_idx.is_some(), "assistant with tool_calls not found");
+
+        // Verify tool result exists
+        let tool_idx = msgs.iter().position(|m| {
+            matches!(m.role, crate::agent::llm::Role::Tool)
+        });
+        assert!(tool_idx.is_some(), "tool result message not found");
+
+        // Verify followup
+        let followup = msgs.iter().position(|m| {
+            matches!(m.role, crate::agent::llm::Role::Assistant)
+                && m.tool_calls.is_none()
+                && m.content == "The answer is 42."
+        });
+        assert!(followup.is_some(), "followup assistant message not found");
     }
 }

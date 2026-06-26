@@ -50,7 +50,6 @@ impl Default for AgentBudget {
 }
 
 fn check_budget(
-    _step: u32,
     tool_calls_made: usize,
     consecutive_failures: u32,
     budget: &AgentBudget,
@@ -106,7 +105,7 @@ pub async fn run_agent(
 
     for step in 0..runtime.budget.max_steps {
         if let Err(stop_reason) =
-            check_budget(step, tool_calls_made, consecutive_tool_failures, &runtime.budget)
+            check_budget(tool_calls_made, consecutive_tool_failures, &runtime.budget)
         {
             let tokens = estimate_total_tokens(&messages);
             return Ok(LoopResult {

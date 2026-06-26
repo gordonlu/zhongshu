@@ -426,6 +426,13 @@ impl AgentController {
                 Ok(result) => result,
                 Err(e) => {
                     tracing::error!("ContextPack build error: {}", e);
+                    let _ = tx
+                        .send(ResponseEvent::MessageDelta {
+                            id: aid,
+                            delta: format!("context build error: {e}"),
+                        })
+                        .await;
+                    let _ = tx.send(ResponseEvent::MessageCompleted { id: aid }).await;
                     return;
                 }
             };

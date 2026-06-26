@@ -114,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
 
         let messages = vec![Message::system(SYSTEM_PROMPT), Message::user(input.clone())];
 
-        let runtime = AgentRuntime::new(
+        let mut runtime = AgentRuntime::new(
             provider.clone(),
             tools.clone(),
             model.clone(),
@@ -135,7 +135,7 @@ async fn main() -> anyhow::Result<()> {
             }),
         };
 
-        let result = run_agent(&runtime, messages, Some(Arc::new(callbacks)), "").await;
+        let result = run_agent(&mut runtime, messages, Some(Arc::new(callbacks)), "").await;
 
         match result {
             Ok(r) => {

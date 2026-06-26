@@ -485,7 +485,7 @@ impl AgentController {
 
             let r = tokio::time::timeout(
                 AGENT_TIMEOUT,
-                run_agent_with_context(&runtime, context_pack, Some(Arc::new(callbacks)), &input),
+                run_agent_with_context(&mut runtime, context_pack, Some(Arc::new(callbacks)), &input),
             )
             .await;
 

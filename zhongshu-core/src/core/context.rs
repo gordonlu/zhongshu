@@ -246,7 +246,7 @@ impl ContextPackBuilder {
         let mut kept_evidence: Vec<EvidenceBlock> = Vec::new();
         let mut dropped_evidence_ids = Vec::new();
 
-        // Sort by score ascending (lowest first), but crop from lowest
+        // Sort by score descending (highest first), keep high-scored evidence
         let mut sorted: Vec<_> = evidence_with_scores;
         sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 

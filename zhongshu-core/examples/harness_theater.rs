@@ -285,20 +285,6 @@ fn render_timeline(scenario: &Scenario) {
     }
 }
 
-fn render_detailed_block(_scenario: &Scenario, step: &DemoStep, reason: &str, detail: &str) {
-    match step {
-        DemoStep::Final(text) => {
-            println!("\n  Block:");
-            println!("    kind: {reason}");
-            println!("    claim: \"{text}\"");
-            if !detail.is_empty() {
-                println!("    detail: {detail}");
-            }
-        }
-        _ => {}
-    }
-}
-
 fn render_header(scenario: &Scenario) {
     let title = format!(" Harness Theater — {} ", scenario.name);
     let bar = "╭".to_string() + &"─".repeat(title.len() + 2) + "╮";

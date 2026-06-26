@@ -13,7 +13,7 @@ impl Tool for BrowserTool {
         "browser"
     }
     fn description(&self) -> &str {
-        "Read a web page and return its text content. Use this to check weather, read articles, inspect websites, etc. Optionally also opens the page in your default browser if you want to see it visually."
+        "Fetch a web page and return its text content. Simpler than browser_automation — no JavaScript execution. Optionally opens page in your browser."
     }
 
     fn parameters(&self) -> serde_json::Value {

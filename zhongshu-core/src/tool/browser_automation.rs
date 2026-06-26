@@ -44,7 +44,7 @@ impl Tool for BrowserAutomationTool {
     }
 
     fn description(&self) -> &str {
-        "Managed Chrome automation via DevTools Protocol. Opens Zhongshu's own Chrome profile and can open pages, inspect DOM text, run JavaScript, click selectors, type into selectors, and read console messages captured after hooks are installed."
+        "Control a Chrome browser via CDP: open pages, click, type, scroll, run JS, inspect DOM, capture console logs and screenshots. Full browser automation."
     }
 
     fn parameters(&self) -> Value {

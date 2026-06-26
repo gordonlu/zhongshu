@@ -24,7 +24,7 @@ impl Tool for SelfTestTool {
     }
 
     fn description(&self) -> &str {
-        "Run a list of integration tests. Each step calls a real tool and checks the result. Reports pass/fail per step."
+        "Execute integration tests: each step calls a real tool and validates the result. Reports pass/fail per step."
     }
 
     fn parameters(&self) -> serde_json::Value {

@@ -2,6 +2,7 @@ pub mod action;
 pub mod context;
 pub mod render;
 pub mod phase;
+pub mod architecture;
 pub mod state;
 
 // Additional modules are declared in their respective tasks:

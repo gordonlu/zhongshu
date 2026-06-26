@@ -1,5 +1,7 @@
 target/
 .deeplossless/
+.superpowers/
+docs/superpowers/
 *.db
 *.db-wal
 *.db-shm

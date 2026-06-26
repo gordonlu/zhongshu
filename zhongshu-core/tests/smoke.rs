@@ -12,7 +12,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use zhongshu_core::agent::attention::AttentionLevel;
 use zhongshu_core::agent::llm::{
-    ChatCompletionRequest, ChatCompletionResponse, FinalChoice, LlmProvider, Message, StreamEvent,
+    ChatCompletionRequest, ChatCompletionResponse, FinalChoice, LlmProvider, Message, Role,
+    StreamEvent,
 };
 use zhongshu_core::agent::{
     AgentBudget, AgentProfile, AgentRuntime, AttentionManager, Report, Worker,
@@ -280,4 +281,165 @@ async fn smoke_attention_manager_drains_digest_queue() {
         mgr.drain_digest().is_empty(),
         "second drain should be empty"
     );
+}
+
+// ── ContextPack smoke test ───────────────────────────────────────────
+//
+// Tests that ContextPackBuilder produces correct LLM messages from
+// realistic inputs: system prompt, state block, evidence, history, input.
+
+use zhongshu_core::core::context::{
+    ContextPackBuilder, ContextMessage, ContextRole, EvidenceBlock, EvidenceSource, RecentUnit,
+    StateBlock, TrustLevel,
+};
+
+#[test]
+fn smoke_context_pack_full_pipeline() {
+    let evidence = vec![
+        EvidenceBlock {
+            id: "ev1".into(),
+            source: EvidenceSource::WebSearch,
+            source_id: None,
+            locator: Some("https://example.com".into()),
+            chunk_id: None,
+            span: None,
+            content: "Rust & C++ are systems languages.".into(),
+            confidence: 0.9,
+            relevance: 0.8,
+            trust: TrustLevel::Untrusted,
+        },
+    ];
+
+    let state = StateBlock {
+        goals: vec!["Answer the user's question".into()],
+        todos: vec![],
+        memories: vec![],
+    };
+
+    let recent = vec![
+        RecentUnit::UserAssistant {
+            user: ContextMessage {
+                role: ContextRole::User,
+                content: "What is Rust?".into(),
+                tool_call_id: None,
+                tool_calls: vec![],
+            },
+            assistant: Some(ContextMessage {
+                role: ContextRole::Assistant,
+                content: "Rust is a systems language.".into(),
+                tool_call_id: None,
+                tool_calls: vec![],
+            }),
+        },
+    ];
+
+    let (pack, report) = ContextPackBuilder::new()
+        .stable_system("You are a helpful assistant.".into())
+        .state(state)
+        .with_evidence(evidence)
+        .with_recent(recent)
+        .input("Tell me more".into())
+        .build(500_000)
+        .expect("ContextPack build should succeed");
+
+    assert!(report.stable_system_tokens > 0);
+    assert!(report.state_tokens > 0);
+    assert!(report.evidence_tokens > 0);
+    assert!(report.recent_tokens > 0);
+    assert!(report.input_tokens > 0);
+    assert!(report.dropped_evidence_ids.is_empty());
+    assert_eq!(report.dropped_recent_units, 0);
+    assert!(!report.stable_prefix_hash.is_empty());
+
+    let msgs = pack.into_llm_messages();
+    assert_eq!(msgs.len(), 4, "system + user/assistant + user(input) = 4");
+    assert_eq!(msgs[0].role, Role::System, "first message should be system");
+    assert_eq!(msgs[1].content, "What is Rust?");
+    assert_eq!(msgs[2].content, "Rust is a systems language.");
+    assert!(msgs[3].content.contains("Tell me more"));
+    assert!(msgs[3].content.contains("<context>"), "input should contain context block");
+    assert!(msgs[3].content.contains("&amp;"), "evidence & should be escaped");
+}
+
+#[test]
+fn smoke_context_pack_crops_excess_evidence() {
+    let many_blocks: Vec<EvidenceBlock> = (0..10)
+        .map(|i| EvidenceBlock {
+            id: format!("ev{i}"),
+            source: EvidenceSource::WebSearch,
+            source_id: None,
+            locator: None,
+            chunk_id: None,
+            span: None,
+            content: "x".repeat(200),
+            confidence: if i < 3 { 0.9 } else { 0.1 },
+            relevance: if i < 3 { 0.9 } else { 0.1 },
+            trust: TrustLevel::Untrusted,
+        })
+        .collect();
+
+    let (_pack, report) = ContextPackBuilder::new()
+        .stable_system("sys".into())
+        .with_evidence(many_blocks)
+        .input("Hi".into())
+        .build(500)
+        .expect("build should succeed with tight budget");
+
+    // Low-scored evidence should be dropped
+    assert!(!report.dropped_evidence_ids.is_empty(), "some evidence should be dropped at tight budget");
+    // All dropped IDs should be from the low-confidence group (indices 3-9)
+    // Note: ev0, ev1, ev2 have same score (0.486) — if budget fits 2,
+    // ev0 and ev1 kept (stable sort), ev2 also dropped.
+    let high_confidence_kept: Vec<&String> = report.dropped_evidence_ids.iter()
+        .filter(|id| {
+            let num: u32 = id.trim_start_matches("ev").parse().unwrap_or(99);
+            num < 3
+        })
+        .collect();
+    // At most 1 high-confidence should be dropped (ev2, when only 2 fit)
+    assert!(
+        high_confidence_kept.len() <= 1,
+        "at most 1 high-confidence evidence should be dropped, got {}: {:?}",
+        high_confidence_kept.len(), high_confidence_kept,
+    );
+    // All low-confidence evidence (3-9) should be dropped
+    for i in 3..10 {
+        let id = format!("ev{}", i);
+        assert!(
+            report.dropped_evidence_ids.contains(&id),
+            "low-confidence ev{} should have been dropped",
+            i
+        );
+    }
+}
+
+// ── Step Budget smoke test ───────────────────────────────────────────
+
+#[test]
+fn smoke_budget_assistant_defaults() {
+    let b = AgentBudget::assistant_default();
+    assert_eq!(b.max_steps, 80);
+    assert_eq!(b.max_tool_calls, 160);
+    assert_eq!(b.per_tool_limit, 40);
+    assert_eq!(b.token_limit, 500_000);
+    assert_eq!(b.llm_timeout.as_secs(), 240);
+    assert_eq!(b.tool_timeout.as_secs(), 120);
+}
+
+#[test]
+fn smoke_budget_coding_defaults() {
+    let b = AgentBudget::coding_default();
+    assert_eq!(b.max_steps, 200);
+    assert_eq!(b.max_tool_calls, 400);
+    assert_eq!(b.per_tool_limit, 200);
+    assert_eq!(b.token_limit, 1_000_000);
+    assert_eq!(b.llm_timeout.as_secs(), 600);
+    assert_eq!(b.tool_timeout.as_secs(), 300);
+}
+
+#[test]
+fn smoke_budget_default_is_assistant() {
+    let b = AgentBudget::default();
+    assert_eq!(b.max_steps, 80);
+    assert_eq!(b.llm_timeout.as_secs(), 240);
 }

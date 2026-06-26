@@ -1,10 +1,11 @@
-use super::claim::has_verification_claim;
+use super::claim::{has_verification_claim, is_explicitly_unverified};
 use crate::harness::action::{FeedbackSource, HarnessAction, HarnessFeedback, Severity};
 use crate::harness::state::VerificationState;
 
 pub fn check(state: &VerificationState, output: &str) -> Vec<HarnessAction> {
     let mut actions = Vec::new();
     let claims_verified = has_verification_claim(output);
+    let explicitly_unverified = is_explicitly_unverified(output);
 
     if state.required && state.last_success.is_none() {
         actions.push(HarnessAction::BlockFinalize {
@@ -31,6 +32,12 @@ pub fn check(state: &VerificationState, output: &str) -> Vec<HarnessAction> {
                 evidence: None,
             },
         });
+        return actions;
+    }
+
+    // If the output explicitly says "unverified", don't enforce stale check.
+    // The agent is being honest about not having verified.
+    if explicitly_unverified {
         return actions;
     }
 

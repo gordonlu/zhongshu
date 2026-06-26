@@ -40,14 +40,24 @@ fn has_negated(output: &str, positive_keyword: &str) -> bool {
         Some(i) => i,
         None => return false,
     };
+    // Take up to the last 20 characters before the keyword (char-based, not byte-based)
     let before = &output[..idx];
-    // Check for negation keywords in the preceding 20 characters
-    let window = if before.len() > 20 {
-        &before[before.len() - 20..]
+    let before_chars: Vec<char> = before.chars().collect();
+    let window: String = if before_chars.len() > 20 {
+        before_chars[before_chars.len() - 20..].iter().collect()
     } else {
-        before
+        before_chars.iter().collect()
     };
     window.contains("没有") || window.contains("没") || window.contains("未")
+}
+
+/// Check whether the output explicitly states that verification was NOT done.
+pub fn is_explicitly_unverified(output: &str) -> bool {
+    let lower = output.to_lowercase();
+    lower.contains("未运行测试")
+        || lower.contains("unverified")
+        || lower.contains("not tested")
+        || lower.contains("not verified")
 }
 
 pub fn has_verification_claim(output: &str) -> bool {

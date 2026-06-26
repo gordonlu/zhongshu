@@ -5,6 +5,7 @@ pub mod desktop;
 pub mod digest;
 pub mod equipment;
 pub mod event;
+pub mod harness;
 pub mod heartbeat;
 pub mod integration;
 pub mod rule;

@@ -1,6 +1,6 @@
+use super::claim::has_verification_claim;
 use crate::harness::action::{FeedbackSource, HarnessAction, HarnessFeedback, Severity};
 use crate::harness::state::VerificationState;
-use super::claim::has_verification_claim;
 
 pub fn check(state: &VerificationState, output: &str) -> Vec<HarnessAction> {
     let mut actions = Vec::new();
@@ -71,7 +71,12 @@ pub fn check(state: &VerificationState, output: &str) -> Vec<HarnessAction> {
 mod tests {
     use super::*;
 
-    fn make_state(last_success_step: u32, last_fail_step: Option<u32>, last_edit: u32, last_verify: u32) -> VerificationState {
+    fn make_state(
+        last_success_step: u32,
+        last_fail_step: Option<u32>,
+        last_edit: u32,
+        last_verify: u32,
+    ) -> VerificationState {
         let mut state = VerificationState {
             required: false,
             records: Vec::new(),
@@ -106,27 +111,38 @@ mod tests {
     fn blocks_fake_claim() {
         let state = make_state(0, None, 0, 0);
         let actions = check(&state, "已完成修改，测试通过");
-        assert!(actions.iter().any(|a| matches!(a, HarnessAction::BlockFinalize { .. })));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, HarnessAction::BlockFinalize { .. })));
     }
 
     #[test]
     fn blocks_stale_verification() {
         let state = make_state(1, None, 3, 1);
         let actions = check(&state, "已完成修改");
-        assert!(actions.iter().any(|a| matches!(a, HarnessAction::BlockFinalize { .. })));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, HarnessAction::BlockFinalize { .. })));
     }
 
     #[test]
     fn allows_fresh_verification() {
         let state = make_state(3, None, 2, 3);
         let actions = check(&state, "已完成修改");
-        assert!(actions.is_empty() || actions.iter().all(|a| !matches!(a, HarnessAction::BlockFinalize { .. })));
+        assert!(
+            actions.is_empty()
+                || actions
+                    .iter()
+                    .all(|a| !matches!(a, HarnessAction::BlockFinalize { .. }))
+        );
     }
 
     #[test]
     fn blocks_failed_last_run() {
         let state = make_state(0, Some(3), 2, 3);
         let actions = check(&state, "已完成修改");
-        assert!(actions.iter().any(|a| matches!(a, HarnessAction::BlockFinalize { .. })));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, HarnessAction::BlockFinalize { .. })));
     }
 }

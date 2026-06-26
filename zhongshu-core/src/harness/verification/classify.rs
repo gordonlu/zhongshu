@@ -20,9 +20,7 @@ pub fn classify_command(command: &str) -> VerificationType {
         || cmd.starts_with("ruff check")
     {
         VerificationType::Check
-    } else if cmd.starts_with("cargo audit")
-        || cmd.starts_with("npm audit")
-    {
+    } else if cmd.starts_with("cargo audit") || cmd.starts_with("npm audit") {
         VerificationType::Audit
     } else {
         VerificationType::Unknown
@@ -36,7 +34,10 @@ mod tests {
     #[test]
     fn classify_cargo_test() {
         assert_eq!(classify_command("cargo test"), VerificationType::Test);
-        assert_eq!(classify_command("cargo test -- --skip auth"), VerificationType::Test);
+        assert_eq!(
+            classify_command("cargo test -- --skip auth"),
+            VerificationType::Test
+        );
     }
 
     #[test]

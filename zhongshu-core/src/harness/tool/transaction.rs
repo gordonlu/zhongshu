@@ -20,7 +20,11 @@ pub fn capture_diff(workspace_root: &Path) -> Option<String> {
         .ok()?;
     if output.status.success() {
         let diff = String::from_utf8_lossy(&output.stdout).to_string();
-        if diff.is_empty() { None } else { Some(diff) }
+        if diff.is_empty() {
+            None
+        } else {
+            Some(diff)
+        }
     } else {
         None
     }

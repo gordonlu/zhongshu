@@ -13,6 +13,7 @@ pub struct FileIndex {
 }
 
 /// The project-wide index, built from workspace scan and updated incrementally.
+#[derive(Debug, Clone)]
 pub struct ProjectIndex {
     pub root: PathBuf,
     pub files: HashMap<PathBuf, FileIndex>,
@@ -41,7 +42,10 @@ impl ProjectIndex {
         if !dir.exists() {
             return;
         }
-        for entry in walkdir::WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
+        for entry in walkdir::WalkDir::new(dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
             let path = entry.path().to_path_buf();
             if path.extension().map(|e| e == "rs").unwrap_or(false) {
                 if let Ok(content) = std::fs::read_to_string(&path) {
@@ -64,7 +68,10 @@ mod tests {
         // Just verify it doesn't crash and finds some files
         idx.scan_dir(&dir);
         // At minimum it should have found its own files
-        assert!(!idx.files.is_empty(), "should have found architecture files");
+        assert!(
+            !idx.files.is_empty(),
+            "should have found architecture files"
+        );
     }
 
     #[test]

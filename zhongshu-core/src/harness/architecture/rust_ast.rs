@@ -43,7 +43,11 @@ fn format_use_tree(tree: &UseTree) -> String {
         UseTree::Path(p) => {
             let segment = p.ident.to_string();
             let rest = format_use_tree(&p.tree);
-            if rest.is_empty() { segment } else { format!("{}::{}", segment, rest) }
+            if rest.is_empty() {
+                segment
+            } else {
+                format!("{}::{}", segment, rest)
+            }
         }
         UseTree::Name(n) => n.ident.to_string(),
         UseTree::Rename(r) => format!("{} as {}", r.ident, r.rename),
@@ -81,7 +85,11 @@ fn extract_items(ast: &File) -> Vec<String> {
 }
 
 fn path_to_string(path: &syn::Path) -> String {
-    path.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::")
+    path.segments
+        .iter()
+        .map(|s| s.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::")
 }
 
 #[cfg(test)]
@@ -97,7 +105,9 @@ pub fn foo() -> i32 { 42 }
 struct Bar { x: i32 }
 "#;
         let index = parse_file(&PathBuf::from("test.rs"), content);
-        assert!(index.imports.contains(&"std::collections::HashMap".to_string()));
+        assert!(index
+            .imports
+            .contains(&"std::collections::HashMap".to_string()));
         assert!(index.items.contains(&"fn foo".to_string()));
         assert!(index.items.contains(&"struct Bar".to_string()));
         assert!(index.parse_error.is_none());

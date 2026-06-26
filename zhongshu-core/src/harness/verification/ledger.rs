@@ -1,5 +1,5 @@
-use crate::harness::state::VerificationState;
 use super::classify::VerificationType;
+use crate::harness::state::VerificationState;
 
 pub fn record(
     state: &mut VerificationState,

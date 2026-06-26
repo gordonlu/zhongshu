@@ -18,14 +18,31 @@ pub fn extract_successful_run(
         }
     })?;
 
-    let tools_used: Vec<String> = events.iter().filter_map(|e| {
-        if let crate::harness::trace::event::HarnessEvent::ToolCall { ref tool_name, success, .. } = e {
-            if *success { Some(tool_name.clone()) } else { None }
-        } else { None }
-    }).collect();
+    let tools_used: Vec<String> = events
+        .iter()
+        .filter_map(|e| {
+            if let crate::harness::trace::event::HarnessEvent::ToolCall {
+                ref tool_name,
+                success,
+                ..
+            } = e
+            {
+                if *success {
+                    Some(tool_name.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
 
     let verification_passed = events.iter().any(|e| {
-        matches!(e, crate::harness::trace::event::HarnessEvent::Verification { success: true, .. })
+        matches!(
+            e,
+            crate::harness::trace::event::HarnessEvent::Verification { success: true, .. }
+        )
     });
 
     Some(SuccessfulRun {

@@ -7,7 +7,12 @@ pub fn generate_hints(rules: &[ArchitectureRule], _layers: &LayerGraph) -> Vec<H
     let mut hints = Vec::new();
     for rule in rules {
         match rule {
-            ArchitectureRule::ForbidDependency { name, from_layer, to_layer, .. } => {
+            ArchitectureRule::ForbidDependency {
+                name,
+                from_layer,
+                to_layer,
+                ..
+            } => {
                 hints.push(HarnessFeedback {
                     source: FeedbackSource::Architecture,
                     severity: Severity::Info,

@@ -41,6 +41,7 @@ impl HarnessState {
             architecture: ArchitectureState {
                 violations: Vec::new(),
                 emitted_hint_ids: Vec::new(),
+                index: None,
             },
             trace: TraceState {
                 events: Vec::new(),
@@ -148,6 +149,9 @@ pub struct OpenViolation {
 pub struct ArchitectureState {
     pub violations: Vec<OpenViolation>,
     pub emitted_hint_ids: Vec<String>,
+    /// Project index for AST-based rule evaluation. Built lazily on first
+    /// mutation in coding mode, then updated incrementally via update_file().
+    pub index: Option<crate::harness::architecture::index::ProjectIndex>,
 }
 
 // ── Trace ────────────────────────────────────────────────────────────

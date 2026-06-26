@@ -4,7 +4,9 @@ pub struct PatchHistory {
 
 impl PatchHistory {
     pub fn new() -> Self {
-        PatchHistory { diff_hashes: Vec::new() }
+        PatchHistory {
+            diff_hashes: Vec::new(),
+        }
     }
 
     pub fn record(&mut self, diff: &str) {

@@ -42,7 +42,11 @@ fn has_negated(output: &str, positive_keyword: &str) -> bool {
     };
     let before = &output[..idx];
     // Check for negation keywords in the preceding 20 characters
-    let window = if before.len() > 20 { &before[before.len() - 20..] } else { before };
+    let window = if before.len() > 20 {
+        &before[before.len() - 20..]
+    } else {
+        before
+    };
     window.contains("没有") || window.contains("没") || window.contains("未")
 }
 
@@ -55,9 +59,9 @@ pub fn has_verification_claim(output: &str) -> bool {
     }
 
     // Positive patterns must not be negated
-    POSITIVE_CLAIMS.iter().any(|c| {
-        lower.contains(c) && !has_negated(&lower, c)
-    })
+    POSITIVE_CLAIMS
+        .iter()
+        .any(|c| lower.contains(c) && !has_negated(&lower, c))
 }
 
 #[cfg(test)]

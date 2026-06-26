@@ -4,7 +4,10 @@ pub fn hint(repeated_patch: bool, repeated_failure: bool, no_progress: bool) -> 
     } else if no_progress {
         Some("连续多轮没有取得进展，建议：重新梳理任务目标，确认当前的修改方向是否正确。".into())
     } else if repeated_failure {
-        Some("同一个测试持续失败，建议：先检查测试预期和测试环境，而不是继续修改被测试的代码。".into())
+        Some(
+            "同一个测试持续失败，建议：先检查测试预期和测试环境，而不是继续修改被测试的代码。"
+                .into(),
+        )
     } else {
         None
     }

@@ -26,7 +26,8 @@ impl TraceLedger {
     }
 
     pub fn to_jsonl(&self) -> String {
-        self.events.iter()
+        self.events
+            .iter()
             .filter_map(|e| serde_json::to_string(e).ok())
             .collect::<Vec<_>>()
             .join("\n")

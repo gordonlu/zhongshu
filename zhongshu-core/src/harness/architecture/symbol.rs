@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 pub type SymbolId = String;
 
+#[derive(Debug, Clone)]
 pub struct SymbolIndex {
     /// symbol_id → file path
     pub symbols: HashMap<SymbolId, PathBuf>,
@@ -10,7 +11,9 @@ pub struct SymbolIndex {
 
 impl SymbolIndex {
     pub fn new() -> Self {
-        SymbolIndex { symbols: HashMap::new() }
+        SymbolIndex {
+            symbols: HashMap::new(),
+        }
     }
 
     pub fn insert(&mut self, id: SymbolId, path: PathBuf) {

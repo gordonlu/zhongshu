@@ -42,13 +42,14 @@ impl From<ViolationKey> for ViolationDedupKey {
 }
 
 /// Deduplicate: skip if an Open/Acknowledged violation with same key exists.
-pub fn dedup_violations(
-    existing: &[OpenViolation],
-    new_key: &ViolationDedupKey,
-) -> bool {
+pub fn dedup_violations(existing: &[OpenViolation], new_key: &ViolationDedupKey) -> bool {
     existing.iter().any(|v| {
         let k: ViolationDedupKey = v.into();
-        &k == new_key && matches!(v.status, ViolationStatus::Open | ViolationStatus::Acknowledged)
+        &k == new_key
+            && matches!(
+                v.status,
+                ViolationStatus::Open | ViolationStatus::Acknowledged
+            )
     })
 }
 

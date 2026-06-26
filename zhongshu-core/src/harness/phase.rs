@@ -17,10 +17,7 @@ fn is_test_command(tool_name: &str) -> bool {
 }
 
 /// Phase transition rules.
-pub fn validate_transition(
-    current: CodingPhase,
-    inferred: CodingPhase,
-) -> Vec<HarnessFeedback> {
+pub fn validate_transition(current: CodingPhase, inferred: CodingPhase) -> Vec<HarnessFeedback> {
     let mut feedback = Vec::new();
     match (current, inferred) {
         (CodingPhase::Understand, CodingPhase::Edit) => {

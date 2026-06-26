@@ -23,7 +23,12 @@ pub fn check_duplicate(
     let count = state.counts.entry(fp.clone()).or_insert(0);
     *count += 1;
 
-    let consecutive = state.recent_calls.iter().rev().take_while(|c| **c == fp).count() as u32;
+    let consecutive = state
+        .recent_calls
+        .iter()
+        .rev()
+        .take_while(|c| **c == fp)
+        .count() as u32;
 
     if consecutive >= CONSECUTIVE_LIMIT {
         return HarnessAction::BlockTool {
@@ -31,7 +36,10 @@ pub fn check_duplicate(
                 source: FeedbackSource::ToolLoop,
                 severity: Severity::BlockTool,
                 rule_id: "tool/loop_consecutive".into(),
-                message: format!("连续 {} 次调用同一工具 ({}), 参数相同。", consecutive, tool_name),
+                message: format!(
+                    "连续 {} 次调用同一工具 ({}), 参数相同。",
+                    consecutive, tool_name
+                ),
                 suggestion: "先检查之前的调用结果，或者换一种方式获取信息。".into(),
                 evidence: None,
             },

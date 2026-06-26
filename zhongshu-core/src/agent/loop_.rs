@@ -202,7 +202,10 @@ pub async fn run_agent(
 
             // Check unresolved architecture violations (only fatal, current-run)
             if needs_finalize {
-                let blocking_count = runtime.harness_state.architecture.violations
+                let blocking_count = runtime
+                    .harness_state
+                    .architecture
+                    .violations
                     .iter()
                     .filter(|v| {
                         v.status == crate::harness::state::ViolationStatus::Open
@@ -401,9 +404,9 @@ pub async fn run_agent(
                 runtime.harness_state.previous_phase = runtime.harness_state.phase;
 
                 // Phase inference
-                if let Some(new_phase) = crate::harness::phase::infer_phase_from_event(
-                    &tc.function.name, tool_success,
-                ) {
+                if let Some(new_phase) =
+                    crate::harness::phase::infer_phase_from_event(&tc.function.name, tool_success)
+                {
                     runtime.harness_state.phase = new_phase;
                 }
 
@@ -426,6 +429,75 @@ pub async fn run_agent(
                         err_text,
                         step,
                     );
+                }
+
+                // Architecture: re-index + rule evaluation on mutation
+                if is_mutation {
+                    // Lazy-build the project index on first mutation
+                    let root = std::env::current_dir().unwrap_or_default();
+                    if runtime.harness_state.architecture.index.is_none() {
+                        let mut idx =
+                            crate::harness::architecture::index::ProjectIndex::new(root.clone());
+                        idx.scan_dir(&root);
+                        runtime.harness_state.architecture.index = Some(idx);
+                    }
+
+                    if let Some(ref mut idx) = runtime.harness_state.architecture.index {
+                        // Read the changed file and update the index
+                        let path = std::path::PathBuf::from(&tc.function.arguments);
+                        if !path.exists() {
+                            // arguments may be a tool arg JSON, not a file path.
+                            // Fallback: try to extract "path" field from args JSON
+                            if let Ok(args) =
+                                serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                            {
+                                if let Some(file_path) = args.get("path").and_then(|p| p.as_str()) {
+                                    let actual_path = std::path::PathBuf::from(file_path);
+                                    if actual_path.exists() {
+                                        if let Ok(content) = std::fs::read_to_string(&actual_path) {
+                                            idx.update_file(actual_path.clone(), &content);
+                                            // Compute diff and evaluate rules
+                                            let changes =
+                                                crate::harness::architecture::diff::compute_diff(
+                                                    idx.files.get(&actual_path),
+                                                    &idx.files[&actual_path],
+                                                );
+                                            let layers = crate::harness::architecture::layer::LayerGraph::default();
+                                            let rules =
+                                                crate::harness::architecture::config::default_rules(
+                                                );
+                                            let (feedback, new_violations) =
+                                                crate::harness::architecture::rules::evaluate_rules(
+                                                    &rules,
+                                                    idx,
+                                                    &layers,
+                                                    &changes,
+                                                    &runtime.harness_state.architecture.violations,
+                                                );
+                                            for v in new_violations {
+                                                runtime
+                                                    .harness_state
+                                                    .architecture
+                                                    .violations
+                                                    .push(v);
+                                            }
+                                            for fb in feedback {
+                                                if fb.severity
+                                                    == crate::harness::action::Severity::Fatal
+                                                {
+                                                    let text =
+                                                        crate::harness::render::render_feedback(
+                                                            &fb,
+                                                        );
+                                                    messages.push(Message::system(text));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

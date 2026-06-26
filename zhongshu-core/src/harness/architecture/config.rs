@@ -61,7 +61,9 @@ pub fn default_rules() -> Vec<ArchitectureRule> {
 }
 
 pub fn glob_matcher(pattern: &str) -> globset::GlobMatcher {
-    globset::Glob::new(pattern).expect("invalid architecture rule glob pattern").compile_matcher()
+    globset::Glob::new(pattern)
+        .expect("invalid architecture rule glob pattern")
+        .compile_matcher()
 }
 
 #[cfg(test)]

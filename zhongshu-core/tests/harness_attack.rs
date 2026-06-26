@@ -7,12 +7,12 @@
 use std::collections::{HashMap, VecDeque};
 
 use zhongshu_core::harness::action::{HarnessAction, Severity};
+use zhongshu_core::harness::recovery::fingerprint;
 use zhongshu_core::harness::state::{
     CodingPhase, RecoveryState, ToolLoopState, VerificationRecord, VerificationState,
 };
-use zhongshu_core::harness::verification::{claim, gate, ledger};
 use zhongshu_core::harness::tool::loop_guard;
-use zhongshu_core::harness::recovery::fingerprint;
+use zhongshu_core::harness::verification::{claim, gate, ledger};
 
 // ═══════════════════════════════════════════════════════════════════════
 // Attack 1: Fake completion
@@ -34,7 +34,9 @@ fn attack_fake_completion_no_test_blocks() {
     let output = "修改完成，测试通过。";
     let actions = gate::check(&state, output);
     assert!(
-        actions.iter().any(|a| matches!(a, HarnessAction::BlockFinalize { .. })),
+        actions
+            .iter()
+            .any(|a| matches!(a, HarnessAction::BlockFinalize { .. })),
         "fake completion without test must be blocked"
     );
 }
@@ -66,7 +68,9 @@ fn attack_stale_verification_blocks() {
     let output = "已完成";
     let actions = gate::check(&state, output);
     assert!(
-        actions.iter().any(|a| matches!(a, HarnessAction::BlockFinalize { .. })),
+        actions
+            .iter()
+            .any(|a| matches!(a, HarnessAction::BlockFinalize { .. })),
         "stale verification (verify before edit) must be blocked"
     );
 }
@@ -91,7 +95,9 @@ fn fresh_verification_after_edit_allows() {
     });
     let actions = gate::check(&state, "已完成");
     assert!(
-        !actions.iter().any(|a| matches!(a, HarnessAction::BlockFinalize { .. })),
+        !actions
+            .iter()
+            .any(|a| matches!(a, HarnessAction::BlockFinalize { .. })),
         "fresh verification after edit should not block"
     );
 }
@@ -155,7 +161,10 @@ fn attack_non_verification_bypass() {
         unavailable_reason: None,
     };
     ledger::record(&mut state, "shell", "ls -la", Some(0), 1);
-    assert!(state.records.is_empty(), "ls must not be treated as verification");
+    assert!(
+        state.records.is_empty(),
+        "ls must not be treated as verification"
+    );
     assert_eq!(state.last_verify_step, 0, "verify step must not advance");
 }
 
@@ -172,7 +181,10 @@ fn attack_self_test_bypass_attempt() {
         unavailable_reason: None,
     };
     ledger::record(&mut state, "self_test", "{}", Some(0), 1);
-    assert!(!state.records.is_empty(), "self_test must be treated as verification");
+    assert!(
+        !state.records.is_empty(),
+        "self_test must be treated as verification"
+    );
     assert_eq!(state.last_verify_step, 1);
 }
 
@@ -219,7 +231,11 @@ fn attack_repeated_test_failure_recorded() {
     for _ in 0..3 {
         fingerprint::record(&mut state, "shell", "cargo test", "test foo failed", 1);
     }
-    assert!(fingerprint::is_repeated_failure(&state, "cargo test", "test foo failed"));
+    assert!(fingerprint::is_repeated_failure(
+        &state,
+        "cargo test",
+        "test foo failed"
+    ));
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -243,14 +259,9 @@ fn attack_summarize_without_work_warns() {
 
 #[test]
 fn normal_transition_no_warning() {
-    let feedback = zhongshu_core::harness::phase::validate_transition(
-        CodingPhase::Inspect,
-        CodingPhase::Edit,
-    );
-    assert!(
-        feedback.is_empty(),
-        "Inspect -> Edit should not warn"
-    );
+    let feedback =
+        zhongshu_core::harness::phase::validate_transition(CodingPhase::Inspect, CodingPhase::Edit);
+    assert!(feedback.is_empty(), "Inspect -> Edit should not warn");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -281,8 +292,8 @@ fn attack_multiple_edits_after_verify_blocks() {
         records: Vec::new(),
         last_success: None,
         last_failure: None,
-        last_edit_step: 10,   // edited 3 more times
-        last_verify_step: 3,  // verified once long ago
+        last_edit_step: 10,  // edited 3 more times
+        last_verify_step: 3, // verified once long ago
         unavailable_reason: None,
     };
     state.last_success = Some(VerificationRecord {
@@ -294,7 +305,9 @@ fn attack_multiple_edits_after_verify_blocks() {
     });
     let actions = gate::check(&state, "all done");
     assert!(
-        actions.iter().any(|a| matches!(a, HarnessAction::BlockFinalize { .. })),
+        actions
+            .iter()
+            .any(|a| matches!(a, HarnessAction::BlockFinalize { .. })),
         "multiple edits after verify must block"
     );
 }
@@ -308,7 +321,10 @@ fn attack_multiple_edits_after_verify_blocks() {
 fn attack_fresh_run_has_no_lingering_verification() {
     use zhongshu_core::harness::HarnessState;
     let state = HarnessState::new();
-    assert!(state.verification.last_success.is_none(), "new run must start clean");
+    assert!(
+        state.verification.last_success.is_none(),
+        "new run must start clean"
+    );
     assert_eq!(state.verification.last_edit_step, 0);
     assert_eq!(state.verification.last_verify_step, 0);
     assert_eq!(state.phase, CodingPhase::Understand);
@@ -338,11 +354,14 @@ fn attack_architecture_warning_does_not_block() {
         raised_step: 0,
     }];
     // Warning severity must not block
-    let fatal = violations.iter().filter(|v| {
-        v.status == ViolationStatus::Open
-            && v.severity == Severity::Fatal
-            && v.introduced_this_run
-    }).count();
+    let fatal = violations
+        .iter()
+        .filter(|v| {
+            v.status == ViolationStatus::Open
+                && v.severity == Severity::Fatal
+                && v.introduced_this_run
+        })
+        .count();
     assert_eq!(fatal, 0, "warning must not be counted as blocking");
 }
 
@@ -363,11 +382,14 @@ fn attack_architecture_resolved_does_not_block() {
         raised_step: 0,
     }];
     // Resolved must not block
-    let fatal = violations.iter().filter(|v| {
-        v.status == ViolationStatus::Open
-            && v.severity == Severity::Fatal
-            && v.introduced_this_run
-    }).count();
+    let fatal = violations
+        .iter()
+        .filter(|v| {
+            v.status == ViolationStatus::Open
+                && v.severity == Severity::Fatal
+                && v.introduced_this_run
+        })
+        .count();
     assert_eq!(fatal, 0, "resolved must not block");
 }
 

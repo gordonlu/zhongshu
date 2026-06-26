@@ -1,14 +1,14 @@
 pub mod action;
-pub mod context;
-pub mod render;
-pub mod phase;
 pub mod architecture;
+pub mod context;
+pub mod phase;
+pub mod render;
 pub mod state;
 
-pub mod verification;
+pub mod context_pack;
+pub mod recovery;
 pub mod tool;
 pub mod trace;
-pub mod recovery;
-pub mod context_pack;
+pub mod verification;
 
 pub use state::HarnessState;

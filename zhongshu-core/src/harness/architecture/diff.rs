@@ -21,7 +21,9 @@ pub fn compute_diff(old: Option<&FileIndex>, new: &FileIndex) -> Vec<AstChange> 
         None => {
             // New file: everything is added
             for item in &new.items {
-                changes.push(AstChange::FunctionAdded { symbol: item.clone() });
+                changes.push(AstChange::FunctionAdded {
+                    symbol: item.clone(),
+                });
             }
             for import in &new.imports {
                 changes.push(AstChange::ImportAdded {
@@ -36,14 +38,18 @@ pub fn compute_diff(old: Option<&FileIndex>, new: &FileIndex) -> Vec<AstChange> 
     // Detect removed items
     for item in &old.items {
         if !new.items.contains(item) {
-            changes.push(AstChange::FunctionRemoved { symbol: item.clone() });
+            changes.push(AstChange::FunctionRemoved {
+                symbol: item.clone(),
+            });
         }
     }
 
     // Detect added items
     for item in &new.items {
         if !old.items.contains(item) {
-            changes.push(AstChange::FunctionAdded { symbol: item.clone() });
+            changes.push(AstChange::FunctionAdded {
+                symbol: item.clone(),
+            });
         }
     }
 
@@ -94,7 +100,9 @@ mod tests {
         let old = make_index("test.rs", vec!["fn foo", "fn bar"], vec![]);
         let new = make_index("test.rs", vec!["fn foo"], vec![]);
         let changes = compute_diff(Some(&old), &new);
-        assert!(changes.contains(&AstChange::FunctionRemoved { symbol: "fn bar".into() }));
+        assert!(changes.contains(&AstChange::FunctionRemoved {
+            symbol: "fn bar".into()
+        }));
     }
 
     #[test]
@@ -102,6 +110,8 @@ mod tests {
         let old = make_index("test.rs", vec![], vec!["std::collections"]);
         let new = make_index("test.rs", vec![], vec!["std::collections", "std::sync"]);
         let changes = compute_diff(Some(&old), &new);
-        assert!(changes.iter().any(|c| matches!(c, AstChange::ImportAdded { import, .. } if import == "std::sync")));
+        assert!(changes
+            .iter()
+            .any(|c| matches!(c, AstChange::ImportAdded { import, .. } if import == "std::sync")));
     }
 }

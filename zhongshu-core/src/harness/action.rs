@@ -25,6 +25,7 @@ pub enum FeedbackSource {
     Phase,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Severity {
     Info,
     Warning,

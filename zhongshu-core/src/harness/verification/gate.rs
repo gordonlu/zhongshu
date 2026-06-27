@@ -133,6 +133,15 @@ mod tests {
     }
 
     #[test]
+    fn blocks_first_edit_without_verification() {
+        let state = make_state(0, None, 1, 0);
+        let actions = check(&state, "done");
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, HarnessAction::BlockFinalize { .. })));
+    }
+
+    #[test]
     fn allows_fresh_verification() {
         let state = make_state(3, None, 2, 3);
         let actions = check(&state, "已完成修改");

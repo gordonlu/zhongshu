@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use zhongshu_core::agent::llm::{ChatCompletionRequest, LlmProvider};
 use zhongshu_core::agent::llm_registry::LlmRegistry;
+use zhongshu_core::agent::{AgentProfile, AgentRuntime, Worker};
 use zhongshu_core::equipment::{
     parse_proposal_response, EquipmentObserver, EquipmentRegistry, EquipmentType, Manifest,
 };
@@ -12,9 +13,10 @@ use crate::app::AgentController;
 use zhongshu_core::core::{
     ArtifactRepository, ArtifactType, Database, GoalRepository, GoalType, MemoryCandidateStore,
     MemoryPolicy, ObservationStore, ObservationType, RunbookStore, Scheduler, StepStatus,
-    SuggestionEngine, SuggestionStatus, TaskPlanner, TaskRepository, TaskStatus,
+    SuggestionEngine, SuggestionStatus, TaskPlanner, TaskRepository, TaskStatus, TaskStep,
 };
 use zhongshu_core::event::{Event, EventBus, GoalEvent, SuggestionEvent, TaskEvent};
+use zhongshu_core::task::Task as WorkerTask;
 
 /// Spawn the scheduler to scan active goals and create tasks every hour.
 pub fn spawn_scheduler(scheduler: Scheduler) {
@@ -140,7 +142,12 @@ pub fn spawn_event_workflow(eb: Arc<EventBus>, core_db_path: PathBuf) {
 }
 
 /// Listen for Task::Triggered → plan steps → run LLM per step → save output + artifact + memory.
-pub fn spawn_task_executor(eb: Arc<EventBus>, registry: Arc<LlmRegistry>, core_db_path: PathBuf) {
+pub fn spawn_task_executor(
+    eb: Arc<EventBus>,
+    core_db_path: PathBuf,
+    worker_runtime: Arc<AgentRuntime>,
+    worker_profile: AgentProfile,
+) {
     tokio::spawn(async move {
         let mut rx = eb.subscribe();
         let task_repo = TaskRepository::new(Database::new(core_db_path.clone()));
@@ -155,17 +162,10 @@ pub fn spawn_task_executor(eb: Arc<EventBus>, registry: Arc<LlmRegistry>, core_d
                 }
                 _ => continue,
             };
-            let client = match registry.client_for_role("worker") {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!("executor: no LLM provider: {e}");
-                    continue;
-                }
-            };
             let plnr = planner.clone();
 
             // 1. Plan the task (async LLM call)
-            let plan_steps = match plnr.plan(&task_id, &*client.provider).await {
+            let plan_steps = match plnr.plan(&task_id, &*worker_runtime.provider).await {
                 Ok(steps) if !steps.is_empty() => steps,
                 Ok(_) => continue,
                 Err(e) => {
@@ -212,30 +212,24 @@ pub fn spawn_task_executor(eb: Arc<EventBus>, registry: Arc<LlmRegistry>, core_d
                     )
                 };
 
-                let req = ChatCompletionRequest {
-                    model: client.model.clone(),
-                    messages: vec![zhongshu_core::agent::llm::Message {
-                        role: zhongshu_core::agent::llm::Role::User,
-                        content: prompt,
-                        tool_calls: None,
-                        tool_call_id: None,
-                    }],
-                    tools: None,
-                    tool_choice: None,
-                    stream: false,
-                    temperature: None,
-                    max_tokens: Some(2000),
-                    reasoning_effort: None,
-                };
-                let step_output = match client.provider.chat(req).await {
-                    Ok(r) => r
-                        .choices
-                        .into_iter()
-                        .next()
-                        .map(|c| c.message.content)
-                        .unwrap_or_default(),
+                let worker_task = task_step_to_worker_task(&task_id, &title, step, &prompt);
+                let step_output = match Worker::execute(
+                    worker_runtime.as_ref(),
+                    &worker_profile,
+                    worker_task,
+                    None,
+                )
+                .await
+                {
+                    Ok(report) => {
+                        if report.findings.trim().is_empty() {
+                            report.summary
+                        } else {
+                            report.findings
+                        }
+                    }
                     Err(e) => {
-                        tracing::warn!("executor: step '{}' LLM call failed: {e}", step.action);
+                        tracing::warn!("executor: step '{}' worker failed: {e}", step.action);
                         let _ = tokio::task::spawn_blocking({
                             let trepo = trepo.clone();
                             let sid = step.id.clone();
@@ -292,6 +286,7 @@ pub fn spawn_task_executor(eb: Arc<EventBus>, registry: Arc<LlmRegistry>, core_d
                     let _ = rstore.save(&zhongshu_core::core::Runbook {
                         id: format!("rb-{tid}"),
                         goal: ttl.clone(),
+                        conversation_id: None,
                         created_at: std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .map(|d| d.as_secs().to_string())
@@ -338,6 +333,58 @@ pub fn spawn_task_executor(eb: Arc<EventBus>, registry: Arc<LlmRegistry>, core_d
             }
         }
     });
+}
+
+fn task_step_to_worker_task(
+    task_id: &str,
+    title: &str,
+    step: &TaskStep,
+    prompt: &str,
+) -> WorkerTask {
+    WorkerTask {
+        id: step.id.clone(),
+        source: format!("core-task:{task_id}"),
+        tool: "agent".into(),
+        arguments: serde_json::json!({
+            "task_id": task_id,
+            "title": title,
+            "step_id": step.id.clone(),
+            "step_order": step.step_order,
+            "step_action": step.action.clone(),
+            "prompt": prompt,
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_step_to_worker_task_maps_step_context() {
+        let step = TaskStep {
+            id: "step-1".into(),
+            task_id: "task-1".into(),
+            step_order: 2,
+            action: "collect evidence".into(),
+            status: StepStatus::Pending,
+            input: None,
+            output: None,
+            created_at: 123,
+        };
+
+        let task = task_step_to_worker_task("task-1", "Review harness", &step, "do it");
+
+        assert_eq!(task.id, "step-1");
+        assert_eq!(task.source, "core-task:task-1");
+        assert_eq!(task.tool, "agent");
+        assert_eq!(task.arguments["task_id"], "task-1");
+        assert_eq!(task.arguments["title"], "Review harness");
+        assert_eq!(task.arguments["step_id"], "step-1");
+        assert_eq!(task.arguments["step_order"], 2);
+        assert_eq!(task.arguments["step_action"], "collect evidence");
+        assert_eq!(task.arguments["prompt"], "do it");
+    }
 }
 
 /// LLM-based suggestion analysis: read recent observations every 30 min.

@@ -17,10 +17,12 @@ use zhongshu_core::agent::{
     Worker,
 };
 use zhongshu_core::core::context::{ContextMessage, ContextPackBuilder, ContextRole, RecentUnit};
+use zhongshu_core::core::{Database, RunbookStore};
 use zhongshu_core::event::{
     AgentEvent, AgentState, Event, EventBus, MessageId, ResponseEvent, ResponseRole, ResponseTx,
     ToolEvent,
 };
+use zhongshu_core::harness::trace::runbook::events_to_runbook;
 use zhongshu_core::integration::DeeplosslessProxy;
 use zhongshu_core::task::TaskQueue;
 use zhongshu_core::tool::ToolRegistry;
@@ -62,6 +64,7 @@ pub struct AgentController {
     reasoning_complex: Mutex<String>,
     reasoning_agent: Mutex<String>,
     equipment: Arc<Mutex<zhongshu_core::equipment::EquipmentRegistry>>,
+    core_db_path: PathBuf,
     max_context_tokens: AtomicU32,
     pub auto_evolve_enabled: AtomicBool,
     pub mode: Mutex<String>,
@@ -84,6 +87,7 @@ impl AgentController {
         reasoning_agent: String,
         max_context_tokens: u32,
         equipment: Arc<Mutex<zhongshu_core::equipment::EquipmentRegistry>>,
+        core_db_path: PathBuf,
     ) -> Self {
         let memory = AgentMemory::load(&profile_path);
         AgentController {
@@ -103,6 +107,7 @@ impl AgentController {
             router: Mutex::new(router),
             reasoning_complex: Mutex::new(reasoning_complex),
             reasoning_agent: Mutex::new(reasoning_agent),
+            core_db_path,
             max_context_tokens: AtomicU32::new(max_context_tokens),
             auto_evolve_enabled: AtomicBool::new(false),
             mode: Mutex::new("assistant".into()),
@@ -286,6 +291,7 @@ impl AgentController {
         let history_arc = self.history.clone();
         let memory = self.memory.clone();
         let state_arc = self.state.clone();
+        let core_db_path = self.core_db_path.clone();
 
         // Determine routed model + reasoning effort.
         let provider_snapshot = self.provider.lock().unwrap().clone();
@@ -496,6 +502,13 @@ impl AgentController {
 
             match r {
                 Ok(Ok(rr)) => {
+                    let conversation_id = proxy.lock().await.current_conv_id().await;
+                    persist_trace_runbook(
+                        core_db_path.clone(),
+                        &input,
+                        &rr.trace_events,
+                        conversation_id,
+                    );
                     let last = rr.messages.last().map(|x| x.content.as_str()).unwrap_or("");
                     // Append to conversation history for next turn.
                     history_arc
@@ -745,7 +758,26 @@ impl TaskWorkerDispatcher {
     }
 }
 
-/// Drop oldest history pairs until estimated tokens ≤ trigger.
+fn persist_trace_runbook(
+    core_db_path: PathBuf,
+    goal: &str,
+    events: &[zhongshu_core::harness::trace::event::HarnessEvent],
+    conversation_id: Option<i64>,
+) {
+    let Some(mut runbook) = events_to_runbook(events, goal) else {
+        return;
+    };
+    runbook.conversation_id = conversation_id;
+
+    let _ = tokio::task::spawn_blocking(move || {
+        let store = RunbookStore::new(Database::new(core_db_path));
+        if let Err(e) = store.migrate().and_then(|_| store.save(&runbook)) {
+            tracing::warn!(error = %e, runbook_id = %runbook.id, "failed to persist trace runbook");
+        }
+    });
+}
+
+/// Drop oldest history pairs until estimated tokens <= trigger.
 /// Returns number of messages dropped.
 pub(crate) fn compress_history(
     history: &mut Vec<(String, String)>,

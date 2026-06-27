@@ -31,7 +31,7 @@ fn extract_imports(content: &str) -> Vec<String> {
 
 fn extract_items(content: &str) -> Vec<String> {
     let mut items = Vec::new();
-    let mut lines: Vec<&str> = content.lines().collect();
+    let lines: Vec<&str> = content.lines().collect();
     let mut i = 0;
 
     while i < lines.len() {

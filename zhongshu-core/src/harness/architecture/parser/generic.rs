@@ -43,7 +43,7 @@ fn parse_javascript(content: &str) -> (Vec<String>, Vec<String>) {
 }
 
 fn parse_typescript(content: &str) -> (Vec<String>, Vec<String>) {
-    let mut imports = extract_js_imports(content);
+    let imports = extract_js_imports(content);
     let mut items = extract_js_items(content);
 
     // TypeScript-specific: interface, type, enum
@@ -258,7 +258,6 @@ fn parse_css(content: &str) -> (Vec<String>, Vec<String>) {
 // ── HTML ─────────────────────────────────────────────────────────────
 
 fn parse_html(content: &str) -> (Vec<String>, Vec<String>) {
-    let mut items = Vec::new();
     // Extract script/src links as imports
     let mut imports = Vec::new();
     for line in content.lines() {
@@ -284,7 +283,7 @@ fn parse_html(content: &str) -> (Vec<String>, Vec<String>) {
             }
         }
     }
-    (imports, items)
+    (imports, vec![])
 }
 
 // ── SQL ──────────────────────────────────────────────────────────────

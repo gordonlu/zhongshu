@@ -74,6 +74,29 @@ pub fn has_verification_claim(output: &str) -> bool {
         .any(|c| lower.contains(c) && !has_negated(&lower, c))
 }
 
+/// Check whether user input asks the agent to verify before completing.
+pub fn requests_verification(input: &str) -> bool {
+    let lower = input.to_lowercase();
+    [
+        "run test",
+        "run tests",
+        "test before",
+        "make sure tests",
+        "verify",
+        "verification",
+        "cargo test",
+        "cargo check",
+        "pytest",
+        "npm test",
+        "go test",
+        "\u{6d4b}\u{8bd5}",
+        "\u{9a8c}\u{8bc1}",
+        "\u{8dd1}\u{6d4b}",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,6 +118,15 @@ mod tests {
         assert!(has_verification_claim("All tests passed."));
         assert!(has_verification_claim("verification passed"));
         assert!(has_verification_claim("Fix verified"));
+    }
+
+    #[test]
+    fn detects_user_verification_request() {
+        assert!(requests_verification("please run tests before finishing"));
+        assert!(requests_verification("cargo test after the fix"));
+        assert!(requests_verification(
+            "\u{4fee}\u{590d}\u{540e}\u{8dd1}\u{6d4b}"
+        ));
     }
 
     // ── Negative cases ─────────────────────────────────────────────

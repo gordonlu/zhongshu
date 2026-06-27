@@ -20,8 +20,8 @@ use zhongshu_core::agent::{
 use zhongshu_core::authority::{self, AuthorityGate};
 use zhongshu_core::core::{
     Database, EventLogStore, GoalRepository, GoalTool, MemoryCandidateStore, MemoryPolicy,
-    MemoryQueryTool, ObservationStore, Scheduler, SuggestionEngine, SuggestionTool, TaskRepository,
-    TaskTool,
+    MemoryQueryTool, ObservationStore, RunbookStore, Scheduler, SuggestionEngine, SuggestionTool,
+    TaskRepository, TaskTool,
 };
 use zhongshu_core::digest::DigestBuilder;
 use zhongshu_core::equipment::EquipmentObserver;
@@ -277,7 +277,6 @@ fn main() {
     services::spawn_suggestion_analysis(observation_store.clone(), suggestion_engine.clone());
     services::spawn_event_observation_feed(eb.clone(), observation_store.clone());
     services::spawn_event_workflow(eb.clone(), core_db_path.clone());
-    services::spawn_task_executor(eb.clone(), llm_registry.clone(), core_db_path.clone());
     services::spawn_llm_suggestion_engine(llm_registry.clone(), core_db_path.clone());
     services::spawn_compensation(eb.clone(), core_db_path.clone());
 
@@ -320,6 +319,7 @@ fn main() {
         cfg.llm.model_routing.reasoning_agent.clone(),
         cfg.llm.max_context_tokens,
         equipment.clone(),
+        core_db_path.clone(),
     ));
     controller.set_auto_evolve(cfg.agent.auto_evolve);
     let inbox = Arc::new(AgentInbox::new(controller.clone()));
@@ -382,6 +382,25 @@ fn main() {
             tool_timeout: Duration::from_secs(120),
         },
     ));
+
+    services::spawn_task_executor(
+        eb.clone(),
+        core_db_path.clone(),
+        worker_runtime.clone(),
+        AgentProfile::new(
+            "background-task-executor",
+            "你是中书的后台任务执行 worker。按给定步骤执行任务，优先使用工具获得事实证据；需要修改、验证或访问敏感资源时遵守权限和 harness 反馈。不要声称完成未验证的工作。",
+            vec![],
+            AgentBudget {
+                max_steps: 80,
+                max_tool_calls: 160,
+                per_tool_limit: 40,
+                token_limit: 128_000,
+                llm_timeout: Duration::from_secs(240),
+                tool_timeout: Duration::from_secs(120),
+            },
+        ),
+    );
 
     let profile_dir = config::config_dir().join("profiles");
     let _ = std::fs::create_dir_all(&profile_dir);
@@ -474,7 +493,8 @@ fn main() {
     EventLogger::replay(&event_log_path, &eb);
     let _event_logger = EventLogger::new(event_log_path).unwrap().spawn(&eb);
 
-    let task_repo = TaskRepository::new(Database::new(config::config_dir().join("core.db")));
+    let task_repo = TaskRepository::new(Database::new(core_db_path.clone()));
+    let runbook_store = RunbookStore::new(Database::new(core_db_path.clone()));
     let mut app = match ZhongshuApp::new(
         cfg,
         controller,
@@ -486,6 +506,7 @@ fn main() {
         proxy,
         r,
         task_repo,
+        runbook_store,
         observer.clone(),
         equipment.clone(),
     ) {

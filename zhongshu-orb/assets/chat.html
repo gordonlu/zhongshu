@@ -227,6 +227,9 @@ body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMac
     <button id="btn-tasks" class="icon-btn" title="任务" aria-label="任务">
       <svg viewBox="0 0 24 24"><path d="M9 6h11"/><path d="M9 12h11"/><path d="M9 18h11"/><path d="M4 6h.01"/><path d="M4 12h.01"/><path d="M4 18h.01"/></svg><span id="tasks-count"></span>
     </button>
+    <button id="btn-runbooks" class="icon-btn" title="审计" aria-label="审计">
+      <svg viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/><path d="M8 8h8"/><path d="M8 12h8"/><path d="M8 16h5"/></svg>
+    </button>
     <button id="btn-settings" class="icon-btn" title="设置" aria-label="设置">
       <svg viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.3a2 2 0 1 1-4 0V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1A2 2 0 1 1 4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3a2 2 0 1 1 0-4h.3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.5 7A2 2 0 1 1 7.3 4.2l.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.6V3a2 2 0 1 1 4 0v.3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1A2 2 0 1 1 20.1 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.3a2 2 0 1 1 0 4h-.3a1.7 1.7 0 0 0-1.6 1Z"/></svg>
     </button>
@@ -772,6 +775,11 @@ function handleIpc(message) {
         renderDebug(msg.event);
         break;
 
+      case 'runbooks':
+        renderRunbooks(msg.runbooks);
+        document.getElementById('debug-overlay').classList.add('active');
+        break;
+
       case 'settings':
         document.getElementById('set-api-key').value = msg.config.api_key || '';
         document.getElementById('set-api-key').placeholder = msg.config.api_key_saved ? '已保存；留空不变' : 'sk-...';
@@ -932,9 +940,36 @@ function renderDebug(event) {
     return '<div class="db-event"><span class="db-time">' + time + '</span>' + escapeHtml(e.text || e.action || JSON.stringify(e)) + '</div>';
   }).join('');
 }
+function renderRunbooks(runbooks) {
+  var el = document.getElementById('debug-list');
+  if (!runbooks || runbooks.length === 0) {
+    el.innerHTML = '<div class="db-event">暂无审计记录</div>';
+    return;
+  }
+  el.innerHTML = runbooks.map(function(rb) {
+    var steps = rb.steps || [];
+    var stepHtml = steps.map(function(step, idx) {
+      var verification = step.verification ? '<div style="color:var(--text-muted)">verify: ' + escapeHtml(step.verification) + '</div>' : '';
+      return '<div class="db-event"><span class="db-time">#' + (idx + 1) + '</span>' +
+        escapeHtml(step.tool || '') + ' · ' + escapeHtml(step.output_status || '') +
+        '<div style="color:var(--text-muted)">' + escapeHtml(step.action || '') + '</div>' +
+        verification + '</div>';
+    }).join('');
+    return '<div style="border-bottom:1px solid var(--border);padding:8px 0">' +
+      '<div style="font-size:12px;color:var(--text);font-weight:600">' + escapeHtml(rb.goal || '') + '</div>' +
+      '<div style="font-size:11px;color:var(--text-muted);margin:2px 0 6px">' +
+      escapeHtml(rb.created_at || '') + ' · steps ' + (rb.total_steps || 0) +
+      ' · passed ' + (rb.passed || 0) + ' · failed ' + (rb.failed || 0) +
+      (rb.conversation_id ? ' · conv ' + escapeHtml(rb.conversation_id) : '') + '</div>' +
+      stepHtml + '</div>';
+  }).join('');
+}
 
 document.getElementById('btn-tasks').addEventListener('click', function() {
   sendIpc({type: 'list_tasks'});
+});
+document.getElementById('btn-runbooks').addEventListener('click', function() {
+  sendIpc({type: 'list_runbooks'});
 });
 document.getElementById('tasks-close').addEventListener('click', function() {
   document.getElementById('tasks-overlay').classList.remove('active');

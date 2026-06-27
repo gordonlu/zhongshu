@@ -136,6 +136,7 @@ impl Database {
             CREATE TABLE IF NOT EXISTS runbooks (
                 id TEXT PRIMARY KEY,
                 goal TEXT NOT NULL,
+                conversation_id INTEGER,
                 created_at TEXT NOT NULL,
                 total_steps INTEGER NOT NULL DEFAULT 0,
                 passed INTEGER NOT NULL DEFAULT 0,

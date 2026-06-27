@@ -146,12 +146,58 @@ impl Tool for SelfTestTool {
                 .join("\n")
         );
 
-        ToolOutput::success(json!({
+        let payload = json!({
             "report": report,
             "passed": passed,
             "failed": failed,
             "total": total,
             "details": results,
-        }))
+        });
+
+        if failed == 0 {
+            ToolOutput::success(payload)
+        } else {
+            ToolOutput::error(payload.to_string())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tool::{Tool, ToolStatus};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn self_test_reports_error_when_required_step_fails() {
+        let output = SelfTestTool
+            .execute(&json!({
+                "steps": [{
+                    "name": "missing expectation",
+                    "tool": "system_info",
+                    "args": {},
+                    "expect_contains": "__definitely_not_present__"
+                }]
+            }))
+            .await;
+
+        assert_eq!(output.status, ToolStatus::Error);
+    }
+
+    #[tokio::test]
+    async fn self_test_allows_optional_step_failure() {
+        let output = SelfTestTool
+            .execute(&json!({
+                "steps": [{
+                    "name": "optional missing expectation",
+                    "tool": "system_info",
+                    "args": {},
+                    "expect_contains": "__definitely_not_present__",
+                    "optional": true
+                }]
+            }))
+            .await;
+
+        assert_eq!(output.status, ToolStatus::Success);
     }
 }

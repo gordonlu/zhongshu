@@ -53,6 +53,7 @@ pub struct ZhongshuApp {
     pub assistant_id: Option<MessageId>,
     pub filter: ControlTokenFilter,
     pub task_repo: zhongshu_core::core::TaskRepository,
+    pub runbook_store: zhongshu_core::core::RunbookStore,
     pub observer: Arc<Mutex<EquipmentObserver>>,
     pub equipment: Arc<Mutex<EquipmentRegistry>>,
     pub overlay_zoomed: bool,
@@ -71,6 +72,7 @@ impl ZhongshuApp {
         proxy: Arc<tokio::sync::Mutex<DeeplosslessProxy>>,
         runtime: tokio::runtime::Runtime,
         task_repo: zhongshu_core::core::TaskRepository,
+        runbook_store: zhongshu_core::core::RunbookStore,
         observer: Arc<Mutex<EquipmentObserver>>,
         equipment: Arc<Mutex<EquipmentRegistry>>,
     ) -> anyhow::Result<Self> {
@@ -104,6 +106,7 @@ impl ZhongshuApp {
             assistant_id: None,
             filter: ControlTokenFilter::new(),
             task_repo,
+            runbook_store,
             observer,
             equipment,
             overlay_zoomed: false,
@@ -154,6 +157,35 @@ impl ZhongshuApp {
                 "enabled": matches!(eq.status, zhongshu_core::equipment::EquipmentStatus::Active),
             })).collect();
             ov.show_equipment(&items);
+        }
+        if ov.take_list_runbooks() {
+            let runbooks = match self
+                .runbook_store
+                .migrate()
+                .and_then(|_| self.runbook_store.list())
+            {
+                Ok(runbooks) => runbooks,
+                Err(e) => {
+                    tracing::warn!("list runbooks failed: {e}");
+                    vec![]
+                }
+            };
+            let items: Vec<serde_json::Value> = runbooks
+                .iter()
+                .map(|rb| {
+                    serde_json::json!({
+                        "id": rb.id,
+                        "goal": rb.goal,
+                        "conversation_id": rb.conversation_id,
+                        "created_at": rb.created_at,
+                        "total_steps": rb.total_steps,
+                        "passed": rb.passed,
+                        "failed": rb.failed,
+                        "steps": rb.steps,
+                    })
+                })
+                .collect();
+            ov.show_runbooks(&items);
         }
         if let Some(eq_id) = ov.take_toggle_equipment() {
             {

@@ -51,7 +51,6 @@ pub fn parse_file(path: &Path, content: &str) -> FileIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn detect_rust() {

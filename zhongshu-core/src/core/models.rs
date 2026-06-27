@@ -229,13 +229,15 @@ pub struct Task {
 
 // ── Task Step ────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum StepStatus {
     Pending,
     Running,
     Completed,
     Failed,
     Skipped,
+    ToolBlocked,
+    VerificationFailed,
 }
 
 impl StepStatus {
@@ -246,6 +248,8 @@ impl StepStatus {
             StepStatus::Completed => "completed",
             StepStatus::Failed => "failed",
             StepStatus::Skipped => "skipped",
+            StepStatus::ToolBlocked => "tool_blocked",
+            StepStatus::VerificationFailed => "verification_failed",
         }
     }
 
@@ -256,6 +260,8 @@ impl StepStatus {
             "completed" => Some(StepStatus::Completed),
             "failed" => Some(StepStatus::Failed),
             "skipped" => Some(StepStatus::Skipped),
+            "tool_blocked" => Some(StepStatus::ToolBlocked),
+            "verification_failed" => Some(StepStatus::VerificationFailed),
             _ => None,
         }
     }
@@ -270,7 +276,12 @@ pub struct TaskStep {
     pub status: StepStatus,
     pub input: Option<String>,
     pub output: Option<String>,
+    pub error: Option<String>,
+    pub tool_summary: Option<String>,
+    pub verification: Option<String>,
     pub created_at: i64,
+    pub started_at: Option<i64>,
+    pub finished_at: Option<i64>,
 }
 
 // ── Task Run ─────────────────────────────────────────────────────────

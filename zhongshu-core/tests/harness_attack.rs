@@ -8,6 +8,7 @@ use std::collections::{HashMap, VecDeque};
 
 use zhongshu_core::harness::action::{HarnessAction, Severity};
 use zhongshu_core::harness::recovery::fingerprint;
+use zhongshu_core::harness::recovery::patch_history::PatchHistory;
 use zhongshu_core::harness::state::{
     CodingPhase, RecoveryState, ToolLoopState, VerificationRecord, VerificationState,
 };
@@ -227,6 +228,7 @@ fn attack_repeated_test_failure_recorded() {
         failures: Vec::new(),
         last_feedback_step: 0,
         consecutive_no_progress: 0,
+        patch_history: PatchHistory::new(),
     };
     for _ in 0..3 {
         fingerprint::record(&mut state, "shell", "cargo test", "test foo failed", 1);

@@ -1,3 +1,4 @@
+use crate::harness::recovery::patch_history::PatchHistory;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
@@ -37,6 +38,7 @@ impl HarnessState {
                 failures: Vec::new(),
                 last_feedback_step: 0,
                 consecutive_no_progress: 0,
+                patch_history: PatchHistory::new(),
             },
             architecture: ArchitectureState {
                 violations: Vec::new(),
@@ -115,6 +117,7 @@ pub struct RecoveryState {
     pub failures: Vec<FailureSignature>,
     pub last_feedback_step: u32,
     pub consecutive_no_progress: u32,
+    pub patch_history: PatchHistory,
 }
 
 // ── Architecture ─────────────────────────────────────────────────────

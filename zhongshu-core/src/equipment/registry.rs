@@ -2,9 +2,14 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::tool::Tool;
+use crate::tool::{Tool, ToolRegistry};
 
 use super::manifest::{EquipmentId, EquipmentStatus, Manifest};
+use super::permission::PermissionGuard;
+
+/// Callback to check whether a dangerous equipment action should proceed.
+/// Returns `true` if the action is approved.
+pub type ApprovalCallback = Box<dyn Fn(&Manifest) -> bool + Send + Sync>;
 
 /// An installed equipment package.
 #[derive(Debug, Clone)]
@@ -20,6 +25,8 @@ pub struct EquipmentRegistry {
     /// Path to the equipment directory (e.g. ~/.config/zhongshu/equipment/).
     base_dir: PathBuf,
     loaded: HashMap<EquipmentId, Equipment>,
+    /// Optional callback for dangerous-action approval (install/enable).
+    approval_cb: Option<ApprovalCallback>,
 }
 
 impl EquipmentRegistry {
@@ -27,7 +34,18 @@ impl EquipmentRegistry {
         EquipmentRegistry {
             base_dir,
             loaded: HashMap::new(),
+            approval_cb: None,
         }
+    }
+
+    /// Set a callback for approving dangerous equipment actions (install/enable).
+    pub fn set_approval_callback(&mut self, cb: ApprovalCallback) {
+        self.approval_cb = Some(cb);
+    }
+
+    /// Returns true if the manifest declares capabilities that require approval.
+    pub fn needs_approval(manifest: &Manifest) -> bool {
+        manifest.permissions.shell.allowed || !manifest.permissions.shell.allowed_commands.is_empty()
     }
 
     /// Scan the equipment directory and load all manifests.
@@ -115,18 +133,61 @@ impl EquipmentRegistry {
         profiles
     }
 
-    /// Collect tools from active equipment, wrapped with PermissionGuard.
-    pub fn equipment_tools(&self) -> Vec<(EquipmentId, Arc<dyn Tool>)> {
-        let result = Vec::new();
+    /// Collect tools from active ToolExtension equipment, wrapped with
+    /// PermissionGuard.  Requires a `ToolRegistry` to resolve tool names.
+    pub fn equipment_tools(&self, tool_registry: &ToolRegistry) -> Vec<(EquipmentId, Arc<dyn Tool>)> {
+        let mut result = Vec::new();
         for eq in self.loaded.values() {
             if eq.status != EquipmentStatus::Active {
                 continue;
             }
-            // Tool-extension type equipment provides the tool itself.
-            // For now, tool extensions reference built-in tools with restrictions.
-            // Future: dynamically compiled/loaded tool extensions.
+            if !matches!(eq.manifest.equipment_type, super::manifest::EquipmentType::ToolExtension) {
+                continue;
+            }
+            for tool_name in &eq.manifest.tools {
+                if let Some(tool) = tool_registry.get(tool_name) {
+                    let guarded = Arc::new(PermissionGuard::new(
+                        tool.clone(),
+                        eq.manifest.permissions.clone(),
+                    )) as Arc<dyn Tool>;
+                    result.push((eq.id.clone(), guarded));
+                } else {
+                    tracing::warn!(
+                        "equipment '{}' declares tool '{}' which is not in the registry",
+                        eq.id,
+                        tool_name
+                    );
+                }
+            }
         }
         result
+    }
+
+    /// Register all active ToolExtension equipment's tools (with PermissionGuard)
+    /// into the given `ToolRegistry`.
+    pub fn register_tools(&self, tool_registry: &mut ToolRegistry) {
+        let tools = self.equipment_tools(tool_registry);
+        for (eq_id, tool) in &tools {
+            tracing::info!("equipment: registering tool '{}' from '{}'", tool.name(), eq_id);
+        }
+        for (_, tool) in tools {
+            tool_registry.register_ref(tool);
+        }
+    }
+
+    /// Unregister all tools belonging to a specific equipment from the given
+    /// `ToolRegistry`.  Returns the number of tools removed.
+    pub fn unregister_tools(&self, tool_registry: &mut ToolRegistry, id: &str) -> usize {
+        let Some(eq) = self.loaded.get(id) else {
+            return 0;
+        };
+        let mut count = 0;
+        for tool_name in &eq.manifest.tools {
+            if tool_registry.unregister(tool_name) {
+                count += 1;
+            }
+        }
+        count
     }
 
     /// Validate that a manifest is well-formed before installation.
@@ -156,6 +217,23 @@ impl EquipmentRegistry {
             serde_json::from_str(&text).map_err(|e| format!("invalid manifest: {e}"))?;
 
         Self::validate_manifest(&manifest).map_err(|errors| errors.join("; "))?;
+
+        // Dangerous equipment requires approval before installation.
+        if Self::needs_approval(&manifest) {
+            match self.approval_cb {
+                Some(ref cb) => {
+                    if !cb(&manifest) {
+                        return Err(format!("approval denied for installing '{}'", manifest.name));
+                    }
+                }
+                None => {
+                    return Err(format!(
+                        "dangerous equipment '{}' requires approval but no callback is set",
+                        manifest.name
+                    ));
+                }
+            }
+        }
 
         let id = manifest.id();
         let dest = self.base_dir.join(&id);
@@ -208,7 +286,7 @@ impl EquipmentRegistry {
             .loaded
             .remove(id)
             .ok_or_else(|| format!("equipment '{}' not found", id))?;
-        self.set_status(id, EquipmentStatus::Disabled);
+        // Unregister tools from the registry is caller's responsibility.
         if eq.dir.exists() {
             std::fs::remove_dir_all(&eq.dir)
                 .map_err(|e| format!("cannot remove {}: {e}", eq.dir.display()))?;
@@ -217,10 +295,34 @@ impl EquipmentRegistry {
         Ok(())
     }
 
-    pub fn set_status(&mut self, id: &str, status: EquipmentStatus) {
-        if let Some(eq) = self.loaded.get_mut(id) {
-            eq.status = status;
+    pub fn set_status(&mut self, id: &str, status: EquipmentStatus) -> Result<(), String> {
+        let eq = self
+            .loaded
+            .get_mut(id)
+            .ok_or_else(|| format!("equipment '{}' not found", id))?;
+
+        // Changing from Disabled to Active on dangerous equipment requires approval.
+        if status == EquipmentStatus::Active
+            && eq.status == EquipmentStatus::Disabled
+            && Self::needs_approval(&eq.manifest)
+        {
+            match self.approval_cb {
+                Some(ref cb) => {
+                    if !cb(&eq.manifest) {
+                        return Err(format!("approval denied for enabling '{}'", id));
+                    }
+                }
+                None => {
+                    return Err(format!(
+                        "dangerous equipment '{}' requires approval but no callback is set",
+                        id
+                    ));
+                }
+            }
         }
+
+        eq.status = status;
+        Ok(())
     }
 
     /// Write built-in equipment to disk if not already installed.
@@ -305,7 +407,36 @@ fn is_newer_version(new: &str, old: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::equipment::manifest::{
+        EquipmentEntry, EquipmentPermissions, EquipmentType, ShellPermission,
+    };
     use std::fs;
+
+    fn make_manifest(name: &str, eq_type: EquipmentType, tools: Vec<&str>, shell_allowed: bool) -> Manifest {
+        Manifest {
+            name: name.into(),
+            version: "1.0.0".into(),
+            description: "test".into(),
+            equipment_type: eq_type,
+            tools: tools.into_iter().map(String::from).collect(),
+            profiles: vec![],
+            permissions: EquipmentPermissions {
+                shell: ShellPermission {
+                    allowed: shell_allowed,
+                    allowed_commands: vec![],
+                },
+            },
+            entry: EquipmentEntry::None {},
+        }
+    }
+
+    fn write_equipment(base: &Path, name: &str, manifest: &Manifest) -> PathBuf {
+        let dir = base.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        let json = serde_json::to_string_pretty(manifest).unwrap();
+        fs::write(dir.join("manifest.json"), &json).unwrap();
+        dir
+    }
 
     #[test]
     fn scan_empty_dir() {
@@ -319,28 +450,13 @@ mod tests {
     fn install_and_list() {
         let base = tempfile::tempdir().unwrap();
         let src = tempfile::tempdir().unwrap();
-
-        // Create a valid equipment package.
-        let eq_dir = src.path().join("test-tool");
-        fs::create_dir_all(&eq_dir).unwrap();
-        let manifest = Manifest {
-            name: "test-tool".into(),
-            version: "1.0.0".into(),
-            description: "A test".into(),
-            equipment_type: crate::equipment::EquipmentType::Skill,
-            tools: vec![],
-            profiles: vec![],
-            permissions: Default::default(),
-            entry: crate::equipment::EquipmentEntry::None {},
-        };
-        let json = serde_json::to_string_pretty(&manifest).unwrap();
-        fs::write(eq_dir.join("manifest.json"), &json).unwrap();
+        let m = make_manifest("test-tool", EquipmentType::Skill, vec![], false);
+        write_equipment(src.path(), "test-tool", &m);
 
         let mut reg = EquipmentRegistry::new(base.path().to_path_buf());
-        let id = reg.install_from(&eq_dir).unwrap();
+        let id = reg.install_from(&src.path().join("test-tool")).unwrap();
         assert_eq!(id, "test-tool");
 
-        // Scan in a new registry instance.
         let mut reg2 = EquipmentRegistry::new(base.path().to_path_buf());
         reg2.scan();
         assert_eq!(reg2.list().len(), 1);
@@ -353,12 +469,223 @@ mod tests {
             name: "".into(),
             version: "".into(),
             description: "".into(),
-            equipment_type: crate::equipment::EquipmentType::Skill,
+            equipment_type: EquipmentType::Skill,
             tools: vec![],
             profiles: vec![],
             permissions: Default::default(),
-            entry: crate::equipment::EquipmentEntry::None {},
+            entry: EquipmentEntry::None {},
         };
         assert!(EquipmentRegistry::validate_manifest(&m).is_err());
+    }
+
+    #[test]
+    fn needs_approval_returns_false_for_safe_equipment() {
+        let m = make_manifest("safe", EquipmentType::Skill, vec![], false);
+        assert!(!EquipmentRegistry::needs_approval(&m));
+    }
+
+    #[test]
+    fn needs_approval_returns_true_for_shell_allowed() {
+        let m = make_manifest("dangerous", EquipmentType::ToolExtension, vec!["shell"], true);
+        assert!(EquipmentRegistry::needs_approval(&m));
+    }
+
+    #[test]
+    fn set_status_disabled_to_active_requires_approval_for_dangerous() {
+        let mut reg = EquipmentRegistry::new(tempfile::tempdir().unwrap().path().to_path_buf());
+        let m = make_manifest("dangerous", EquipmentType::ToolExtension, vec!["shell"], true);
+        let id = m.id();
+        reg.loaded.insert(
+            id.clone(),
+            Equipment {
+                id: id.clone(),
+                manifest: m,
+                dir: PathBuf::from("/tmp/fake"),
+                status: EquipmentStatus::Disabled,
+            },
+        );
+
+        // Without approval callback, dangerous equipment should be denied.
+        let result = reg.set_status(&id, EquipmentStatus::Active);
+        assert!(result.is_err());
+
+        // With approval callback that returns false, still denied.
+        reg.set_approval_callback(Box::new(|_| false));
+        let result = reg.set_status(&id, EquipmentStatus::Active);
+        assert!(result.is_err());
+
+        // With approval callback that returns true, allowed.
+        reg.set_approval_callback(Box::new(|_| true));
+        let result = reg.set_status(&id, EquipmentStatus::Active);
+        assert!(result.is_ok());
+        assert_eq!(reg.get(&id).unwrap().status, EquipmentStatus::Active);
+    }
+
+    #[test]
+    fn safe_equipment_does_not_need_approval_for_enable() {
+        let mut reg = EquipmentRegistry::new(tempfile::tempdir().unwrap().path().to_path_buf());
+        let m = make_manifest("safe", EquipmentType::Skill, vec![], false);
+        let id = m.id();
+        reg.loaded.insert(
+            id.clone(),
+            Equipment {
+                id: id.clone(),
+                manifest: m,
+                dir: PathBuf::from("/tmp/fake"),
+                status: EquipmentStatus::Disabled,
+            },
+        );
+
+        // Safe equipment should not require approval callback.
+        let result = reg.set_status(&id, EquipmentStatus::Active);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn install_dangerous_equipment_requires_approval() {
+        let base = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let m = make_manifest("hacker-tool", EquipmentType::ToolExtension, vec!["shell"], true);
+        write_equipment(src.path(), "hacker-tool", &m);
+
+        let mut reg = EquipmentRegistry::new(base.path().to_path_buf());
+
+        // Without approval callback, dangerous install should be rejected.
+        let result = reg.install_from(&src.path().join("hacker-tool"));
+        assert!(result.is_err());
+
+        // With approval callback that returns true, allowed.
+        reg.set_approval_callback(Box::new(|_| true));
+        let result = reg.install_from(&src.path().join("hacker-tool"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn equipment_tools_returns_empty_for_non_extension() {
+        let reg = EquipmentRegistry::new(tempfile::tempdir().unwrap().path().to_path_buf());
+        let tool_reg = ToolRegistry::new();
+        let tools = reg.equipment_tools(&tool_reg);
+        assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn equipment_tools_wraps_with_permission_guard() {
+        let mut reg = EquipmentRegistry::new(tempfile::tempdir().unwrap().path().to_path_buf());
+
+        // Register a "shell" tool in the equipment registry.
+        // Create a minimal shell tool for testing.
+        let m = make_manifest("ext", EquipmentType::ToolExtension, vec!["shell"], true);
+        let id = m.id();
+        reg.loaded.insert(
+            id.clone(),
+            Equipment {
+                id: id.clone(),
+                manifest: m,
+                dir: PathBuf::from("/tmp/fake"),
+                status: EquipmentStatus::Active,
+            },
+        );
+
+        // Build a ToolRegistry with a "shell" tool.
+        use crate::tool::ToolOutput;
+        use async_trait::async_trait;
+        struct FakeShell;
+        #[async_trait]
+        impl crate::tool::Tool for FakeShell {
+            fn name(&self) -> &str { "shell" }
+            fn description(&self) -> &str { "fake" }
+            fn parameters(&self) -> serde_json::Value { serde_json::json!({}) }
+            async fn execute(&self, _args: &serde_json::Value) -> ToolOutput {
+                ToolOutput::success(serde_json::json!({"ok": true}))
+            }
+        }
+
+        let mut tool_reg = ToolRegistry::new();
+        tool_reg.register_ref(Arc::new(FakeShell));
+
+        let tools = reg.equipment_tools(&tool_reg);
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].0, "ext");
+        assert_eq!(tools[0].1.name(), "shell");
+    }
+
+    #[test]
+    fn register_tools_adds_to_registry() {
+        let mut reg = EquipmentRegistry::new(tempfile::tempdir().unwrap().path().to_path_buf());
+        let m = make_manifest("ext", EquipmentType::ToolExtension, vec!["shell"], false);
+        let id = m.id();
+        reg.loaded.insert(
+            id.clone(),
+            Equipment {
+                id: id.clone(),
+                manifest: m,
+                dir: PathBuf::from("/tmp/fake"),
+                status: EquipmentStatus::Active,
+            },
+        );
+
+        use crate::tool::ToolOutput;
+        use async_trait::async_trait;
+        struct FakeShell;
+        #[async_trait]
+        impl crate::tool::Tool for FakeShell {
+            fn name(&self) -> &str { "shell" }
+            fn description(&self) -> &str { "fake" }
+            fn parameters(&self) -> serde_json::Value { serde_json::json!({}) }
+            async fn execute(&self, _args: &serde_json::Value) -> ToolOutput {
+                ToolOutput::success(serde_json::json!({"ok": true}))
+            }
+        }
+
+        let mut tool_reg = ToolRegistry::new();
+        tool_reg.register_ref(Arc::new(FakeShell));
+
+        reg.register_tools(&mut tool_reg);
+        // shell should now be PermissionGuard-wrapped
+        assert!(tool_reg.get("shell").is_some());
+    }
+
+    #[test]
+    fn unregister_tools_removes_from_registry() {
+        let mut reg = EquipmentRegistry::new(tempfile::tempdir().unwrap().path().to_path_buf());
+        let m = make_manifest("ext", EquipmentType::ToolExtension, vec!["shell"], false);
+        let id = m.id();
+        reg.loaded.insert(
+            id.clone(),
+            Equipment {
+                id: id.clone(),
+                manifest: m,
+                dir: PathBuf::from("/tmp/fake"),
+                status: EquipmentStatus::Active,
+            },
+        );
+
+        use crate::tool::ToolOutput;
+        use async_trait::async_trait;
+        struct FakeShell;
+        #[async_trait]
+        impl crate::tool::Tool for FakeShell {
+            fn name(&self) -> &str { "shell" }
+            fn description(&self) -> &str { "fake" }
+            fn parameters(&self) -> serde_json::Value { serde_json::json!({}) }
+            async fn execute(&self, _args: &serde_json::Value) -> ToolOutput {
+                ToolOutput::success(serde_json::json!({"ok": true}))
+            }
+        }
+
+        let mut tool_reg = ToolRegistry::new();
+        tool_reg.register_ref(Arc::new(FakeShell));
+        reg.register_tools(&mut tool_reg);
+        assert!(tool_reg.get("shell").is_some());
+
+        let count = reg.unregister_tools(&mut tool_reg, "ext");
+        assert_eq!(count, 1);
+        assert!(tool_reg.get("shell").is_none());
+    }
+
+    #[test]
+    fn tool_registry_unregister_returns_false_for_missing() {
+        let mut reg = ToolRegistry::new();
+        assert!(!reg.unregister("nonexistent"));
     }
 }

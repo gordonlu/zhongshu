@@ -137,6 +137,11 @@ pub async fn run_agent(
             ));
         }
 
+        // Per-step progress tracking for recovery no-progress detection
+        let mut step_had_file_read = false;
+        let mut step_had_successful_edit = false;
+        let mut step_had_successful_test = false;
+
         // Harness: pre-turn checks
         {
             // Phase transitions: compare phase from BEFORE this turn's post-tool
@@ -292,6 +297,23 @@ pub async fn run_agent(
                 );
                 messages.push(Message::assistant(msg));
                 continue;
+            }
+
+            // Recovery: track file-read progress signal (set before any `continue`)
+            if matches!(tc.function.name.as_str(), "read" | "glob" | "grep" | "bash") {
+                step_had_file_read = true;
+                // File read may be a workspace file: resolve path from args if possible
+                if tc.function.name == "read" {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&tc.function.arguments) {
+                        if let Some(path_str) = val.get("file_path").and_then(|v| v.as_str())
+                            .or_else(|| val.get("path").and_then(|v| v.as_str()))
+                        {
+                            record_trace(runtime, HarnessEvent::FileRead {
+                                path: PathBuf::from(path_str),
+                            });
+                        }
+                    }
+                }
             }
 
             // Harness: pre-tool checks
@@ -476,8 +498,36 @@ pub async fn run_agent(
                     );
                 }
 
+                // Recovery: track edit/test progress and patch history
+                if tool_success && is_mutation {
+                    step_had_successful_edit = true;
+                    runtime.harness_state.recovery.patch_history.record(
+                        &tc.function.arguments,
+                    );
+                }
+                if tool_success
+                    && (tc.function.name == "self_test"
+                        || crate::harness::verification::classify::classify_command(
+                            &tc.function.arguments,
+                        ) != crate::harness::verification::classify::VerificationType::Unknown)
+                {
+                    step_had_successful_test = true;
+                }
+
                 // Architecture: re-index + rule evaluation on mutation
                 if is_mutation {
+                    // Trace: record FileEdit from tool args if possible
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&tc.function.arguments) {
+                        if let Some(path_str) = val.get("file_path").and_then(|v| v.as_str())
+                            .or_else(|| val.get("path").and_then(|v| v.as_str()))
+                        {
+                            record_trace(runtime, HarnessEvent::FileEdit {
+                                path: PathBuf::from(path_str),
+                                diff_hash: args_hash.clone(),
+                            });
+                        }
+                    }
+
                     // Lazy-build the project index on first mutation
                     let root = std::env::current_dir().unwrap_or_default();
                     if runtime.harness_state.architecture.index.is_none() {
@@ -487,57 +537,120 @@ pub async fn run_agent(
                         runtime.harness_state.architecture.index = Some(idx);
                     }
 
-                    if let Some(ref mut idx) = runtime.harness_state.architecture.index {
-                        let changed_paths = changed_paths_from_tool_args(&tc.function.arguments);
-                        let mut changes = Vec::new();
+                    let (arch_traces, arch_impact_msgs, arch_semantic_feedback) = {
+                        let mut traces = Vec::new();
+                        let mut impact_msgs = Vec::new();
+                        let mut semantic_feedback = Vec::new();
 
-                        for actual_path in changed_paths {
-                            if !actual_path.exists() {
-                                continue;
+                        if let Some(ref mut idx) = runtime.harness_state.architecture.index {
+                            let changed_paths = changed_paths_from_tool_args(&tc.function.arguments);
+                            let mut changes = Vec::new();
+
+                            for actual_path in changed_paths {
+                                if !actual_path.exists() {
+                                    continue;
+                                }
+                                if let Ok(content) = std::fs::read_to_string(&actual_path) {
+                                    let old_index = idx.files.get(&actual_path).cloned();
+                                    let new_index = crate::harness::architecture::parser::parse_file(
+                                        &actual_path,
+                                        &content,
+                                    );
+                                    changes.extend(crate::harness::architecture::diff::compute_diff(
+                                        old_index.as_ref(),
+                                        &new_index,
+                                    ));
+                                    let items = new_index.items.clone();
+                                    idx.symbols.update_file(&actual_path, &items);
+                                    idx.files.insert(actual_path, new_index);
+                                }
                             }
-                            if let Ok(content) = std::fs::read_to_string(&actual_path) {
-                                let old_index = idx.files.get(&actual_path).cloned();
-                                let new_index = crate::harness::architecture::parser::parse_file(
-                                    &actual_path,
-                                    &content,
+
+                            // Shell commands may mutate files without exposing paths in tool args.
+                            if changes.is_empty() && tc.function.name == "shell" {
+                                idx.scan_dir(&root);
+                            }
+
+                            let layers = crate::harness::architecture::layer::LayerGraph::default();
+                            let rules = crate::harness::architecture::config::default_rules();
+                            let (feedback, new_violations) =
+                                crate::harness::architecture::rules::evaluate_rules(
+                                    &rules,
+                                    idx,
+                                    &layers,
+                                    &changes,
+                                    &runtime.harness_state.architecture.violations,
                                 );
-                                changes.extend(crate::harness::architecture::diff::compute_diff(
-                                    old_index.as_ref(),
-                                    &new_index,
-                                ));
-                                let items = new_index.items.clone();
-                                idx.symbols.update_file(&actual_path, &items);
-                                idx.files.insert(actual_path, new_index);
+                            for v in &new_violations {
+                                traces.push(HarnessEvent::ArchitectureViolation {
+                                    rule_id: v.key.rule_id.clone(),
+                                    severity: format!("{:?}", v.severity),
+                                });
+                            }
+                            for v in new_violations {
+                                runtime.harness_state.architecture.violations.push(v);
+                            }
+                            for fb in &feedback {
+                                if fb.severity == crate::harness::action::Severity::Fatal {
+                                    let text = crate::harness::render::render_feedback(fb);
+                                    messages.push(Message::system(text));
+                                }
+                            }
+
+                            // Architecture depth: impact + semantic
+                            // NOTE: api.rs::check_compatibility is NOT called here because
+                            // FileIndex does not store source content, so we cannot diff
+                            // old vs new source text. Add it when FileIndex gains a content field.
+                            if !changes.is_empty() {
+                                let impact = crate::harness::architecture::impact::analyze(&changes, idx);
+                                impact_msgs = impact;
+                                for file in idx.files.keys() {
+                                    if file.exists() {
+                                        if let Ok(content) = std::fs::read_to_string(file) {
+                                            let sf = crate::harness::architecture::semantic::check_semantics(
+                                                &content, file, &rules,
+                                            );
+                                            semantic_feedback.extend(sf);
+                                        }
+                                    }
+                                }
                             }
                         }
-
-                        // Shell commands may mutate files without exposing paths in tool args.
-                        // Rescan so whole-index rules still see the current workspace state.
-                        if changes.is_empty() && tc.function.name == "shell" {
-                            idx.scan_dir(&root);
-                        }
-
-                        let layers = crate::harness::architecture::layer::LayerGraph::default();
-                        let rules = crate::harness::architecture::config::default_rules();
-                        let (feedback, new_violations) =
-                            crate::harness::architecture::rules::evaluate_rules(
-                                &rules,
-                                idx,
-                                &layers,
-                                &changes,
-                                &runtime.harness_state.architecture.violations,
-                            );
-                        for v in new_violations {
-                            runtime.harness_state.architecture.violations.push(v);
-                        }
-                        for fb in feedback {
-                            if fb.severity == crate::harness::action::Severity::Fatal {
-                                let text = crate::harness::render::render_feedback(&fb);
-                                messages.push(Message::system(text));
-                            }
-                        }
+                        (traces, impact_msgs, semantic_feedback)
+                    };
+                    for ev in arch_traces {
+                        record_trace(runtime, ev);
+                    }
+                    for msg in &arch_impact_msgs {
+                        info!("arch impact: {msg}");
+                    }
+                    for fb in &arch_semantic_feedback {
+                        let text = crate::harness::render::render_feedback(fb);
+                        info!("arch semantic: {text}");
                     }
                 }
+            }
+        }
+
+        // Recovery: check no-progress, repeated failures, repeated patches
+        {
+            let recovery_feedback = crate::harness::recovery::check(
+                &mut runtime.harness_state.recovery,
+                step_had_file_read,
+                step_had_successful_edit,
+                step_had_successful_test,
+                harness_step,
+            );
+            for fb in &recovery_feedback {
+                let text = crate::harness::render::render_feedback(fb);
+                messages.push(Message::system(text));
+                record_trace(
+                    runtime,
+                    HarnessEvent::RecoveryFeedback {
+                        rule_id: fb.rule_id.clone(),
+                        message: fb.message.clone(),
+                    },
+                );
             }
         }
     }
@@ -559,7 +672,20 @@ pub async fn run_agent_with_context(
     callbacks: Option<Arc<AgentCallbacks>>,
     source: &str,
 ) -> anyhow::Result<LoopResult> {
+    let context_desc = format!(
+        "evidence={}, recent={}, input_len={}",
+        context.evidence.len(),
+        context.recent.len(),
+        context.input.len(),
+    );
     let messages = context.into_llm_messages();
+    record_trace(
+        runtime,
+        HarnessEvent::ContextIncluded {
+            description: context_desc,
+            estimated_tokens: 0,
+        },
+    );
     run_agent(runtime, messages, callbacks, source).await
 }
 
@@ -837,6 +963,178 @@ mod tests {
             Some(HarnessEvent::RunCompleted { .. })
         ));
         assert_eq!(runtime.harness_state.trace.events, result.trace_events);
+    }
+
+    // ── Recovery loop tests ──
+
+    struct NoopTool;
+
+    #[async_trait]
+    impl Tool for NoopTool {
+        fn name(&self) -> &str { "noop" }
+        fn description(&self) -> &str { "no-op tool for testing" }
+        fn parameters(&self) -> serde_json::Value { json!({"type":"object","properties":{}}) }
+        async fn execute(&self, _arguments: &serde_json::Value) -> ToolOutput {
+            ToolOutput::success(json!({"ok": true}))
+        }
+    }
+
+    /// A provider that follows a scripted sequence of tool-call / text responses.
+    #[derive(Clone)]
+    struct ScriptedProvider {
+        /// Each entry is `(tool_name, tool_args, succeed)` for a tool-call response,
+        /// or `("__text__", text, true)` for a plain-text response.
+        script: Arc<Vec<(String, String, bool)>>,
+        idx: Arc<Mutex<usize>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for ScriptedProvider {
+        async fn chat(
+            &self,
+            _request: ChatCompletionRequest,
+        ) -> anyhow::Result<ChatCompletionResponse> {
+            let mut idx = self.idx.lock().unwrap();
+            if *idx >= self.script.len() {
+                anyhow::bail!("script exhausted (idx={})", *idx);
+            }
+            let entry = self.script[*idx].clone();
+            *idx += 1;
+
+            let message = if entry.0 == "__text__" {
+                Message::assistant(entry.1)
+            } else {
+                Message::assistant_with_tools(
+                    "",
+                    vec![ToolCall {
+                        id: format!("call-{}", *idx),
+                        call_type: "function".into(),
+                        function: FunctionCall {
+                            name: entry.0.clone(),
+                            arguments: entry.1.clone(),
+                        },
+                    }],
+                )
+            };
+            Ok(ChatCompletionResponse {
+                choices: vec![FinalChoice {
+                    message,
+                    finish_reason: None,
+                }],
+                usage: None,
+            })
+        }
+
+        async fn stream_chat(
+            &self,
+            _request: ChatCompletionRequest,
+            _on_event: Box<dyn FnMut(StreamEvent) + Send>,
+        ) -> anyhow::Result<()> {
+            anyhow::bail!("streaming not used in recovery tests")
+        }
+
+        fn model_name(&self) -> &str { "scripted" }
+        fn change_model(&self, _model: &str) -> Arc<dyn LlmProvider> {
+            Arc::new(self.clone())
+        }
+    }
+
+    fn small_budget() -> AgentBudget {
+        AgentBudget {
+            max_steps: 20,
+            max_tool_calls: 20,
+            per_tool_limit: 20,
+            token_limit: 10_000,
+            llm_timeout: Duration::from_secs(5),
+            tool_timeout: Duration::from_secs(5),
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_no_progress_triggers_after_5_steps() {
+        let provider = ScriptedProvider {
+            script: Arc::new(vec![
+                ("noop".into(), "{}".into(), true),
+                ("noop".into(), "{}".into(), true),
+                ("noop".into(), "{}".into(), true),
+                ("noop".into(), "{}".into(), true),
+                ("noop".into(), "{}".into(), true),
+                ("__text__".into(), "done".into(), true),
+            ]),
+            idx: Arc::new(Mutex::new(0)),
+        };
+        let mut runtime = AgentRuntime::new(
+            provider,
+            ToolRegistry::new().register(NoopTool),
+            "recovery-test",
+            small_budget(),
+        );
+
+        let result = run_agent(
+            &mut runtime,
+            vec![Message::user("do some work")],
+            None,
+            "test",
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(result.stop_reason, StopReason::Finished));
+        // No-progress after 5 consecutive noop steps → recovery feedback emitted
+        let recovery_events: Vec<_> = result.trace_events.iter().filter(|e| {
+            matches!(e, HarnessEvent::RecoveryFeedback { .. })
+        }).collect();
+        assert!(!recovery_events.is_empty(), "expected recovery feedback events");
+        let has_no_progress = recovery_events.iter().any(|e| {
+            matches!(e, HarnessEvent::RecoveryFeedback { message, .. } if message.contains("没有取得进展"))
+        });
+        assert!(has_no_progress, "expected no-progress hint in: {:?}", recovery_events);
+    }
+
+    #[tokio::test]
+    async fn recovery_no_progress_resets_on_read() {
+        struct ReadTool;
+        #[async_trait]
+        impl Tool for ReadTool {
+            fn name(&self) -> &str { "read" }
+            fn description(&self) -> &str { "reads a file" }
+            fn parameters(&self) -> serde_json::Value { json!({"type":"object","properties":{}}) }
+            async fn execute(&self, _: &serde_json::Value) -> ToolOutput { ToolOutput::success(json!([])) }
+        }
+
+        let provider = ScriptedProvider {
+            script: Arc::new(vec![
+                ("noop".into(), "{}".into(), true),
+                ("noop".into(), "{}".into(), true),
+                ("read".into(), r#"{"path":"fake.rs"}"#.into(), true),
+                ("noop".into(), "{}".into(), true),
+                ("noop".into(), "{}".into(), true),
+                ("__text__".into(), "done".into(), true),
+            ]),
+            idx: Arc::new(Mutex::new(0)),
+        };
+
+        let mut runtime = AgentRuntime::new(
+            provider,
+            ToolRegistry::new().register(NoopTool).register(ReadTool),
+            "recovery-test",
+            small_budget(),
+        );
+
+        let result = run_agent(
+            &mut runtime,
+            vec![Message::user("do some work")],
+            None,
+            "test",
+        )
+        .await
+        .unwrap();
+
+        let recovery_events: Vec<_> = result.trace_events.iter().filter(|e| {
+            matches!(e, HarnessEvent::RecoveryFeedback { .. })
+        }).collect();
+        // With a read at step 3, 2 noops before and 1 after is not enough (need 5 consecutive)
+        assert!(recovery_events.is_empty(), "read should reset no-progress counter");
     }
 }
 

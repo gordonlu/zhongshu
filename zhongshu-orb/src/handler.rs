@@ -11,8 +11,8 @@ use zhongshu_core::agent::llm::OpenAiProvider;
 use zhongshu_core::agent::ModelRouter;
 use zhongshu_core::authority;
 use zhongshu_core::event::{
-    AgentEvent, AgentState, Event, EventBus, EventRx, MessageId, ResponseEvent, ResponseRole,
-    ResponseRx, ResponseTx, TaskEvent, ToolEvent,
+    AgentEvent, AgentState, Event, EventBus, EventRx, HarnessUiEvent, MessageId, ResponseEvent,
+    ResponseRole, ResponseRx, ResponseTx, TaskEvent, ToolEvent,
 };
 use zhongshu_core::integration::DeeplosslessProxy;
 use zhongshu_message_core::streaming::ControlTokenFilter;
@@ -476,6 +476,43 @@ impl ZhongshuApp {
                             if self.config.agent.desktop_notification {
                                 let _ =
                                     zhongshu_core::desktop::notification::show("任务完成", &title);
+                            }
+                        }
+                        Event::Harness(event) => {
+                            if let Some(ref ov) = self.overlay {
+                                match event {
+                                    HarnessUiEvent::Verification {
+                                        command,
+                                        success,
+                                        exit_code,
+                                        step,
+                                    } => {
+                                        ov.send(&serde_json::json!({
+                                            "type": "verification",
+                                            "command": command,
+                                            "success": success,
+                                            "exit_code": exit_code,
+                                            "step": step,
+                                        }));
+                                    }
+                                    HarnessUiEvent::RecoveryFeedback {
+                                        rule_id,
+                                        message,
+                                    } => {
+                                        ov.send(&serde_json::json!({
+                                            "type": "recovery_feedback",
+                                            "rule_id": rule_id,
+                                            "message": message,
+                                        }));
+                                    }
+                                    HarnessUiEvent::PhaseTransition { from, to } => {
+                                        ov.send(&serde_json::json!({
+                                            "type": "phase_transition",
+                                            "from": from,
+                                            "to": to,
+                                        }));
+                                    }
+                                }
                             }
                         }
                         _ => {}

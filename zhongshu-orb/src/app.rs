@@ -19,8 +19,8 @@ use zhongshu_core::agent::{
 use zhongshu_core::core::context::{ContextMessage, ContextPackBuilder, ContextRole, RecentUnit};
 use zhongshu_core::core::{Database, RunbookStore};
 use zhongshu_core::event::{
-    AgentEvent, AgentState, Event, EventBus, MessageId, ResponseEvent, ResponseRole, ResponseTx,
-    ToolEvent,
+    AgentEvent, AgentState, Event, EventBus, HarnessUiEvent, MessageId, ResponseEvent,
+    ResponseRole, ResponseTx, ToolEvent,
 };
 use zhongshu_core::harness::trace::runbook::events_to_runbook;
 use zhongshu_core::integration::DeeplosslessProxy;
@@ -509,6 +509,43 @@ impl AgentController {
                         &rr.trace_events,
                         conversation_id,
                     );
+                    // Publish harness trace events to EventBus for UI forwarding.
+                    for event in &rr.trace_events {
+                        match event {
+                            zhongshu_core::harness::trace::event::HarnessEvent::Verification {
+                                command,
+                                success,
+                                exit_code,
+                                step,
+                            } => {
+                                eb.publish(Event::Harness(HarnessUiEvent::Verification {
+                                    command: command.clone(),
+                                    success: *success,
+                                    exit_code: *exit_code,
+                                    step: *step,
+                                }));
+                            }
+                            zhongshu_core::harness::trace::event::HarnessEvent::RecoveryFeedback {
+                                rule_id,
+                                message,
+                            } => {
+                                eb.publish(Event::Harness(HarnessUiEvent::RecoveryFeedback {
+                                    rule_id: rule_id.clone(),
+                                    message: message.clone(),
+                                }));
+                            }
+                            zhongshu_core::harness::trace::event::HarnessEvent::PhaseTransition {
+                                from,
+                                to,
+                            } => {
+                                eb.publish(Event::Harness(HarnessUiEvent::PhaseTransition {
+                                    from: from.clone(),
+                                    to: to.clone(),
+                                }));
+                            }
+                            _ => {}
+                        }
+                    }
                     let last = rr.messages.last().map(|x| x.content.as_str()).unwrap_or("");
                     // Append to conversation history for next turn.
                     history_arc
@@ -769,10 +806,15 @@ fn persist_trace_runbook(
     };
     runbook.conversation_id = conversation_id;
 
-    let _ = tokio::task::spawn_blocking(move || {
+    let handle = tokio::task::spawn_blocking(move || {
         let store = RunbookStore::new(Database::new(core_db_path));
         if let Err(e) = store.migrate().and_then(|_| store.save(&runbook)) {
             tracing::warn!(error = %e, runbook_id = %runbook.id, "failed to persist trace runbook");
+        }
+    });
+    tokio::spawn(async move {
+        if let Err(e) = handle.await {
+            tracing::warn!("trace runbook persistence task failed: {e}");
         }
     });
 }

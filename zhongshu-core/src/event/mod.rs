@@ -51,6 +51,7 @@ pub enum AgentState {
 pub enum Event {
     Agent(AgentEvent),
     Tool(ToolEvent),
+    Harness(HarnessUiEvent),
     Task(TaskEvent),
     Memory(MemoryEvent),
     Goal(GoalEvent),
@@ -69,6 +70,11 @@ impl Event {
                 AgentEvent::WorkerReport(..) => "worker_report",
             },
             Event::Tool(..) => "tool",
+            Event::Harness(e) => match e {
+                HarnessUiEvent::Verification { .. } => "verification",
+                HarnessUiEvent::RecoveryFeedback { .. } => "recovery",
+                HarnessUiEvent::PhaseTransition { .. } => "phase",
+            },
             Event::Task(e) => match e {
                 TaskEvent::Triggered { .. } => "task_triggered",
                 TaskEvent::Completed { .. } => "task_completed",
@@ -161,6 +167,25 @@ pub enum SourceEvent {
 pub enum ToolEvent {
     Started { name: String },
     Completed { name: String, success: bool },
+}
+
+/// UI-facing events from the harness layer (verification, recovery, phase).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum HarnessUiEvent {
+    Verification {
+        command: String,
+        success: bool,
+        exit_code: Option<i32>,
+        step: u32,
+    },
+    RecoveryFeedback {
+        rule_id: String,
+        message: String,
+    },
+    PhaseTransition {
+        from: String,
+        to: String,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

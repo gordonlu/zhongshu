@@ -4,6 +4,10 @@ mod config;
 mod handler;
 mod hotkey;
 mod indicator;
+#[cfg(not(windows))]
+mod overlay;
+#[cfg(windows)]
+#[path = "overlay_stub.rs"]
 mod overlay;
 mod render;
 mod services;
@@ -288,26 +292,29 @@ fn main() {
         &cfg.llm.model_routing.flash_model,
         &cfg.llm.model_routing.pro_model,
     );
+    let mut main_registry = default_registry()
+        .register(zhongshu_core::tool::search::WebSearchTool)
+        .register(zhongshu_core::tool::browser::BrowserTool)
+        .register(zhongshu_core::tool::browser_automation::BrowserAutomationTool)
+        .register(zhongshu_core::tool::webfetch::WebFetchTool)
+        .register(zhongshu_core::tool::search_files::SearchFilesTool)
+        .register(zhongshu_core::tool::fs::GrepTool)
+        .register(zhongshu_core::tool::fs::GlobTool)
+        .register(zhongshu_core::tool::fs::EditTool)
+        .register(zhongshu_core::tool::automation::AutomationTool)
+        .register(zhongshu_core::tool::self_test::SelfTestTool)
+        .register(memory_tool.clone())
+        .register(goal_tool.clone())
+        .register(task_tool.clone())
+        .register(suggestion_tool.clone())
+        .register(memory_query_tool.clone());
+    // Register equipment-provided tools into the main agent registry
+    equipment.lock().unwrap().register_tools(&mut main_registry);
     let controller = Arc::new(AgentController::new(
         eb.clone(),
         response_tx.clone(),
         provider.clone(),
-        default_registry()
-            .register(zhongshu_core::tool::search::WebSearchTool)
-            .register(zhongshu_core::tool::browser::BrowserTool)
-            .register(zhongshu_core::tool::browser_automation::BrowserAutomationTool)
-            .register(zhongshu_core::tool::webfetch::WebFetchTool)
-            .register(zhongshu_core::tool::search_files::SearchFilesTool)
-            .register(zhongshu_core::tool::fs::GrepTool)
-            .register(zhongshu_core::tool::fs::GlobTool)
-            .register(zhongshu_core::tool::fs::EditTool)
-            .register(zhongshu_core::tool::automation::AutomationTool)
-            .register(zhongshu_core::tool::self_test::SelfTestTool)
-            .register(memory_tool.clone())
-            .register(goal_tool.clone())
-            .register(task_tool.clone())
-            .register(suggestion_tool.clone())
-            .register(memory_query_tool.clone()),
+        main_registry,
         cfg.llm.model.clone(),
         app::SessionState::new(),
         base_system_prompt,
@@ -354,24 +361,26 @@ fn main() {
     let rule_queue = task_scheduler.queue().clone();
     task_scheduler.spawn();
 
+    let mut worker_registry = default_registry()
+        .register(zhongshu_core::tool::search::WebSearchTool)
+        .register(zhongshu_core::tool::browser::BrowserTool)
+        .register(zhongshu_core::tool::browser_automation::BrowserAutomationTool)
+        .register(zhongshu_core::tool::webfetch::WebFetchTool)
+        .register(zhongshu_core::tool::search_files::SearchFilesTool)
+        .register(zhongshu_core::tool::fs::GrepTool)
+        .register(zhongshu_core::tool::fs::GlobTool)
+        .register(zhongshu_core::tool::fs::EditTool)
+        .register(zhongshu_core::tool::automation::AutomationTool)
+        .register(zhongshu_core::tool::self_test::SelfTestTool)
+        .register(memory_tool.clone())
+        .register(goal_tool.clone())
+        .register(task_tool.clone())
+        .register(suggestion_tool.clone())
+        .register(memory_query_tool.clone());
+    equipment.lock().unwrap().register_tools(&mut worker_registry);
     let worker_runtime = Arc::new(AgentRuntime::new(
         provider.clone(),
-        default_registry()
-            .register(zhongshu_core::tool::search::WebSearchTool)
-            .register(zhongshu_core::tool::browser::BrowserTool)
-            .register(zhongshu_core::tool::browser_automation::BrowserAutomationTool)
-            .register(zhongshu_core::tool::webfetch::WebFetchTool)
-            .register(zhongshu_core::tool::search_files::SearchFilesTool)
-            .register(zhongshu_core::tool::fs::GrepTool)
-            .register(zhongshu_core::tool::fs::GlobTool)
-            .register(zhongshu_core::tool::fs::EditTool)
-            .register(zhongshu_core::tool::automation::AutomationTool)
-            .register(zhongshu_core::tool::self_test::SelfTestTool)
-            .register(memory_tool.clone())
-            .register(goal_tool.clone())
-            .register(task_tool.clone())
-            .register(suggestion_tool.clone())
-            .register(memory_query_tool.clone()),
+        worker_registry,
         cfg.llm.model.clone(),
         AgentBudget {
             max_steps: 50,

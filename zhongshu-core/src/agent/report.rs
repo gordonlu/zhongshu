@@ -1,4 +1,5 @@
 use crate::agent::attention::AttentionLevel;
+use crate::harness::trace::event::HarnessEvent;
 
 /// Worker 执行的唯一产出。
 ///
@@ -18,4 +19,6 @@ pub struct Report {
     pub confidence: f64,
     /// 通知层级
     pub attention: AttentionLevel,
+    /// Agent loop trace events (tool calls, verification, recovery, etc.)
+    pub trace_events: Vec<HarnessEvent>,
 }

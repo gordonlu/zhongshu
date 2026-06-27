@@ -409,4 +409,82 @@ mod tests {
         let tasks = trepo.list_pending().unwrap();
         assert_eq!(tasks.len(), 1);
     }
+
+    // ── Task Step Lifecycle (Phase 4) ─────────────────────────────────
+
+    #[test]
+    fn step_lifecycle_full() {
+        let db = test_db();
+        let trepo = TaskRepository::new(db);
+
+        let task = trepo.create(None, "test task").unwrap();
+        let step = trepo.add_step(&task.id, 0, "first step").unwrap();
+
+        assert_eq!(step.status, StepStatus::Pending);
+        assert!(step.started_at.is_none());
+        assert!(step.finished_at.is_none());
+        assert!(step.error.is_none());
+
+        // Mark running — sets started_at
+        trepo.update_step_status(&step.id, StepStatus::Running).unwrap();
+        let steps = trepo.list_steps(&task.id).unwrap();
+        assert_eq!(steps[0].status, StepStatus::Running);
+        assert!(steps[0].started_at.is_some());
+        assert!(steps[0].finished_at.is_none());
+
+        // Set input
+        trepo.set_step_input(&step.id, "do the thing").unwrap();
+        let steps = trepo.list_steps(&task.id).unwrap();
+        assert_eq!(steps[0].input.as_deref(), Some("do the thing"));
+
+        // Complete — sets finished_at
+        trepo.update_step_status(&step.id, StepStatus::Completed).unwrap();
+        let steps = trepo.list_steps(&task.id).unwrap();
+        assert_eq!(steps[0].status, StepStatus::Completed);
+        assert!(steps[0].finished_at.is_some());
+
+        // Tool summary
+        trepo.set_step_tool_summary(&step.id, "read, grep, edit").unwrap();
+        let steps = trepo.list_steps(&task.id).unwrap();
+        assert_eq!(steps[0].tool_summary.as_deref(), Some("read, grep, edit"));
+
+        // Verification
+        trepo.set_step_verification(&step.id, "通过: all tests pass").unwrap();
+        let steps = trepo.list_steps(&task.id).unwrap();
+        assert_eq!(steps[0].verification.as_deref(), Some("通过: all tests pass"));
+    }
+
+    #[test]
+    fn step_error_sets_failed_status() {
+        let db = test_db();
+        let trepo = TaskRepository::new(db);
+
+        let task = trepo.create(None, "fail task").unwrap();
+        let step = trepo.add_step(&task.id, 0, "risky step").unwrap();
+
+        // Running
+        trepo.update_step_status(&step.id, StepStatus::Running).unwrap();
+
+        // Error — set_step_error sets status to Failed automatically
+        trepo.set_step_error(&step.id, "worker crashed").unwrap();
+        let steps = trepo.list_steps(&task.id).unwrap();
+        assert_eq!(steps[0].status, StepStatus::Failed);
+        assert_eq!(steps[0].error.as_deref(), Some("worker crashed"));
+        assert!(steps[0].finished_at.is_some());
+    }
+
+    #[test]
+    fn step_new_statuses_roundtrip() {
+        let db = test_db();
+        let trepo = TaskRepository::new(db);
+
+        let task = trepo.create(None, "statuses").unwrap();
+
+        for (order, status) in [StepStatus::ToolBlocked, StepStatus::VerificationFailed].iter().enumerate() {
+            let step = trepo.add_step(&task.id, order as i32, "test").unwrap();
+            trepo.update_step_status(&step.id, *status).unwrap();
+            let steps = trepo.list_steps(&task.id).unwrap();
+            assert_eq!(steps[order].status, *status);
+        }
+    }
 }

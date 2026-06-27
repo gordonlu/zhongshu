@@ -68,6 +68,7 @@ impl DigestBuilder {
             findings,
             confidence: 0.8,
             attention: AttentionLevel::Notify,
+            trace_events: vec![],
         };
 
         info!(worker = "digest", reports = total, "sending digest report");
@@ -91,6 +92,7 @@ mod tests {
             findings: "detailed findings".into(),
             confidence: 0.7,
             attention: AttentionLevel::Digest,
+            trace_events: vec![],
         }
     }
 

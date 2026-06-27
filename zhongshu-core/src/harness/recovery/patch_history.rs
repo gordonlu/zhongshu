@@ -1,3 +1,4 @@
+#[derive(Debug, Clone)]
 pub struct PatchHistory {
     pub diff_hashes: Vec<String>,
 }

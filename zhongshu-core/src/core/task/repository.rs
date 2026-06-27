@@ -147,10 +147,16 @@ impl TaskRepository {
             status: StepStatus::Pending,
             input: None,
             output: None,
+            error: None,
+            tool_summary: None,
+            verification: None,
             created_at: now(),
+            started_at: None,
+            finished_at: None,
         };
         conn.execute(
-            "INSERT INTO task_steps (id, task_id, step_order, action, status, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO task_steps (id, task_id, step_order, action, status, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![step.id, step.task_id, step.step_order, step.action, step.status.as_str(), step.created_at],
         )?;
         Ok(step)
@@ -159,7 +165,8 @@ impl TaskRepository {
     pub fn list_steps(&self, task_id: &str) -> rusqlite::Result<Vec<TaskStep>> {
         let conn = self.db.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, task_id, step_order, action, status, input, output, created_at \
+            "SELECT id, task_id, step_order, action, status, input, output, \
+             error, tool_summary, verification, created_at, started_at, finished_at \
              FROM task_steps WHERE task_id = ?1 ORDER BY step_order ASC",
         )?;
         let rows = stmt.query_map(params![task_id], |row| {
@@ -172,7 +179,12 @@ impl TaskRepository {
                     .unwrap_or(StepStatus::Pending),
                 input: row.get(5)?,
                 output: row.get(6)?,
-                created_at: row.get(7)?,
+                error: row.get(7)?,
+                tool_summary: row.get(8)?,
+                verification: row.get(9)?,
+                created_at: row.get(10)?,
+                started_at: row.get(11)?,
+                finished_at: row.get(12)?,
             })
         })?;
         rows.collect()
@@ -180,10 +192,20 @@ impl TaskRepository {
 
     pub fn update_step_status(&self, id: &str, status: StepStatus) -> rusqlite::Result<bool> {
         let conn = self.db.conn()?;
-        let n = conn.execute(
-            "UPDATE task_steps SET status = ?1 WHERE id = ?2",
-            params![status.as_str(), id],
-        )?;
+        let n = match status {
+            StepStatus::Running => conn.execute(
+                "UPDATE task_steps SET status = ?1, started_at = ?2 WHERE id = ?3",
+                params![status.as_str(), now(), id],
+            )?,
+            StepStatus::Completed | StepStatus::Failed => conn.execute(
+                "UPDATE task_steps SET status = ?1, finished_at = ?2 WHERE id = ?3",
+                params![status.as_str(), now(), id],
+            )?,
+            _ => conn.execute(
+                "UPDATE task_steps SET status = ?1 WHERE id = ?2",
+                params![status.as_str(), id],
+            )?,
+        };
         Ok(n > 0)
     }
 
@@ -192,6 +214,42 @@ impl TaskRepository {
         let n = conn.execute(
             "UPDATE task_steps SET output = ?1 WHERE id = ?2",
             params![output, id],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn set_step_input(&self, id: &str, input: &str) -> rusqlite::Result<bool> {
+        let conn = self.db.conn()?;
+        let n = conn.execute(
+            "UPDATE task_steps SET input = ?1 WHERE id = ?2",
+            params![input, id],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn set_step_error(&self, id: &str, error: &str) -> rusqlite::Result<bool> {
+        let conn = self.db.conn()?;
+        let n = conn.execute(
+            "UPDATE task_steps SET error = ?1, status = ?2, finished_at = ?3 WHERE id = ?4",
+            params![error, StepStatus::Failed.as_str(), now(), id],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn set_step_tool_summary(&self, id: &str, summary: &str) -> rusqlite::Result<bool> {
+        let conn = self.db.conn()?;
+        let n = conn.execute(
+            "UPDATE task_steps SET tool_summary = ?1 WHERE id = ?2",
+            params![summary, id],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn set_step_verification(&self, id: &str, result: &str) -> rusqlite::Result<bool> {
+        let conn = self.db.conn()?;
+        let n = conn.execute(
+            "UPDATE task_steps SET verification = ?1 WHERE id = ?2",
+            params![result, id],
         )?;
         Ok(n > 0)
     }

@@ -69,6 +69,7 @@ impl Worker {
             findings: last_content.to_string(),
             confidence: 0.5,
             attention,
+            trace_events: result.trace_events,
         })
     }
 

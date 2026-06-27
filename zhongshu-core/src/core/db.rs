@@ -23,6 +23,17 @@ impl Database {
     pub fn migrate(&self) -> rusqlite::Result<()> {
         let conn = self.conn()?;
 
+        // Phase 4 migration: add columns to existing task_steps table
+        for sql in &[
+            "ALTER TABLE task_steps ADD COLUMN error TEXT",
+            "ALTER TABLE task_steps ADD COLUMN tool_summary TEXT",
+            "ALTER TABLE task_steps ADD COLUMN verification TEXT",
+            "ALTER TABLE task_steps ADD COLUMN started_at INTEGER",
+            "ALTER TABLE task_steps ADD COLUMN finished_at INTEGER",
+        ] {
+            let _ = conn.execute_batch(sql);
+        }
+
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS observations (
@@ -78,7 +89,12 @@ impl Database {
                 status      TEXT NOT NULL DEFAULT 'pending',
                 input       TEXT,
                 output      TEXT,
-                created_at  INTEGER NOT NULL
+                error       TEXT,
+                tool_summary TEXT,
+                verification TEXT,
+                created_at  INTEGER NOT NULL,
+                started_at  INTEGER,
+                finished_at INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS task_runs (

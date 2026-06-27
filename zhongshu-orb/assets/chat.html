@@ -110,6 +110,21 @@ body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMac
 .tool-count{font-size:10px;color:var(--text-muted);margin-left:1px}
 .tool-sep{height:1px;background:var(--border);margin:6px 0 8px}
 
+/* Verification / recovery cards */
+.harness-card{margin:4px 0 6px;padding:6px 10px;border-radius:var(--radius-sm);font-size:11px;line-height:1.5;border:1px solid var(--border);background:rgba(0,0,0,0.08)}
+.harness-card .h-label{font-weight:600;letter-spacing:0.03em;margin-bottom:2px;display:flex;align-items:center;gap:5px}
+.harness-card .h-command{font-family:'SF Mono','JetBrains Mono',monospace;color:var(--text-dim);word-break:break-all;font-size:10.5px}
+.harness-card .h-body{display:flex;flex-wrap:wrap;gap:4px 10px;margin-top:2px;color:var(--text-dim)}
+.harness-card .h-body span{white-space:nowrap}
+.harness-card.verify-pass{border-color:rgba(34,197,94,0.3);background:rgba(34,197,94,0.04)}
+.harness-card.verify-pass .h-label{color:var(--success)}
+.harness-card.verify-fail{border-color:rgba(208,74,26,0.35);background:rgba(208,74,26,0.05)}
+.harness-card.verify-fail .h-label{color:var(--danger)}
+.harness-card.recovery{border-color:rgba(251,146,60,0.3);background:rgba(251,146,60,0.04)}
+.harness-card.recovery .h-label{color:#f59e0b}
+.harness-card.phase{border-color:var(--accent-soft);background:var(--accent-soft)}
+.harness-card.phase .h-label{color:var(--accent)}
+
 /* Thinking spinner */
 .thinking{display:flex;align-items:center;gap:6px;color:var(--text-muted);font-size:12px;padding:2px 0}
 .spinner{width:12px;height:12px;border:1.5px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite;flex-shrink:0}
@@ -571,6 +586,49 @@ function buildMessageNode(m) {
     bubble.appendChild(buildToolBadges(m.toolCalls));
   }
 
+  // Harness card rendering (verification / recovery / phase)
+  if (m._harnessType) {
+    let card = document.createElement('div');
+    card.className = 'harness-card';
+    let d = m._harnessData;
+    if (m._harnessType === 'verification') {
+      card.classList.add(d.success ? 'verify-pass' : 'verify-fail');
+      let label = document.createElement('div');
+      label.className = 'h-label';
+      label.textContent = d.label || '验证';
+      card.appendChild(label);
+      let cmd = document.createElement('div');
+      cmd.className = 'h-command';
+      cmd.textContent = d.command || '';
+      card.appendChild(cmd);
+      if (d.exitCode !== undefined && d.exitCode !== null) {
+        let body = document.createElement('div');
+        body.className = 'h-body';
+        body.innerHTML = '<span>退出码: ' + d.exitCode + '</span>';
+        card.appendChild(body);
+      }
+    } else if (m._harnessType === 'recovery') {
+      card.classList.add('recovery');
+      let label = document.createElement('div');
+      label.className = 'h-label';
+      label.textContent = '⚡ 恢复反馈 (' + escapeHtml(d.ruleId || '') + ')';
+      card.appendChild(label);
+      let msg = document.createElement('div');
+      msg.className = 'h-command';
+      msg.textContent = d.message || '';
+      card.appendChild(msg);
+    } else if (m._harnessType === 'phase') {
+      card.classList.add('phase');
+      let label = document.createElement('div');
+      label.className = 'h-label';
+      label.textContent = '⇄ 阶段切换: ' + escapeHtml(d.from || '') + ' → ' + escapeHtml(d.to || '');
+      card.appendChild(label);
+    }
+    bubble.appendChild(card);
+    div.appendChild(bubble);
+    return div;
+  }
+
   let content = document.createElement('div');
   content.className = 'md';
   if (m._thinking) {
@@ -832,6 +890,43 @@ function handleIpc(message) {
         break;
       case 'toast':
         showToast(msg.text);
+        break;
+      case 'verification':
+        {
+          let stepLabel = msg.step !== undefined ? '步骤 ' + msg.step : '';
+          let label = (msg.success ? '✓ ' : '✗ ') + '验证' + (stepLabel ? ' ' + stepLabel : '');
+          messages.push({
+            id: 'vrfy-' + Date.now() + '-' + Math.random().toString(36).slice(2,6),
+            role: 'system',
+            content: '',
+            _harnessType: 'verification',
+            _harnessData: { label, command: msg.command, success: msg.success, exitCode: msg.exit_code }
+          });
+          render();
+          scrollBottom();
+        }
+        break;
+      case 'recovery_feedback':
+        messages.push({
+          id: 'rcvy-' + Date.now() + '-' + Math.random().toString(36).slice(2,6),
+          role: 'system',
+          content: '',
+          _harnessType: 'recovery',
+          _harnessData: { ruleId: msg.rule_id, message: msg.message }
+        });
+        render();
+        scrollBottom();
+        break;
+      case 'phase_transition':
+        messages.push({
+          id: 'phas-' + Date.now() + '-' + Math.random().toString(36).slice(2,6),
+          role: 'system',
+          content: '',
+          _harnessType: 'phase',
+          _harnessData: { from: msg.from, to: msg.to }
+        });
+        render();
+        scrollBottom();
         break;
       case 'zoom':
         document.getElementById('btn-zoom').classList.toggle('active', !!msg.active);

@@ -207,6 +207,11 @@ impl ToolRegistry {
                 .collect(),
         }
     }
+
+    /// Remove a tool from the registry. Returns true if it was present.
+    pub fn unregister(&mut self, name: &str) -> bool {
+        self.tools.remove(name).is_some()
+    }
 }
 
 /// Decode HTML bytes with correct encoding, respecting Content-Type

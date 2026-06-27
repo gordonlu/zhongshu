@@ -146,6 +146,7 @@ mod tests {
             findings: "test".into(),
             confidence: 0.5,
             attention: level,
+            trace_events: vec![],
         }
     }
 

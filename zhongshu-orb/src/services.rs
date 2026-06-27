@@ -195,14 +195,7 @@ pub fn spawn_task_executor(
             let mut failed = false;
 
             for step in &plan_steps {
-                // Mark step running
-                let _ = tokio::task::spawn_blocking({
-                    let trepo = trepo.clone();
-                    let sid = step.id.clone();
-                    move || trepo.update_step_status(&sid, StepStatus::Running)
-                })
-                .await;
-
+                // Mark step running and store input
                 let prompt = if all_output.is_empty() {
                     format!("任务：{title}\n当前步骤：{}\n请执行此步骤。", step.action)
                 } else {
@@ -211,6 +204,16 @@ pub fn spawn_task_executor(
                         all_output, step.action,
                     )
                 };
+                let _ = tokio::task::spawn_blocking({
+                    let trepo = trepo.clone();
+                    let sid = step.id.clone();
+                    let p = prompt.clone();
+                    move || {
+                        let _ = trepo.update_step_status(&sid, StepStatus::Running);
+                        let _ = trepo.set_step_input(&sid, &p);
+                    }
+                })
+                .await;
 
                 let worker_task = task_step_to_worker_task(&task_id, &title, step, &prompt);
                 let step_output = match Worker::execute(
@@ -222,36 +225,91 @@ pub fn spawn_task_executor(
                 .await
                 {
                     Ok(report) => {
-                        if report.findings.trim().is_empty() {
+                        // Extract tool summary and verification from trace events
+                        let tool_names: Vec<String> = report
+                            .trace_events
+                            .iter()
+                            .filter_map(|e| {
+                                if let zhongshu_core::harness::trace::event::HarnessEvent::ToolCall {
+                                    tool_name, ..
+                                } = e
+                                {
+                                    Some(tool_name.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        let tool_summary = if tool_names.is_empty() {
+                            String::new()
+                        } else {
+                            tool_names.join(", ")
+                        };
+
+                        let verification_text: String = report
+                            .trace_events
+                            .iter()
+                            .filter_map(|e| {
+                                if let zhongshu_core::harness::trace::event::HarnessEvent::Verification {
+                                    success, command, exit_code, ..
+                                } = e
+                                {
+                                    let status = if *success { "通过" } else { "失败" };
+                                    Some(format!(
+                                        "{status} (cmd: {command}, exit: {})",
+                                        exit_code.map_or("?".to_string(), |c| c.to_string())
+                                    ))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("; ");
+
+                        let step_output = if report.findings.trim().is_empty() {
                             report.summary
                         } else {
                             report.findings
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("executor: step '{}' worker failed: {e}", step.action);
+                        };
+
+                        // Persist step output, tool summary, and verification
                         let _ = tokio::task::spawn_blocking({
                             let trepo = trepo.clone();
                             let sid = step.id.clone();
-                            move || trepo.update_step_status(&sid, StepStatus::Failed)
+                            let out = step_output.clone();
+                            let ts = tool_summary.clone();
+                            let vf = verification_text.clone();
+                            move || {
+                                let _ = trepo.set_step_output(&sid, &out);
+                                if !ts.is_empty() {
+                                    let _ = trepo.set_step_tool_summary(&sid, &ts);
+                                }
+                                if !vf.is_empty() {
+                                    let _ = trepo.set_step_verification(&sid, &vf);
+                                }
+                                let _ = trepo.update_step_status(&sid, StepStatus::Completed);
+                            }
+                        })
+                        .await;
+
+                        step_output
+                    }
+                    Err(e) => {
+                        tracing::warn!("executor: step '{}' worker failed: {e}", step.action);
+                        let err_msg = format!("Worker execution error: {e}");
+                        let _ = tokio::task::spawn_blocking({
+                            let trepo = trepo.clone();
+                            let sid = step.id.clone();
+                            let em = err_msg.clone();
+                            move || {
+                                let _ = trepo.set_step_error(&sid, &em);
+                            }
                         })
                         .await;
                         failed = true;
                         break;
                     }
                 };
-
-                // Save step output
-                let _ = tokio::task::spawn_blocking({
-                    let trepo = trepo.clone();
-                    let sid = step.id.clone();
-                    let out = step_output.clone();
-                    move || {
-                        let _ = trepo.set_step_output(&sid, &out);
-                        let _ = trepo.update_step_status(&sid, StepStatus::Completed);
-                    }
-                })
-                .await;
 
                 if !all_output.is_empty() {
                     all_output.push('\n');

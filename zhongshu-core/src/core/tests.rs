@@ -426,7 +426,9 @@ mod tests {
         assert!(step.error.is_none());
 
         // Mark running — sets started_at
-        trepo.update_step_status(&step.id, StepStatus::Running).unwrap();
+        trepo
+            .update_step_status(&step.id, StepStatus::Running)
+            .unwrap();
         let steps = trepo.list_steps(&task.id).unwrap();
         assert_eq!(steps[0].status, StepStatus::Running);
         assert!(steps[0].started_at.is_some());
@@ -438,20 +440,29 @@ mod tests {
         assert_eq!(steps[0].input.as_deref(), Some("do the thing"));
 
         // Complete — sets finished_at
-        trepo.update_step_status(&step.id, StepStatus::Completed).unwrap();
+        trepo
+            .update_step_status(&step.id, StepStatus::Completed)
+            .unwrap();
         let steps = trepo.list_steps(&task.id).unwrap();
         assert_eq!(steps[0].status, StepStatus::Completed);
         assert!(steps[0].finished_at.is_some());
 
         // Tool summary
-        trepo.set_step_tool_summary(&step.id, "read, grep, edit").unwrap();
+        trepo
+            .set_step_tool_summary(&step.id, "read, grep, edit")
+            .unwrap();
         let steps = trepo.list_steps(&task.id).unwrap();
         assert_eq!(steps[0].tool_summary.as_deref(), Some("read, grep, edit"));
 
         // Verification
-        trepo.set_step_verification(&step.id, "通过: all tests pass").unwrap();
+        trepo
+            .set_step_verification(&step.id, "通过: all tests pass")
+            .unwrap();
         let steps = trepo.list_steps(&task.id).unwrap();
-        assert_eq!(steps[0].verification.as_deref(), Some("通过: all tests pass"));
+        assert_eq!(
+            steps[0].verification.as_deref(),
+            Some("通过: all tests pass")
+        );
     }
 
     #[test]
@@ -463,7 +474,9 @@ mod tests {
         let step = trepo.add_step(&task.id, 0, "risky step").unwrap();
 
         // Running
-        trepo.update_step_status(&step.id, StepStatus::Running).unwrap();
+        trepo
+            .update_step_status(&step.id, StepStatus::Running)
+            .unwrap();
 
         // Error — set_step_error sets status to Failed automatically
         trepo.set_step_error(&step.id, "worker crashed").unwrap();
@@ -480,7 +493,10 @@ mod tests {
 
         let task = trepo.create(None, "statuses").unwrap();
 
-        for (order, status) in [StepStatus::ToolBlocked, StepStatus::VerificationFailed].iter().enumerate() {
+        for (order, status) in [StepStatus::ToolBlocked, StepStatus::VerificationFailed]
+            .iter()
+            .enumerate()
+        {
             let step = trepo.add_step(&task.id, order as i32, "test").unwrap();
             trepo.update_step_status(&step.id, *status).unwrap();
             let steps = trepo.list_steps(&task.id).unwrap();

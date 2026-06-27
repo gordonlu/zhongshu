@@ -45,7 +45,8 @@ impl EquipmentRegistry {
 
     /// Returns true if the manifest declares capabilities that require approval.
     pub fn needs_approval(manifest: &Manifest) -> bool {
-        manifest.permissions.shell.allowed || !manifest.permissions.shell.allowed_commands.is_empty()
+        manifest.permissions.shell.allowed
+            || !manifest.permissions.shell.allowed_commands.is_empty()
     }
 
     /// Scan the equipment directory and load all manifests.
@@ -135,13 +136,19 @@ impl EquipmentRegistry {
 
     /// Collect tools from active ToolExtension equipment, wrapped with
     /// PermissionGuard.  Requires a `ToolRegistry` to resolve tool names.
-    pub fn equipment_tools(&self, tool_registry: &ToolRegistry) -> Vec<(EquipmentId, Arc<dyn Tool>)> {
+    pub fn equipment_tools(
+        &self,
+        tool_registry: &ToolRegistry,
+    ) -> Vec<(EquipmentId, Arc<dyn Tool>)> {
         let mut result = Vec::new();
         for eq in self.loaded.values() {
             if eq.status != EquipmentStatus::Active {
                 continue;
             }
-            if !matches!(eq.manifest.equipment_type, super::manifest::EquipmentType::ToolExtension) {
+            if !matches!(
+                eq.manifest.equipment_type,
+                super::manifest::EquipmentType::ToolExtension
+            ) {
                 continue;
             }
             for tool_name in &eq.manifest.tools {
@@ -168,7 +175,11 @@ impl EquipmentRegistry {
     pub fn register_tools(&self, tool_registry: &mut ToolRegistry) {
         let tools = self.equipment_tools(tool_registry);
         for (eq_id, tool) in &tools {
-            tracing::info!("equipment: registering tool '{}' from '{}'", tool.name(), eq_id);
+            tracing::info!(
+                "equipment: registering tool '{}' from '{}'",
+                tool.name(),
+                eq_id
+            );
         }
         for (_, tool) in tools {
             tool_registry.register_ref(tool);
@@ -223,7 +234,10 @@ impl EquipmentRegistry {
             match self.approval_cb {
                 Some(ref cb) => {
                     if !cb(&manifest) {
-                        return Err(format!("approval denied for installing '{}'", manifest.name));
+                        return Err(format!(
+                            "approval denied for installing '{}'",
+                            manifest.name
+                        ));
                     }
                 }
                 None => {
@@ -412,7 +426,12 @@ mod tests {
     };
     use std::fs;
 
-    fn make_manifest(name: &str, eq_type: EquipmentType, tools: Vec<&str>, shell_allowed: bool) -> Manifest {
+    fn make_manifest(
+        name: &str,
+        eq_type: EquipmentType,
+        tools: Vec<&str>,
+        shell_allowed: bool,
+    ) -> Manifest {
         Manifest {
             name: name.into(),
             version: "1.0.0".into(),
@@ -486,14 +505,24 @@ mod tests {
 
     #[test]
     fn needs_approval_returns_true_for_shell_allowed() {
-        let m = make_manifest("dangerous", EquipmentType::ToolExtension, vec!["shell"], true);
+        let m = make_manifest(
+            "dangerous",
+            EquipmentType::ToolExtension,
+            vec!["shell"],
+            true,
+        );
         assert!(EquipmentRegistry::needs_approval(&m));
     }
 
     #[test]
     fn set_status_disabled_to_active_requires_approval_for_dangerous() {
         let mut reg = EquipmentRegistry::new(tempfile::tempdir().unwrap().path().to_path_buf());
-        let m = make_manifest("dangerous", EquipmentType::ToolExtension, vec!["shell"], true);
+        let m = make_manifest(
+            "dangerous",
+            EquipmentType::ToolExtension,
+            vec!["shell"],
+            true,
+        );
         let id = m.id();
         reg.loaded.insert(
             id.clone(),
@@ -545,7 +574,12 @@ mod tests {
     fn install_dangerous_equipment_requires_approval() {
         let base = tempfile::tempdir().unwrap();
         let src = tempfile::tempdir().unwrap();
-        let m = make_manifest("hacker-tool", EquipmentType::ToolExtension, vec!["shell"], true);
+        let m = make_manifest(
+            "hacker-tool",
+            EquipmentType::ToolExtension,
+            vec!["shell"],
+            true,
+        );
         write_equipment(src.path(), "hacker-tool", &m);
 
         let mut reg = EquipmentRegistry::new(base.path().to_path_buf());
@@ -592,9 +626,15 @@ mod tests {
         struct FakeShell;
         #[async_trait]
         impl crate::tool::Tool for FakeShell {
-            fn name(&self) -> &str { "shell" }
-            fn description(&self) -> &str { "fake" }
-            fn parameters(&self) -> serde_json::Value { serde_json::json!({}) }
+            fn name(&self) -> &str {
+                "shell"
+            }
+            fn description(&self) -> &str {
+                "fake"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
             async fn execute(&self, _args: &serde_json::Value) -> ToolOutput {
                 ToolOutput::success(serde_json::json!({"ok": true}))
             }
@@ -629,9 +669,15 @@ mod tests {
         struct FakeShell;
         #[async_trait]
         impl crate::tool::Tool for FakeShell {
-            fn name(&self) -> &str { "shell" }
-            fn description(&self) -> &str { "fake" }
-            fn parameters(&self) -> serde_json::Value { serde_json::json!({}) }
+            fn name(&self) -> &str {
+                "shell"
+            }
+            fn description(&self) -> &str {
+                "fake"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
             async fn execute(&self, _args: &serde_json::Value) -> ToolOutput {
                 ToolOutput::success(serde_json::json!({"ok": true}))
             }
@@ -665,9 +711,15 @@ mod tests {
         struct FakeShell;
         #[async_trait]
         impl crate::tool::Tool for FakeShell {
-            fn name(&self) -> &str { "shell" }
-            fn description(&self) -> &str { "fake" }
-            fn parameters(&self) -> serde_json::Value { serde_json::json!({}) }
+            fn name(&self) -> &str {
+                "shell"
+            }
+            fn description(&self) -> &str {
+                "fake"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
             async fn execute(&self, _args: &serde_json::Value) -> ToolOutput {
                 ToolOutput::success(serde_json::json!({"ok": true}))
             }

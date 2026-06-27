@@ -145,7 +145,7 @@ pub fn spawn_event_workflow(eb: Arc<EventBus>, core_db_path: PathBuf) {
 pub fn spawn_task_executor(
     eb: Arc<EventBus>,
     core_db_path: PathBuf,
-    worker_runtime: Arc<AgentRuntime>,
+    worker_runtime: Arc<tokio::sync::RwLock<AgentRuntime>>,
     worker_profile: AgentProfile,
 ) {
     tokio::spawn(async move {
@@ -165,7 +165,8 @@ pub fn spawn_task_executor(
             let plnr = planner.clone();
 
             // 1. Plan the task (async LLM call)
-            let plan_steps = match plnr.plan(&task_id, &*worker_runtime.provider).await {
+            let provider = { worker_runtime.read().await.provider.clone() };
+            let plan_steps = match plnr.plan(&task_id, &*provider).await {
                 Ok(steps) if !steps.is_empty() => steps,
                 Ok(_) => continue,
                 Err(e) => {
@@ -216,8 +217,9 @@ pub fn spawn_task_executor(
                 .await;
 
                 let worker_task = task_step_to_worker_task(&task_id, &title, step, &prompt);
+                let runtime_snapshot = { worker_runtime.read().await.clone() };
                 let step_output = match Worker::execute(
-                    worker_runtime.as_ref(),
+                    &runtime_snapshot,
                     &worker_profile,
                     worker_task,
                     None,

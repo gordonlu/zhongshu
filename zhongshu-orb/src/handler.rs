@@ -8,7 +8,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::window::WindowId;
 
 use zhongshu_core::agent::llm::OpenAiProvider;
-use zhongshu_core::agent::ModelRouter;
+use zhongshu_core::agent::{AgentRuntime, ModelRouter};
 use zhongshu_core::authority;
 use zhongshu_core::event::{
     AgentEvent, AgentState, Event, EventBus, EventRx, HarnessUiEvent, MessageId, ResponseEvent,
@@ -23,6 +23,7 @@ use crate::hotkey::HotkeyManager;
 use crate::indicator::Indicator;
 use crate::overlay::{AuthRequest, OverlayHandle};
 use zhongshu_core::equipment::{EquipmentObserver, EquipmentRegistry};
+use zhongshu_core::tool::ToolRegistry;
 
 // ── App state ────────────────────────────────────────────────────────
 
@@ -56,6 +57,8 @@ pub struct ZhongshuApp {
     pub runbook_store: zhongshu_core::core::RunbookStore,
     pub observer: Arc<Mutex<EquipmentObserver>>,
     pub equipment: Arc<Mutex<EquipmentRegistry>>,
+    pub worker_runtime: Arc<tokio::sync::RwLock<AgentRuntime>>,
+    pub worker_base_tools: ToolRegistry,
     pub overlay_zoomed: bool,
     pub auth_watch: watch::Receiver<Option<zhongshu_core::authority::PendingRequest>>,
 }
@@ -75,6 +78,8 @@ impl ZhongshuApp {
         runbook_store: zhongshu_core::core::RunbookStore,
         observer: Arc<Mutex<EquipmentObserver>>,
         equipment: Arc<Mutex<EquipmentRegistry>>,
+        worker_runtime: Arc<tokio::sync::RwLock<AgentRuntime>>,
+        worker_base_tools: ToolRegistry,
     ) -> anyhow::Result<Self> {
         let hotkey = HotkeyManager::new(&config.hotkey).unwrap_or_else(|e| {
             tracing::warn!("Global hotkey unavailable: {e:#}");
@@ -109,6 +114,8 @@ impl ZhongshuApp {
             runbook_store,
             observer,
             equipment,
+            worker_runtime,
+            worker_base_tools,
             overlay_zoomed: false,
             auth_watch,
         })
@@ -188,19 +195,39 @@ impl ZhongshuApp {
             ov.show_runbooks(&items);
         }
         if let Some(eq_id) = ov.take_toggle_equipment() {
-            {
+            let toggle_result = {
                 let mut equipment = self.equipment.lock().unwrap();
-                if let Some(eq) = equipment.get_mut(&eq_id) {
+                if let Some(eq) = equipment.get(&eq_id) {
                     let is_active =
                         matches!(eq.status, zhongshu_core::equipment::EquipmentStatus::Active);
-                    eq.status = if is_active {
+                    let next = if is_active {
                         zhongshu_core::equipment::EquipmentStatus::Disabled
                     } else {
                         zhongshu_core::equipment::EquipmentStatus::Active
                     };
+                    equipment.set_status(&eq_id, next)
+                } else {
+                    Err(format!("equipment '{eq_id}' not found"))
+                }
+            };
+            match toggle_result {
+                Ok(()) => {
+                    self.controller.refresh_skill_prompts();
+                    self.controller.rebuild_equipment_tools();
+                    let mut worker_tools = self.worker_base_tools.clone();
+                    if let Ok(equipment) = self.equipment.lock() {
+                        equipment.register_tools(&mut worker_tools);
+                    }
+                    self.runtime.block_on(async {
+                        self.worker_runtime.write().await.registry = worker_tools;
+                    });
+                    ov.toast("Equipment 状态已更新");
+                }
+                Err(e) => {
+                    tracing::warn!("toggle equipment '{eq_id}' failed: {e}");
+                    ov.toast(&format!("Equipment 更新失败: {e}"));
                 }
             }
-            self.controller.refresh_skill_prompts();
         }
         if let Some(settings) = ov.take_settings() {
             let mut cfg = crate::config::load();
@@ -495,10 +522,7 @@ impl ZhongshuApp {
                                             "step": step,
                                         }));
                                     }
-                                    HarnessUiEvent::RecoveryFeedback {
-                                        rule_id,
-                                        message,
-                                    } => {
+                                    HarnessUiEvent::RecoveryFeedback { rule_id, message } => {
                                         ov.send(&serde_json::json!({
                                             "type": "recovery_feedback",
                                             "rule_id": rule_id,

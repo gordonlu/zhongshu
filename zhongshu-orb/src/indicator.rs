@@ -121,8 +121,8 @@ mod orb {
                 }
             }
 
-            let ctx = softbuffer::Context::new(el).unwrap();
-            let surface = softbuffer::Surface::new(&ctx, &*w).unwrap();
+            let ctx = softbuffer::Context::new(w.clone()).unwrap();
+            let surface = softbuffer::Surface::new(&ctx, w.clone()).unwrap();
             let c = state_color(AgentState::Idle);
             w.request_redraw();
             OrbIndicator {
@@ -498,8 +498,8 @@ impl Indicator {
 
     pub fn save_position(&self) {
         #[cfg(not(target_os = "linux"))]
-        if let Indicator::Orb(o) = self {
-            o.save_position();
+        match self {
+            Indicator::Orb(o) => o.save_position(),
         }
     }
 }

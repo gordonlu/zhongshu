@@ -157,7 +157,14 @@ impl TaskRepository {
         conn.execute(
             "INSERT INTO task_steps (id, task_id, step_order, action, status, created_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![step.id, step.task_id, step.step_order, step.action, step.status.as_str(), step.created_at],
+            params![
+                step.id,
+                step.task_id,
+                step.step_order,
+                step.action,
+                step.status.as_str(),
+                step.created_at
+            ],
         )?;
         Ok(step)
     }

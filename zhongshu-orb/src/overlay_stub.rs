@@ -1,5 +1,6 @@
 // Windows stub: no-op overlay (no GTK/WebView available)
 // Provides the same public API as overlay.rs so handler.rs compiles unchanged.
+#![allow(dead_code)]
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -91,22 +92,54 @@ impl OverlayHandle {
     pub fn toast(&self, _text: &str) {}
     pub fn set_state(&self, _state: &str) {}
     pub fn show_window(&self, _width: f32, _height: f32) {}
-    pub fn take_input(&self) -> Option<String> { None }
-    pub fn take_approve(&self) -> Option<String> { None }
-    pub fn take_deny(&self) -> Option<String> { None }
-    pub fn take_personality(&self) -> Option<String> { None }
-    pub fn take_settings(&self) -> Option<SettingsConfig> { None }
-    pub fn take_new_conversation(&self) -> bool { false }
-    pub fn take_stop(&self) -> bool { false }
-    pub fn take_open_settings(&self) -> bool { false }
-    pub fn take_load_more(&self) -> bool { false }
-    pub fn take_list_tasks(&self) -> bool { false }
-    pub fn take_list_runbooks(&self) -> bool { false }
-    pub fn take_list_equipment(&self) -> bool { false }
-    pub fn take_toggle_equipment(&self) -> Option<String> { None }
-    pub fn take_toggle_zoom(&self) -> bool { false }
-    pub fn take_cancel_task(&self) -> Option<String> { None }
-    pub fn take_complete_task(&self) -> Option<String> { None }
+    pub fn take_input(&self) -> Option<String> {
+        None
+    }
+    pub fn take_approve(&self) -> Option<String> {
+        None
+    }
+    pub fn take_deny(&self) -> Option<String> {
+        None
+    }
+    pub fn take_personality(&self) -> Option<String> {
+        None
+    }
+    pub fn take_settings(&self) -> Option<SettingsConfig> {
+        None
+    }
+    pub fn take_new_conversation(&self) -> bool {
+        false
+    }
+    pub fn take_stop(&self) -> bool {
+        false
+    }
+    pub fn take_open_settings(&self) -> bool {
+        false
+    }
+    pub fn take_load_more(&self) -> bool {
+        false
+    }
+    pub fn take_list_tasks(&self) -> bool {
+        false
+    }
+    pub fn take_list_runbooks(&self) -> bool {
+        false
+    }
+    pub fn take_list_equipment(&self) -> bool {
+        false
+    }
+    pub fn take_toggle_equipment(&self) -> Option<String> {
+        None
+    }
+    pub fn take_toggle_zoom(&self) -> bool {
+        false
+    }
+    pub fn take_cancel_task(&self) -> Option<String> {
+        None
+    }
+    pub fn take_complete_task(&self) -> Option<String> {
+        None
+    }
     pub fn show_tasks(&self, _tasks: &[serde_json::Value]) {}
     pub fn show_runbooks(&self, _runbooks: &[serde_json::Value]) {}
     pub fn show_equipment(&self, _items: &[serde_json::Value]) {}

@@ -24,6 +24,15 @@ pub struct Conflict {
     pub workers: Vec<String>,
 }
 
+/// A worker wrote a file outside its assigned ownership set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnershipViolation {
+    pub worker: String,
+    pub file: PathBuf,
+    pub owned_files: Vec<PathBuf>,
+    pub reason: String,
+}
+
 /// Parent orchestrator: splits work, launches workers, detects conflicts, parent-review.
 ///
 /// NOTE: This module is implemented and tested, but NOT yet wired into any
@@ -97,10 +106,7 @@ impl Orchestrator {
     }
 
     /// Run all worker assignments sequentially.
-    pub async fn execute(
-        &self,
-        assignments: Vec<WorkerAssignment>,
-    ) -> anyhow::Result<Vec<Report>> {
+    pub async fn execute(&self, assignments: Vec<WorkerAssignment>) -> anyhow::Result<Vec<Report>> {
         let mut reports = Vec::new();
 
         for a in &assignments {
@@ -146,6 +152,56 @@ impl Orchestrator {
             .filter(|(_, workers)| workers.len() > 1)
             .map(|(file, workers)| Conflict { file, workers })
             .collect()
+    }
+
+    /// Detect writes outside each worker's assigned file ownership.
+    ///
+    /// Empty `owned_files` means ownership enforcement is disabled for that
+    /// worker. This preserves the existing fallback path for repositories that
+    /// have not been indexed yet.
+    pub fn detect_ownership_violations(
+        &self,
+        assignments: &[WorkerAssignment],
+        reports: &[Report],
+    ) -> Vec<OwnershipViolation> {
+        let ownership: std::collections::BTreeMap<String, Vec<PathBuf>> = assignments
+            .iter()
+            .map(|assignment| {
+                (
+                    assignment.worker_name.clone(),
+                    normalize_owned_files(&assignment.owned_files),
+                )
+            })
+            .collect();
+
+        let mut violations = Vec::new();
+        for report in reports {
+            let owned_files = ownership.get(&report.worker);
+            for event in &report.trace_events {
+                if let HarnessEvent::FileEdit { path, .. } = event {
+                    let file = normalize_path(path);
+                    match owned_files {
+                        Some(owned) if owned.is_empty() => {}
+                        Some(owned)
+                            if owned.iter().any(|owned| path_matches_owned(&file, owned)) => {}
+                        Some(owned) => violations.push(OwnershipViolation {
+                            worker: report.worker.clone(),
+                            file,
+                            owned_files: owned.clone(),
+                            reason: "file is outside worker ownership".into(),
+                        }),
+                        None => violations.push(OwnershipViolation {
+                            worker: report.worker.clone(),
+                            file,
+                            owned_files: Vec::new(),
+                            reason: "worker has no assignment".into(),
+                        }),
+                    }
+                }
+            }
+        }
+
+        violations
     }
 
     /// Parent review: unify worker reports into a single coherent report.
@@ -244,14 +300,39 @@ impl Orchestrator {
     }
 }
 
+fn normalize_owned_files(files: &[PathBuf]) -> Vec<PathBuf> {
+    let mut normalized: Vec<PathBuf> = files.iter().map(|path| normalize_path(path)).collect();
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
+fn normalize_path(path: &PathBuf) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn path_matches_owned(file: &PathBuf, owned: &PathBuf) -> bool {
+    file == owned || file.starts_with(owned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use crate::agent::llm::{ChatCompletionResponse, FinalChoice, LlmProvider};
     use crate::agent::AgentBudget;
     use crate::harness::architecture::index::FileIndex;
     use crate::tool::ToolRegistry;
+    use async_trait::async_trait;
     use std::sync::Arc;
 
     struct MockProvider;
@@ -433,6 +514,111 @@ mod tests {
         assert_eq!(conflicts[0].file, PathBuf::from("shared.rs"));
     }
 
+    #[test]
+    fn ownership_allows_edits_inside_owned_files() {
+        let assignment = WorkerAssignment {
+            worker_name: "w1".into(),
+            task_description: "edit owned".into(),
+            owned_files: vec![PathBuf::from("src/a.rs")],
+            profile: dummy_profile("w1"),
+        };
+        let report = Report {
+            task_id: "t1".into(),
+            worker: "w1".into(),
+            summary: "".into(),
+            findings: "".into(),
+            confidence: 0.5,
+            attention: AttentionLevel::Digest,
+            trace_events: vec![HarnessEvent::FileEdit {
+                path: PathBuf::from("src/a.rs"),
+                diff_hash: "abc".into(),
+            }],
+        };
+
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+        let violations = orch.detect_ownership_violations(&[assignment], &[report]);
+
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn ownership_detects_edit_outside_owned_files() {
+        let assignment = WorkerAssignment {
+            worker_name: "w1".into(),
+            task_description: "edit owned".into(),
+            owned_files: vec![PathBuf::from("src/a.rs")],
+            profile: dummy_profile("w1"),
+        };
+        let report = Report {
+            task_id: "t1".into(),
+            worker: "w1".into(),
+            summary: "".into(),
+            findings: "".into(),
+            confidence: 0.5,
+            attention: AttentionLevel::Digest,
+            trace_events: vec![HarnessEvent::FileEdit {
+                path: PathBuf::from("src/b.rs"),
+                diff_hash: "abc".into(),
+            }],
+        };
+
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+        let violations = orch.detect_ownership_violations(&[assignment], &[report]);
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].worker, "w1");
+        assert_eq!(violations[0].file, PathBuf::from("src/b.rs"));
+    }
+
+    #[test]
+    fn ownership_allows_unscoped_fallback_assignment() {
+        let assignment = WorkerAssignment {
+            worker_name: "w1".into(),
+            task_description: "fallback".into(),
+            owned_files: Vec::new(),
+            profile: dummy_profile("w1"),
+        };
+        let report = Report {
+            task_id: "t1".into(),
+            worker: "w1".into(),
+            summary: "".into(),
+            findings: "".into(),
+            confidence: 0.5,
+            attention: AttentionLevel::Digest,
+            trace_events: vec![HarnessEvent::FileEdit {
+                path: PathBuf::from("src/anything.rs"),
+                diff_hash: "abc".into(),
+            }],
+        };
+
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+        let violations = orch.detect_ownership_violations(&[assignment], &[report]);
+
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn ownership_detects_unknown_worker_edits() {
+        let report = Report {
+            task_id: "t1".into(),
+            worker: "unknown".into(),
+            summary: "".into(),
+            findings: "".into(),
+            confidence: 0.5,
+            attention: AttentionLevel::Digest,
+            trace_events: vec![HarnessEvent::FileEdit {
+                path: PathBuf::from("src/a.rs"),
+                diff_hash: "abc".into(),
+            }],
+        };
+
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+        let violations = orch.detect_ownership_violations(&[], &[report]);
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].reason, "worker has no assignment");
+    }
+
     #[tokio::test]
     async fn parent_review_uses_mock_provider() {
         let client = LlmClient {
@@ -446,12 +632,7 @@ mod tests {
 
         let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
         let report = orch
-            .parent_review(
-                "添加 login 功能",
-                &[],
-                &[],
-                &client,
-            )
+            .parent_review("添加 login 功能", &[], &[], &client)
             .await
             .expect("parent review should succeed");
 

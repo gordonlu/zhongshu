@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use deeplossless::runtime::RuntimePolicyConfig;
 use deeplossless::runtime_coordinator::{CoordinatorConfig, RuntimeCoordinator};
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tracing::info;
 
@@ -33,6 +34,42 @@ pub struct DeeplosslessProxy {
     actual_port: u16,
     base_url: String,
     db_path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeeplosslessSnapshotTier {
+    Ephemeral,
+    Structural,
+    Full,
+    Frozen,
+}
+
+impl DeeplosslessSnapshotTier {
+    fn as_i32(self) -> i32 {
+        match self {
+            DeeplosslessSnapshotTier::Ephemeral => 0,
+            DeeplosslessSnapshotTier::Structural => 1,
+            DeeplosslessSnapshotTier::Full => 2,
+            DeeplosslessSnapshotTier::Frozen => 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeeplosslessSnapshotResult {
+    pub status: String,
+    pub id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeeplosslessRollbackResult {
+    pub rollback_to: i64,
+    pub summary: String,
+    pub level: u8,
+    pub deleted_nodes: Vec<i64>,
+    #[serde(default)]
+    pub children_remaining: Vec<serde_json::Value>,
 }
 
 impl DeeplosslessProxy {
@@ -108,6 +145,17 @@ impl DeeplosslessProxy {
         self.actual_port
     }
 
+    fn lcm_url(&self, path: &str) -> anyhow::Result<String> {
+        if self.base_url.is_empty() {
+            return Err(anyhow::anyhow!("deeplossless proxy has not started"));
+        }
+        Ok(format!(
+            "{}/lcm/{}",
+            self.base_url.trim_end_matches('/'),
+            path.trim_start_matches('/')
+        ))
+    }
+
     pub async fn shutdown(&self) {
         let mut guard = self.coordinator.lock().await;
         if let Some(c) = guard.take() {
@@ -179,7 +227,7 @@ impl DeeplosslessProxy {
 
         let from = ids[0];
         let to = ids[ids.len() - 1];
-        let url = format!("{}lcm/compress", self.base_url);
+        let url = self.lcm_url("compress")?;
         let client = reqwest::Client::new();
         let resp = client
             .post(&url)
@@ -199,6 +247,68 @@ impl DeeplosslessProxy {
             tracing::warn!("compress endpoint returned {status}: {text}");
             Ok(0)
         }
+    }
+
+    /// Take a deeplossless execution snapshot.
+    ///
+    /// This is intentionally a thin wrapper around `/v1/lcm/snapshot`.
+    /// Zhongshu should not maintain a parallel snapshot store.
+    pub async fn take_execution_snapshot(
+        &self,
+        execution_id: i64,
+        memory_version_id: i64,
+        tier: DeeplosslessSnapshotTier,
+        retention_ttl: Option<i64>,
+    ) -> anyhow::Result<DeeplosslessSnapshotResult> {
+        if execution_id <= 0 {
+            return Err(anyhow::anyhow!("execution_id must be positive"));
+        }
+        let url = self.lcm_url("snapshot")?;
+        let mut body = serde_json::json!({
+            "execution_id": execution_id,
+            "memory_version_id": memory_version_id,
+            "tier": tier.as_i32(),
+        });
+        if let Some(ttl) = retention_ttl {
+            body["retention_ttl"] = serde_json::json!(ttl);
+        }
+
+        let resp = reqwest::Client::new().post(url).json(&body).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "snapshot endpoint returned {status}: {text}"
+            ));
+        }
+        Ok(resp.json().await?)
+    }
+
+    /// Roll back the deeplossless DAG to an existing node.
+    ///
+    /// File rollback should use this runtime facility when applicable before
+    /// introducing any Zhongshu-local rollback persistence.
+    pub async fn rollback_to_node(
+        &self,
+        node_id: i64,
+    ) -> anyhow::Result<DeeplosslessRollbackResult> {
+        if node_id <= 0 {
+            return Err(anyhow::anyhow!("node_id must be positive"));
+        }
+        let url = self.lcm_url("rollback")?;
+        let resp = reqwest::Client::new()
+            .post(url)
+            .json(&serde_json::json!({ "id": node_id }))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "rollback endpoint returned {status}: {text}"
+            ));
+        }
+        Ok(resp.json().await?)
     }
 
     /// Load recent chat history with correct roles from the messages table.
@@ -445,6 +555,37 @@ mod tests {
             resp.status().is_success() || resp.status().as_u16() == 401,
             "expected success or 401, got {}",
             resp.status()
+        );
+
+        proxy.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn lcm_url_requires_started_proxy() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("test.db").to_string_lossy().to_string();
+
+        let proxy = DeeplosslessProxy::new(DeeplosslessConfig {
+            db_path,
+            api_key: String::new(),
+            upstream: DEFAULT_UPSTREAM.into(),
+            summarize_model: "deepseek-chat".into(),
+            proxy_port: 0,
+        })
+        .await
+        .expect("proxy build");
+
+        assert!(proxy.lcm_url("snapshot").is_err());
+        proxy.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn lcm_url_formats_endpoint_with_separator() {
+        let (proxy, _base_url) = test_proxy().await;
+
+        assert_eq!(
+            proxy.lcm_url("snapshot").unwrap(),
+            format!("http://127.0.0.1:{}/v1/lcm/snapshot", proxy.port())
         );
 
         proxy.shutdown().await;

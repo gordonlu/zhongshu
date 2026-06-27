@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::harness::action::{FeedbackSource, HarnessFeedback, Severity};
+use crate::harness::action::{FeedbackSource, HarnessFeedback};
 use crate::harness::architecture::config::{ArchitectureRule, SemanticMatcher};
 
 /// Check file content for semantic issues based on configured rules.
@@ -35,10 +35,7 @@ pub fn check_semantics(
                         source: FeedbackSource::Architecture,
                         severity: *severity,
                         rule_id: name.clone(),
-                        message: format!(
-                            "{} 处调用的返回结果可能被忽略",
-                            findings.join(", ")
-                        ),
+                        message: format!("{} 处调用的返回结果可能被忽略", findings.join(", ")),
                         suggestion: "使用 `let _ = ...` 或 `.await?` 处理返回结果".into(),
                         evidence: Some(format!("文件：{}", file.display())),
                     });
@@ -61,10 +58,7 @@ pub fn check_semantics(
                         source: FeedbackSource::Architecture,
                         severity: *severity,
                         rule_id: name.clone(),
-                        message: format!(
-                            "检测到禁止的模式: {}",
-                            findings.join(", ")
-                        ),
+                        message: format!("检测到禁止的模式: {}", findings.join(", ")),
                         suggestion: format!(
                             "文件 {} 中不允许使用模式: {}",
                             file.display(),
@@ -106,11 +100,9 @@ fn check_ignored_result(content: &str, callee_contains: &[String]) -> Vec<String
             continue;
         }
 
-        let has_callee = callee_contains.iter().any(|cc| {
-            trimmed
-                .to_lowercase()
-                .contains(&cc.to_lowercase())
-        });
+        let has_callee = callee_contains
+            .iter()
+            .any(|cc| trimmed.to_lowercase().contains(&cc.to_lowercase()));
 
         if has_callee {
             let is_handled = trimmed.starts_with("let ")
@@ -136,6 +128,7 @@ fn check_ignored_result(content: &str, callee_contains: &[String]) -> Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::action::Severity;
     use crate::harness::architecture::config::SemanticMatcher;
 
     fn make_forbid_pattern_rule(
@@ -147,9 +140,7 @@ mod tests {
         ArchitectureRule::SemanticRule {
             name: name.into(),
             matcher: SemanticMatcher::ForbidPattern {
-                file_globs: vec![globset::Glob::new(glob)
-                    .unwrap()
-                    .compile_matcher()],
+                file_globs: vec![globset::Glob::new(glob).unwrap().compile_matcher()],
                 patterns: vec![pattern.into()],
             },
             severity,
@@ -189,11 +180,7 @@ mod tests {
             "TODO",
             Severity::Warning,
         )];
-        let fb = check_semantics(
-            "fn foo() { /* done */ }",
-            Path::new("test.rs"),
-            &rules,
-        );
+        let fb = check_semantics("fn foo() { /* done */ }", Path::new("test.rs"), &rules);
         assert!(fb.is_empty());
     }
 

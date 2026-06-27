@@ -17,9 +17,9 @@ pub use dispatcher::AttentionDispatcher;
 pub use loop_::{
     run_agent, run_agent_with_context, AgentBudget, AgentCallbacks, LoopResult, StopReason,
 };
+pub use orchestrator::{Conflict, Orchestrator, OwnershipViolation, WorkerAssignment};
 pub use profile::AgentProfile;
 pub use report::Report;
 pub use router::{Complexity, ModelRouter};
 pub use runtime::AgentRuntime;
-pub use orchestrator::{Conflict, Orchestrator, WorkerAssignment};
 pub use worker::{Worker, WorkerProfile};

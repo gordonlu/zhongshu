@@ -113,4 +113,3 @@ mod tests {
         assert!(results.iter().any(|r| r.contains("test.rs")));
     }
 }
-

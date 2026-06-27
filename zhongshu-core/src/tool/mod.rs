@@ -2,6 +2,7 @@ pub mod automation;
 pub mod browser;
 pub mod browser_automation;
 pub mod browser_session;
+pub mod executor;
 pub mod fs;
 pub mod memory;
 pub mod screenshot;
@@ -9,12 +10,21 @@ pub mod search;
 pub mod search_files;
 pub mod self_test;
 pub mod shell;
+pub mod shell_semantics;
+pub mod spec;
 pub mod system_info;
 pub mod webfetch;
 
 use crate::agent::llm::{ToolDef, ToolFunctionDef};
 use async_trait::async_trait;
+pub use executor::{
+    ToolCallRequest, ToolExecution, ToolExecutionPlan, ToolExecutionPolicy, ToolExecutor,
+    ToolScheduling,
+};
 use serde::{Deserialize, Serialize};
+pub use spec::{
+    ObservableToolInput, ToolEffect, ToolReplayKey, ToolResultSummary, ToolSpec, WorkspaceScope,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -137,6 +147,10 @@ pub trait Tool: Send + Sync {
     fn parameters(&self) -> serde_json::Value;
     async fn execute(&self, arguments: &serde_json::Value) -> ToolOutput;
 
+    fn spec(&self) -> ToolSpec {
+        ToolSpec::from_tool(self)
+    }
+
     fn to_tool_def(&self) -> ToolDef {
         ToolDef {
             def_type: "function".into(),
@@ -195,6 +209,10 @@ impl ToolRegistry {
 
     pub fn as_tool_defs(&self) -> Vec<ToolDef> {
         self.tools.values().map(|t| t.to_tool_def()).collect()
+    }
+
+    pub fn as_tool_specs(&self) -> Vec<ToolSpec> {
+        self.tools.values().map(|t| t.spec()).collect()
     }
 
     /// Build a sub-registry containing only the named tools.

@@ -292,7 +292,7 @@ fn main() {
         &cfg.llm.model_routing.flash_model,
         &cfg.llm.model_routing.pro_model,
     );
-    let mut main_registry = default_registry()
+    let base_main_registry = default_registry()
         .register(zhongshu_core::tool::search::WebSearchTool)
         .register(zhongshu_core::tool::browser::BrowserTool)
         .register(zhongshu_core::tool::browser_automation::BrowserAutomationTool)
@@ -308,12 +308,14 @@ fn main() {
         .register(task_tool.clone())
         .register(suggestion_tool.clone())
         .register(memory_query_tool.clone());
+    let mut main_registry = base_main_registry.clone();
     // Register equipment-provided tools into the main agent registry
     equipment.lock().unwrap().register_tools(&mut main_registry);
     let controller = Arc::new(AgentController::new(
         eb.clone(),
         response_tx.clone(),
         provider.clone(),
+        base_main_registry,
         main_registry,
         cfg.llm.model.clone(),
         app::SessionState::new(),
@@ -361,7 +363,7 @@ fn main() {
     let rule_queue = task_scheduler.queue().clone();
     task_scheduler.spawn();
 
-    let mut worker_registry = default_registry()
+    let base_worker_registry = default_registry()
         .register(zhongshu_core::tool::search::WebSearchTool)
         .register(zhongshu_core::tool::browser::BrowserTool)
         .register(zhongshu_core::tool::browser_automation::BrowserAutomationTool)
@@ -377,8 +379,12 @@ fn main() {
         .register(task_tool.clone())
         .register(suggestion_tool.clone())
         .register(memory_query_tool.clone());
-    equipment.lock().unwrap().register_tools(&mut worker_registry);
-    let worker_runtime = Arc::new(AgentRuntime::new(
+    let mut worker_registry = base_worker_registry.clone();
+    equipment
+        .lock()
+        .unwrap()
+        .register_tools(&mut worker_registry);
+    let worker_runtime = Arc::new(tokio::sync::RwLock::new(AgentRuntime::new(
         provider.clone(),
         worker_registry,
         cfg.llm.model.clone(),
@@ -390,7 +396,7 @@ fn main() {
             llm_timeout: Duration::from_secs(240),
             tool_timeout: Duration::from_secs(120),
         },
-    ));
+    )));
 
     services::spawn_task_executor(
         eb.clone(),
@@ -518,6 +524,8 @@ fn main() {
         runbook_store,
         observer.clone(),
         equipment.clone(),
+        worker_runtime.clone(),
+        base_worker_registry,
     ) {
         Ok(app) => app,
         Err(e) => {

@@ -49,7 +49,8 @@ pub struct AgentController {
     event_bus: Arc<EventBus>,
     response_tx: ResponseTx,
     provider: Mutex<OpenAiProvider>,
-    tools: ToolRegistry,
+    base_tools: ToolRegistry,
+    tools: Mutex<ToolRegistry>,
     model: Mutex<String>,
     #[allow(dead_code)]
     session: SessionState,
@@ -75,6 +76,7 @@ impl AgentController {
         event_bus: Arc<EventBus>,
         response_tx: ResponseTx,
         provider: OpenAiProvider,
+        base_tools: ToolRegistry,
         tools: ToolRegistry,
         model: String,
         #[allow(dead_code)] session: SessionState,
@@ -94,7 +96,8 @@ impl AgentController {
             event_bus,
             response_tx,
             provider: Mutex::new(provider),
-            tools,
+            base_tools,
+            tools: Mutex::new(tools),
             model: Mutex::new(model),
             session,
             base_system_prompt: Mutex::new(base_system_prompt),
@@ -192,6 +195,15 @@ impl AgentController {
         tracing::info!("chat LLM runtime updated");
     }
 
+    pub fn rebuild_equipment_tools(&self) {
+        let mut tools = self.base_tools.clone();
+        if let Ok(equipment) = self.equipment.lock() {
+            equipment.register_tools(&mut tools);
+        }
+        *self.tools.lock().unwrap() = tools;
+        tracing::info!("chat tool registry rebuilt from active equipment");
+    }
+
     pub fn set_chat_history(&self, history: Vec<(String, String)>) {
         *self.history.lock().unwrap() = history;
     }
@@ -286,7 +298,7 @@ impl AgentController {
     fn spawn_task(&self, input: String) {
         let eb = self.event_bus.clone();
         let tx = self.response_tx.clone();
-        let t = self.tools.clone();
+        let t = self.tools.lock().unwrap().clone();
         let sys = self.system_prompt.lock().unwrap().clone();
         let history_arc = self.history.clone();
         let memory = self.memory.clone();
@@ -772,14 +784,15 @@ pub struct TaskWorkerDispatcher;
 impl TaskWorkerDispatcher {
     pub fn spawn(
         queue: TaskQueue,
-        runtime: Arc<AgentRuntime>,
+        runtime: Arc<RwLock<AgentRuntime>>,
         profile: AgentProfile,
         eb: Arc<EventBus>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             while let Some(task) = queue.recv().await {
                 tracing::info!(task = %task.id, source = %task.source, "dispatching to worker");
-                match Worker::execute(&runtime, &profile, task, None).await {
+                let runtime_snapshot = { runtime.read().await.clone() };
+                match Worker::execute(&runtime_snapshot, &profile, task, None).await {
                     Ok(report) => {
                         log_check(&report);
                         tracing::debug!(worker = %report.worker, attention = ?report.attention, "worker report");

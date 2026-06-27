@@ -304,13 +304,20 @@ pub async fn run_agent(
                 step_had_file_read = true;
                 // File read may be a workspace file: resolve path from args if possible
                 if tc.function.name == "read" {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&tc.function.arguments) {
-                        if let Some(path_str) = val.get("file_path").and_then(|v| v.as_str())
+                    if let Ok(val) =
+                        serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                    {
+                        if let Some(path_str) = val
+                            .get("file_path")
+                            .and_then(|v| v.as_str())
                             .or_else(|| val.get("path").and_then(|v| v.as_str()))
                         {
-                            record_trace(runtime, HarnessEvent::FileRead {
-                                path: PathBuf::from(path_str),
-                            });
+                            record_trace(
+                                runtime,
+                                HarnessEvent::FileRead {
+                                    path: PathBuf::from(path_str),
+                                },
+                            );
                         }
                     }
                 }
@@ -501,30 +508,34 @@ pub async fn run_agent(
                 // Recovery: track edit/test progress and patch history
                 if tool_success && is_mutation {
                     step_had_successful_edit = true;
-                    runtime.harness_state.recovery.patch_history.record(
-                        &tc.function.arguments,
-                    );
+                    runtime
+                        .harness_state
+                        .recovery
+                        .patch_history
+                        .record(&tc.function.arguments);
                 }
-                if tool_success
-                    && (tc.function.name == "self_test"
-                        || crate::harness::verification::classify::classify_command(
-                            &tc.function.arguments,
-                        ) != crate::harness::verification::classify::VerificationType::Unknown)
-                {
+                if tool_success && is_verification_tool_call(tc) {
                     step_had_successful_test = true;
                 }
 
                 // Architecture: re-index + rule evaluation on mutation
                 if is_mutation {
                     // Trace: record FileEdit from tool args if possible
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&tc.function.arguments) {
-                        if let Some(path_str) = val.get("file_path").and_then(|v| v.as_str())
+                    if let Ok(val) =
+                        serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                    {
+                        if let Some(path_str) = val
+                            .get("file_path")
+                            .and_then(|v| v.as_str())
                             .or_else(|| val.get("path").and_then(|v| v.as_str()))
                         {
-                            record_trace(runtime, HarnessEvent::FileEdit {
-                                path: PathBuf::from(path_str),
-                                diff_hash: args_hash.clone(),
-                            });
+                            record_trace(
+                                runtime,
+                                HarnessEvent::FileEdit {
+                                    path: PathBuf::from(path_str),
+                                    diff_hash: args_hash.clone(),
+                                },
+                            );
                         }
                     }
 
@@ -543,7 +554,8 @@ pub async fn run_agent(
                         let mut semantic_feedback = Vec::new();
 
                         if let Some(ref mut idx) = runtime.harness_state.architecture.index {
-                            let changed_paths = changed_paths_from_tool_args(&tc.function.arguments);
+                            let changed_paths =
+                                changed_paths_from_tool_args(&tc.function.arguments);
                             let mut changes = Vec::new();
 
                             for actual_path in changed_paths {
@@ -552,14 +564,17 @@ pub async fn run_agent(
                                 }
                                 if let Ok(content) = std::fs::read_to_string(&actual_path) {
                                     let old_index = idx.files.get(&actual_path).cloned();
-                                    let new_index = crate::harness::architecture::parser::parse_file(
-                                        &actual_path,
-                                        &content,
+                                    let new_index =
+                                        crate::harness::architecture::parser::parse_file(
+                                            &actual_path,
+                                            &content,
+                                        );
+                                    changes.extend(
+                                        crate::harness::architecture::diff::compute_diff(
+                                            old_index.as_ref(),
+                                            &new_index,
+                                        ),
                                     );
-                                    changes.extend(crate::harness::architecture::diff::compute_diff(
-                                        old_index.as_ref(),
-                                        &new_index,
-                                    ));
                                     let items = new_index.items.clone();
                                     idx.symbols.update_file(&actual_path, &items);
                                     idx.files.insert(actual_path, new_index);
@@ -602,7 +617,8 @@ pub async fn run_agent(
                             // FileIndex does not store source content, so we cannot diff
                             // old vs new source text. Add it when FileIndex gains a content field.
                             if !changes.is_empty() {
-                                let impact = crate::harness::architecture::impact::analyze(&changes, idx);
+                                let impact =
+                                    crate::harness::architecture::impact::analyze(&changes, idx);
                                 impact_msgs = impact;
                                 for file in idx.files.keys() {
                                     if file.exists() {
@@ -724,25 +740,44 @@ fn record_verification_trace(
     exit_code: Option<i32>,
     step: u32,
 ) {
-    let is_verification = if tc.function.name == "self_test" {
-        true
-    } else if tc.function.name == "shell" {
-        crate::harness::verification::classify::classify_command(&tc.function.arguments)
-            != crate::harness::verification::classify::VerificationType::Unknown
-    } else {
-        false
-    };
-
-    if is_verification {
+    if is_verification_tool_call(tc) {
         record_trace(
             runtime,
             HarnessEvent::Verification {
-                command: tc.function.arguments.clone(),
+                command: verification_command_text(tc)
+                    .unwrap_or_else(|| tc.function.arguments.clone()),
                 success: tool_success,
                 exit_code,
                 step,
             },
         );
+    }
+}
+
+fn is_verification_tool_call(tc: &ToolCall) -> bool {
+    if tc.function.name == "self_test" {
+        return true;
+    }
+    verification_command_text(tc)
+        .map(|command| {
+            crate::harness::verification::classify::classify_command(&command)
+                != crate::harness::verification::classify::VerificationType::Unknown
+        })
+        .unwrap_or(false)
+}
+
+fn verification_command_text(tc: &ToolCall) -> Option<String> {
+    if tc.function.name == "shell" {
+        serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("command")
+                    .and_then(|command| command.as_str())
+                    .map(str::to_string)
+            })
+    } else {
+        None
     }
 }
 
@@ -817,6 +852,24 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn shell_json_command_is_classified_as_verification() {
+        let tc = ToolCall {
+            id: "call-1".into(),
+            call_type: "function".into(),
+            function: FunctionCall {
+                name: "shell".into(),
+                arguments: r#"{"command":"cargo test -p zhongshu-core"}"#.into(),
+            },
+        };
+
+        assert_eq!(
+            verification_command_text(&tc).as_deref(),
+            Some("cargo test -p zhongshu-core")
+        );
+        assert!(is_verification_tool_call(&tc));
+    }
 
     #[derive(Clone)]
     struct TraceTestProvider {
@@ -971,9 +1024,15 @@ mod tests {
 
     #[async_trait]
     impl Tool for NoopTool {
-        fn name(&self) -> &str { "noop" }
-        fn description(&self) -> &str { "no-op tool for testing" }
-        fn parameters(&self) -> serde_json::Value { json!({"type":"object","properties":{}}) }
+        fn name(&self) -> &str {
+            "noop"
+        }
+        fn description(&self) -> &str {
+            "no-op tool for testing"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type":"object","properties":{}})
+        }
         async fn execute(&self, _arguments: &serde_json::Value) -> ToolOutput {
             ToolOutput::success(json!({"ok": true}))
         }
@@ -1033,7 +1092,9 @@ mod tests {
             anyhow::bail!("streaming not used in recovery tests")
         }
 
-        fn model_name(&self) -> &str { "scripted" }
+        fn model_name(&self) -> &str {
+            "scripted"
+        }
         fn change_model(&self, _model: &str) -> Arc<dyn LlmProvider> {
             Arc::new(self.clone())
         }
@@ -1081,14 +1142,23 @@ mod tests {
 
         assert!(matches!(result.stop_reason, StopReason::Finished));
         // No-progress after 5 consecutive noop steps → recovery feedback emitted
-        let recovery_events: Vec<_> = result.trace_events.iter().filter(|e| {
-            matches!(e, HarnessEvent::RecoveryFeedback { .. })
-        }).collect();
-        assert!(!recovery_events.is_empty(), "expected recovery feedback events");
+        let recovery_events: Vec<_> = result
+            .trace_events
+            .iter()
+            .filter(|e| matches!(e, HarnessEvent::RecoveryFeedback { .. }))
+            .collect();
+        assert!(
+            !recovery_events.is_empty(),
+            "expected recovery feedback events"
+        );
         let has_no_progress = recovery_events.iter().any(|e| {
             matches!(e, HarnessEvent::RecoveryFeedback { message, .. } if message.contains("没有取得进展"))
         });
-        assert!(has_no_progress, "expected no-progress hint in: {:?}", recovery_events);
+        assert!(
+            has_no_progress,
+            "expected no-progress hint in: {:?}",
+            recovery_events
+        );
     }
 
     #[tokio::test]
@@ -1096,10 +1166,18 @@ mod tests {
         struct ReadTool;
         #[async_trait]
         impl Tool for ReadTool {
-            fn name(&self) -> &str { "read" }
-            fn description(&self) -> &str { "reads a file" }
-            fn parameters(&self) -> serde_json::Value { json!({"type":"object","properties":{}}) }
-            async fn execute(&self, _: &serde_json::Value) -> ToolOutput { ToolOutput::success(json!([])) }
+            fn name(&self) -> &str {
+                "read"
+            }
+            fn description(&self) -> &str {
+                "reads a file"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                json!({"type":"object","properties":{}})
+            }
+            async fn execute(&self, _: &serde_json::Value) -> ToolOutput {
+                ToolOutput::success(json!([]))
+            }
         }
 
         let provider = ScriptedProvider {
@@ -1130,11 +1208,16 @@ mod tests {
         .await
         .unwrap();
 
-        let recovery_events: Vec<_> = result.trace_events.iter().filter(|e| {
-            matches!(e, HarnessEvent::RecoveryFeedback { .. })
-        }).collect();
+        let recovery_events: Vec<_> = result
+            .trace_events
+            .iter()
+            .filter(|e| matches!(e, HarnessEvent::RecoveryFeedback { .. }))
+            .collect();
         // With a read at step 3, 2 noops before and 1 after is not enough (need 5 consecutive)
-        assert!(recovery_events.is_empty(), "read should reset no-progress counter");
+        assert!(
+            recovery_events.is_empty(),
+            "read should reset no-progress counter"
+        );
     }
 }
 

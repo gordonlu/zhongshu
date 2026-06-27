@@ -7,23 +7,24 @@ pub enum VerificationType {
 }
 
 pub fn classify_command(command: &str) -> VerificationType {
-    let cmd = command.trim();
-    if cmd.starts_with("cargo test")
-        || cmd.starts_with("npm test")
+    let semantics = crate::tool::shell_semantics::ShellSemantics::analyze(command);
+    if !semantics.is_verification {
+        return VerificationType::Unknown;
+    }
+
+    let cmd = semantics.normalized_command.to_lowercase();
+    if cmd.contains(" audit") || cmd.starts_with("cargo audit") || cmd.starts_with("npm audit") {
+        VerificationType::Audit
+    } else if cmd.contains(" test")
         || cmd.starts_with("pytest")
+        || cmd.starts_with("vitest")
+        || cmd.starts_with("jest")
+        || cmd.starts_with("mocha")
         || cmd.starts_with("go test")
     {
         VerificationType::Test
-    } else if cmd.starts_with("cargo check")
-        || cmd.starts_with("cargo clippy")
-        || cmd.starts_with("npm run check")
-        || cmd.starts_with("ruff check")
-    {
-        VerificationType::Check
-    } else if cmd.starts_with("cargo audit") || cmd.starts_with("npm audit") {
-        VerificationType::Audit
     } else {
-        VerificationType::Unknown
+        VerificationType::Check
     }
 }
 
@@ -43,6 +44,14 @@ mod tests {
     #[test]
     fn classify_cargo_check() {
         assert_eq!(classify_command("cargo check"), VerificationType::Check);
+    }
+
+    #[test]
+    fn classify_compound_verification() {
+        assert_eq!(
+            classify_command("rg TODO zhongshu-core && cargo test -p zhongshu-core"),
+            VerificationType::Test
+        );
     }
 
     #[test]

@@ -272,6 +272,7 @@ async fn smoke_attention_manager_drains_digest_queue() {
             findings: "findings".into(),
             confidence: 0.5,
             attention: AttentionLevel::Digest,
+            trace_events: vec![],
         });
     }
 

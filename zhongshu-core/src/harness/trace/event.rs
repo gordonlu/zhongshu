@@ -2,6 +2,38 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HarnessEvent {
+    CodingSessionStarted {
+        timestamp: u64,
+        session_id: String,
+        trace_id: String,
+        repo_root: PathBuf,
+        intent: String,
+        model: String,
+        source: String,
+        deeplossless_conversation_id: Option<i64>,
+        deeplossless_replay_execution_id: Option<String>,
+    },
+    CodingPlanCreated {
+        session_id: String,
+        step_count: usize,
+        risk: String,
+    },
+    CodingStepStarted {
+        session_id: String,
+        step_id: String,
+        kind: String,
+        title: String,
+    },
+    CodingStepCompleted {
+        session_id: String,
+        step_id: String,
+        status: String,
+    },
+    CodingOutcomeRecorded {
+        timestamp: u64,
+        session_id: String,
+        outcome: String,
+    },
     RunStarted {
         timestamp: u64,
         input: String,

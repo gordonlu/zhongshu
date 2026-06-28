@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use zhongshu_core::agent::llm::{ChatCompletionRequest, LlmProvider};
+use zhongshu_core::agent::llm::ChatCompletionRequest;
 use zhongshu_core::agent::llm_registry::LlmRegistry;
 use zhongshu_core::agent::{AgentProfile, AgentRuntime, Worker};
 use zhongshu_core::equipment::{

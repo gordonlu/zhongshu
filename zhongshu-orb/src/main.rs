@@ -9,6 +9,7 @@ mod overlay;
 #[cfg(windows)]
 #[path = "overlay_windows.rs"]
 mod overlay;
+mod overlay_assets;
 mod overlay_contract;
 mod render;
 mod services;
@@ -18,7 +19,6 @@ use std::time::Duration;
 
 use winit::event_loop::EventLoop;
 
-use zhongshu_core::agent::llm::OpenAiProvider;
 use zhongshu_core::agent::{
     AgentBudget, AgentProfile, AgentRuntime, AttentionDispatcher, AttentionManager, ModelRouter,
 };
@@ -182,8 +182,10 @@ fn main() {
 
     let cfg = config::load();
     let ak = cfg.llm.api_key();
-    if ak.is_empty() {
+    if ak.is_empty() && !cfg.llm.offline_enabled() {
         tracing::warn!("{} not set; agent will not function", cfg.llm.api_key_env);
+    } else if cfg.llm.offline_enabled() {
+        tracing::info!("offline scripted LLM provider enabled");
     }
 
     // Shared tokio runtime for all async work (proxy, agent, background).
@@ -200,7 +202,7 @@ fn main() {
         .block_on(async {
             DeeplosslessProxy::new(zhongshu_core::integration::DeeplosslessConfig {
                 api_key: ak.clone(),
-                upstream: cfg.llm.api_base.clone(),
+                upstream: cfg.llm.proxy_upstream(),
                 proxy_port,
                 ..Default::default()
             })
@@ -261,7 +263,7 @@ fn main() {
     let suggestion_tool = SuggestionTool::new(suggestion_engine.clone()).with_event_bus(eb.clone());
     let memory_policy = MemoryPolicy::new(Database::new(core_db_path.clone()));
     let memory_candidate_store = MemoryCandidateStore::new(Database::new(core_db_path.clone()));
-    let provider = OpenAiProvider::new(&ak, &cfg.llm.model).with_base_url(base_url);
+    let provider = cfg.llm.build_provider(&base_url);
 
     let memory_query_tool =
         MemoryQueryTool::new(memory_policy.clone(), memory_candidate_store.clone())
@@ -408,10 +410,10 @@ fn main() {
             }
         }
     }
-    let worker_runtime = Arc::new(tokio::sync::RwLock::new(AgentRuntime::new(
+    let worker_runtime = Arc::new(tokio::sync::RwLock::new(AgentRuntime::with_llm(
         provider.clone(),
-        worker_registry,
         cfg.llm.model.clone(),
+        worker_registry,
         AgentBudget {
             max_steps: 50,
             max_tool_calls: 100,

@@ -134,6 +134,10 @@ impl OverlayHandle {
     pub fn take_toggle_zoom(&self) -> bool {
         false
     }
+    pub fn take_start_drag(&self) -> bool {
+        false
+    }
+    pub fn start_drag_window(&self) {}
     pub fn take_cancel_task(&self) -> Option<String> {
         None
     }

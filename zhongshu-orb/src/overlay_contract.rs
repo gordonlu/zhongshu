@@ -186,9 +186,74 @@ pub enum UiToOverlayCommand {
     ListEquipment,
     ToggleEquipment(String),
     ToggleZoom,
+    StartDrag,
     CancelTask(String),
     CompleteTask(String),
     Unknown,
+}
+
+#[cfg(test)]
+fn chat_coding_smoke_events() -> Vec<OverlayToUiEvent> {
+    vec![
+        OverlayToUiEvent::Delta {
+            content: "offline proof: running safe self-test".into(),
+        },
+        OverlayToUiEvent::Coding {
+            event: CodingUiEvent::PlanCreated {
+                session_id: "session-smoke".into(),
+                step_count: 2,
+                risk: "low".into(),
+            },
+        },
+        OverlayToUiEvent::Coding {
+            event: CodingUiEvent::WorkerStarted {
+                session_id: Some("session-smoke".into()),
+                worker: "deepseek-worker".into(),
+                task_id: "task-smoke".into(),
+                owned_files: vec!["src/lib.rs".into()],
+            },
+        },
+        OverlayToUiEvent::Coding {
+            event: CodingUiEvent::PatchPreview {
+                session_id: Some("session-smoke".into()),
+                path: "src/lib.rs".into(),
+                operation: "update".into(),
+                diff_summary: "1 file changed".into(),
+            },
+        },
+        OverlayToUiEvent::Coding {
+            event: CodingUiEvent::Verification {
+                command: "cargo test -p zhongshu-core offline_proof".into(),
+                success: true,
+                exit_code: Some(0),
+            },
+        },
+        OverlayToUiEvent::Coding {
+            event: CodingUiEvent::ContextPressure {
+                pressure_percent: 78,
+                dropped_evidence: 0,
+                dropped_recent: 0,
+            },
+        },
+        OverlayToUiEvent::Coding {
+            event: CodingUiEvent::ReplayAvailable {
+                conversation_id: Some(42),
+                replay_execution_id: Some("replay-smoke".into()),
+            },
+        },
+        OverlayToUiEvent::Complete,
+    ]
+}
+
+#[cfg(test)]
+fn chat_coding_smoke_commands() -> Vec<&'static str> {
+    vec![
+        r#"{"type":"submit","text":"run offline proof"}"#,
+        r#"{"type":"stop"}"#,
+        r#"{"type":"approve","request_id":"req-smoke"}"#,
+        r#"{"type":"toggle_zoom"}"#,
+        r#"{"type":"start_drag"}"#,
+    ]
 }
 
 pub fn parse_ui_command(body: &str) -> UiToOverlayCommand {
@@ -230,6 +295,7 @@ pub fn parse_ui_command(body: &str) -> UiToOverlayCommand {
             .map(|id| UiToOverlayCommand::ToggleEquipment(id.to_string()))
             .unwrap_or(UiToOverlayCommand::Unknown),
         Some("toggle_zoom") => UiToOverlayCommand::ToggleZoom,
+        Some("start_drag") => UiToOverlayCommand::StartDrag,
         Some("cancel_task") => msg["task_id"]
             .as_str()
             .map(|id| UiToOverlayCommand::CancelTask(id.to_string()))
@@ -325,5 +391,40 @@ mod tests {
     #[test]
     fn malformed_command_is_unknown() {
         assert_eq!(parse_ui_command("not json"), UiToOverlayCommand::Unknown);
+    }
+
+    #[test]
+    fn chat_coding_smoke_events_serialize_for_webview2_ipc() {
+        let events = chat_coding_smoke_events();
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, OverlayToUiEvent::Delta { .. })));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, OverlayToUiEvent::Complete)));
+
+        for event in events {
+            let json = serde_json::to_value(&event).expect("event json");
+            assert!(json.get("type").is_some(), "missing event type: {json}");
+        }
+    }
+
+    #[test]
+    fn chat_coding_smoke_commands_parse_from_webview2_ipc() {
+        let commands: Vec<_> = chat_coding_smoke_commands()
+            .into_iter()
+            .map(parse_ui_command)
+            .collect();
+
+        assert_eq!(
+            commands,
+            vec![
+                UiToOverlayCommand::Submit("run offline proof".into()),
+                UiToOverlayCommand::Stop,
+                UiToOverlayCommand::Approve("req-smoke".into()),
+                UiToOverlayCommand::ToggleZoom,
+                UiToOverlayCommand::StartDrag,
+            ]
+        );
     }
 }

@@ -1,7 +1,13 @@
 target/
+node_modules/
+.pnpm-store/
 .deeplossless/
 .superpowers/
 docs/superpowers/
+artifacts/proof-runs/
+zhongshu-orb/ui/dist/
+zhongshu-orb/ui/coverage/
+*.tsbuildinfo
 *.db
 *.db-wal
 *.db-shm
@@ -9,7 +15,6 @@ docs/superpowers/
 AGENTS.md
 MULTI_AGENT_ARCH.md
 DEEPLOSSLESS_REFERENCE.md
-NEXT_PHASE_PLAN.md
-CODING_AGENT_ROADMAP.md
+.roadmap/
 .codex/
 .agents/

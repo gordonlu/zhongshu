@@ -7,7 +7,6 @@ use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::window::WindowId;
 
-use zhongshu_core::agent::llm::OpenAiProvider;
 use zhongshu_core::agent::{AgentRuntime, ModelRouter};
 use zhongshu_core::authority;
 use zhongshu_core::event::{
@@ -317,8 +316,7 @@ impl ZhongshuApp {
             let base_url = self
                 .runtime
                 .block_on(async { self.proxy.lock().await.base_url().to_string() });
-            let provider =
-                OpenAiProvider::new(cfg.llm.api_key(), &cfg.llm.model).with_base_url(base_url);
+            let provider = cfg.llm.build_provider(&base_url);
             self.controller.update_llm_runtime(
                 provider,
                 cfg.llm.model.clone(),
@@ -344,6 +342,9 @@ impl ZhongshuApp {
                 self.config.ui.overlay_height * scale,
             );
             ov.send(&serde_json::json!({"type":"zoom","active": self.overlay_zoomed}));
+        }
+        if ov.take_start_drag() {
+            ov.start_drag_window();
         }
         if ov.take_open_settings() {
             let cfg = crate::config::load();
@@ -833,13 +834,13 @@ impl ZhongshuApp {
         }
     }
 
-    pub fn try_open_overlay(&mut self, _el: &ActiveEventLoop) {
+    pub fn try_open_overlay(&mut self, el: &ActiveEventLoop) {
         let (w, h) = self.overlay_size();
         if let Some(ref ov) = self.overlay {
             ov.show_window(w, h);
             return;
         }
-        let ov = crate::overlay::show(w, h);
+        let ov = crate::overlay::show(el, w, h);
         // Load previous conversation from lcm.db and send to JS
         let proxy = self.proxy.clone();
         let history = self
@@ -898,10 +899,26 @@ impl ZhongshuApp {
 impl ApplicationHandler for ZhongshuApp {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         self.indicator = Some(Indicator::create(el, self.config.ui.orb_size));
+        if std::env::var("ZHONGSHU_ORB_OPEN_ON_START")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            self.try_open_overlay(el);
+        }
     }
     fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         self.drain();
         let orb_id = self.indicator.as_ref().and_then(|i| i.window_id());
+        let overlay_id = self.overlay.as_ref().and_then(|ov| ov.window_id());
+        if overlay_id == Some(id)
+            && self
+                .overlay
+                .as_ref()
+                .map(|ov| ov.handle_window_event(&event))
+                .unwrap_or(false)
+        {
+            return;
+        }
         #[allow(unused)]
         let on_orb = orb_id == Some(id);
         match event {

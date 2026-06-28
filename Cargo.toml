@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["zhongshu-core", "zhongshu-cli", "zhongshu-orb", "zhongshu-message-core"]
+members = [
+    "xtask",
+    "zhongshu-core",
+    "zhongshu-cli",
+    "zhongshu-orb",
+    "zhongshu-message-core",
+]
 
 [workspace.package]
 version = "0.1.1"

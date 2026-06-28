@@ -11,7 +11,7 @@ const AGENT_TIMEOUT: Duration = Duration::from_secs(300);
 use crate::agent::AgentMemory;
 use crate::config;
 use tokio::sync::RwLock;
-use zhongshu_core::agent::llm::OpenAiProvider;
+use zhongshu_core::agent::llm::LlmProvider;
 use zhongshu_core::agent::{
     run_agent_with_context, AgentBudget, AgentCallbacks, AgentProfile, AgentRuntime, ModelRouter,
     Worker,
@@ -48,7 +48,7 @@ impl SessionState {
 pub struct AgentController {
     event_bus: Arc<EventBus>,
     response_tx: ResponseTx,
-    provider: Mutex<OpenAiProvider>,
+    provider: Mutex<Arc<dyn LlmProvider>>,
     base_tools: ToolRegistry,
     tools: Mutex<ToolRegistry>,
     model: Mutex<String>,
@@ -75,7 +75,7 @@ impl AgentController {
     pub fn new(
         event_bus: Arc<EventBus>,
         response_tx: ResponseTx,
-        provider: OpenAiProvider,
+        provider: Arc<dyn LlmProvider>,
         base_tools: ToolRegistry,
         tools: ToolRegistry,
         model: String,
@@ -175,13 +175,13 @@ impl AgentController {
         self.model.lock().unwrap().clone()
     }
 
-    pub fn provider_snapshot(&self) -> OpenAiProvider {
+    pub fn provider_snapshot(&self) -> Arc<dyn LlmProvider> {
         self.provider.lock().unwrap().clone()
     }
 
     pub fn update_llm_runtime(
         &self,
-        provider: OpenAiProvider,
+        provider: Arc<dyn LlmProvider>,
         model: String,
         router: ModelRouter,
         reasoning_complex: String,
@@ -327,7 +327,7 @@ impl AgentController {
             _ => None,
         };
         let p = if routed_model != model_snapshot {
-            provider_snapshot.with_model(&routed_model)
+            provider_snapshot.change_model(&routed_model)
         } else {
             provider_snapshot
         };
@@ -471,7 +471,7 @@ impl AgentController {
                 report.stable_prefix_hash,
             );
 
-            let mut runtime = AgentRuntime::new(p, t, m, budget);
+            let mut runtime = AgentRuntime::with_llm(p, m, t, budget);
             runtime.reasoning_effort = reasoning_str;
 
             let tool_names = Arc::new(Mutex::new(Vec::<String>::new()));

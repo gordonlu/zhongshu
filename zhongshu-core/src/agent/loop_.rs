@@ -894,9 +894,10 @@ mod tests {
     use super::*;
     use crate::agent::llm::{
         ChatCompletionRequest, ChatCompletionResponse, FinalChoice, FunctionCall, LlmProvider,
+        ScriptedProvider as OfflineScriptedProvider,
     };
     use crate::agent::AgentRuntime;
-    use crate::tool::{Tool, ToolRegistry};
+    use crate::tool::{default_registry, Tool, ToolRegistry};
     use async_trait::async_trait;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
@@ -1067,6 +1068,47 @@ mod tests {
     }
 
     // ── Recovery loop tests ──
+
+    #[tokio::test]
+    async fn scripted_provider_runs_self_test_without_live_llm() {
+        let mut runtime = AgentRuntime::new(
+            OfflineScriptedProvider::new("offline-scripted"),
+            default_registry(),
+            "offline-scripted",
+            AgentBudget {
+                max_steps: 5,
+                max_tool_calls: 5,
+                per_tool_limit: 5,
+                token_limit: 10_000,
+                llm_timeout: Duration::from_secs(5),
+                tool_timeout: Duration::from_secs(5),
+            },
+        );
+
+        let result = run_agent(
+            &mut runtime,
+            vec![Message::user("check chat coding proof path")],
+            None,
+            "offline-proof",
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(result.stop_reason, StopReason::Finished));
+        assert_eq!(result.tool_calls_made, 1);
+        assert!(result.trace_events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolCall {
+                tool_name,
+                success: true,
+                ..
+            } if tool_name == "self_test"
+        )));
+        assert!(result
+            .messages
+            .iter()
+            .any(|message| message.content.contains("without a live LLM")));
+    }
 
     struct NoopTool;
 

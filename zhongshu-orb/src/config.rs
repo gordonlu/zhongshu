@@ -1,8 +1,11 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use zhongshu_core::agent::llm::{LlmProvider, OpenAiProvider, ScriptedProvider};
+use zhongshu_core::agent::llm_registry::offline_llm_enabled;
 
 // ── Config schema ───────────────────────────────────────────────────
 
@@ -122,6 +125,7 @@ impl LlmConfig {
     /// Build a LlmRegistry from this config, preserving backwards compat.
     pub fn to_registry(&self) -> zhongshu_core::agent::llm_registry::LlmRegistry {
         let mut reg = zhongshu_core::agent::llm_registry::LlmRegistry::new();
+        let force_offline = self.offline_enabled();
         let profiles = if self.profiles.is_empty() {
             // Migrate old single-profile format.
             let mut p = std::collections::HashMap::new();
@@ -148,10 +152,15 @@ impl LlmConfig {
             self.profiles.clone()
         };
         for (name, cfg) in &profiles {
+            let api_base = if force_offline {
+                "mock://offline"
+            } else {
+                &cfg.api_base
+            };
             reg.register_raw(
                 name,
                 &cfg.api_key_env,
-                &cfg.api_base,
+                api_base,
                 &cfg.chat_model,
                 cfg.reasoning_model.clone(),
                 cfg.embedding_model.clone(),
@@ -165,12 +174,35 @@ impl LlmConfig {
     /// Resolved API key: env var takes priority, then OS keyring.
     /// The key is intentionally never read from or written to config.json.
     pub fn api_key(&self) -> String {
+        if self.offline_enabled() {
+            return String::new();
+        }
         if let Ok(key) = std::env::var(&self.api_key_env) {
             if !key.is_empty() {
                 return key;
             }
         }
         load_stored_api_key().unwrap_or_default()
+    }
+
+    pub fn offline_enabled(&self) -> bool {
+        offline_llm_enabled(&self.api_base)
+    }
+
+    pub fn build_provider(&self, live_base_url: &str) -> Arc<dyn LlmProvider> {
+        if self.offline_enabled() {
+            Arc::new(ScriptedProvider::new(&self.model))
+        } else {
+            Arc::new(OpenAiProvider::new(self.api_key(), &self.model).with_base_url(live_base_url))
+        }
+    }
+
+    pub fn proxy_upstream(&self) -> String {
+        if self.offline_enabled() {
+            default_api_base()
+        } else {
+            self.api_base.clone()
+        }
     }
 }
 
@@ -1003,6 +1035,49 @@ mod tests {
             ..Default::default()
         };
         assert!(cfg.api_key().is_empty());
+    }
+
+    #[test]
+    fn offline_config_does_not_require_api_key() {
+        let cfg = LlmConfig {
+            api_key_env: "ZHONGSHU_NONEXISTENT_OFFLINE_KEY".into(),
+            api_base: "mock://offline".into(),
+            ..Default::default()
+        };
+
+        assert!(cfg.offline_enabled());
+        assert!(cfg.api_key().is_empty());
+        assert_eq!(
+            cfg.build_provider("http://127.0.0.1:1/v1").model_name(),
+            cfg.model
+        );
+    }
+
+    #[test]
+    fn offline_registry_forces_profiles_to_scripted_provider() {
+        let mut cfg = LlmConfig {
+            api_key_env: "ZHONGSHU_NONEXISTENT_OFFLINE_KEY".into(),
+            api_base: "mock://offline".into(),
+            ..Default::default()
+        };
+        let profile = cfg.profiles.get_mut("default").expect("default profile");
+        profile.api_base = "https://example.invalid".into();
+        profile.api_key_env = "ZHONGSHU_NONEXISTENT_PROFILE_KEY".into();
+
+        let registry = cfg.to_registry();
+        let client = registry.client_for_role("primary").expect("offline client");
+
+        assert_eq!(client.provider.model_name(), cfg.model);
+    }
+
+    #[test]
+    fn offline_proxy_upstream_keeps_runtime_url_valid() {
+        let cfg = LlmConfig {
+            api_base: "mock://offline".into(),
+            ..Default::default()
+        };
+
+        assert_eq!(cfg.proxy_upstream(), default_api_base());
     }
 
     #[test]

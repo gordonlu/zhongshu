@@ -185,4 +185,6 @@ pub trait LlmProvider: Send + Sync {
 }
 
 mod openai;
+mod scripted;
 pub use openai::OpenAiProvider;
+pub use scripted::ScriptedProvider;

@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use serde_json::json;
+use std::sync::Arc;
 
-use crate::agent::llm::OpenAiProvider;
+use crate::agent::llm::LlmProvider;
 use crate::core::memory::candidate::MemoryCandidateStore;
 use crate::core::memory::policy::MemoryPolicy;
 use crate::tool::{Tool, ToolOutput};
@@ -10,7 +11,7 @@ use crate::tool::{Tool, ToolOutput};
 pub struct MemoryQueryTool {
     policy: MemoryPolicy,
     candidates: MemoryCandidateStore,
-    provider: Option<OpenAiProvider>,
+    provider: Option<Arc<dyn LlmProvider>>,
 }
 
 impl MemoryQueryTool {
@@ -22,7 +23,7 @@ impl MemoryQueryTool {
         }
     }
 
-    pub fn with_provider(mut self, provider: OpenAiProvider) -> Self {
+    pub fn with_provider(mut self, provider: Arc<dyn LlmProvider>) -> Self {
         self.provider = Some(provider);
         self
     }
@@ -79,7 +80,7 @@ impl Tool for MemoryQueryTool {
                 };
                 let results = if let Some(ref provider) = self.provider {
                     self.policy
-                        .search_with(kw, provider, 20)
+                        .search_with(kw, provider.as_ref(), 20)
                         .await
                         .unwrap_or_else(|_| self.policy.search(kw, 20).unwrap_or_default())
                 } else {

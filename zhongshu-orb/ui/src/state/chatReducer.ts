@@ -1,0 +1,83 @@
+import type { ChatEntry, OverlayToUiEvent } from '../ipc/events'
+
+export type ChatMessage = {
+  id: string
+  role: 'user' | 'assistant' | 'system'
+  content: string
+}
+
+export type ChatState = {
+  messages: ChatMessage[]
+  streamingAssistant: string
+  hasMoreHistory: boolean
+  runtimeState: string
+  toast?: string
+}
+
+export const initialChatState: ChatState = {
+  messages: [],
+  streamingAssistant: '',
+  hasMoreHistory: false,
+  runtimeState: 'idle',
+}
+
+export function chatReducer(state: ChatState, event: OverlayToUiEvent): ChatState {
+  switch (event.type) {
+    case 'delta':
+      return {
+        ...state,
+        streamingAssistant: state.streamingAssistant + event.content,
+      }
+    case 'complete': {
+      if (!state.streamingAssistant.trim()) return state
+      return {
+        ...state,
+        messages: [
+          ...state.messages,
+          {
+            id: nextMessageId('assistant'),
+            role: 'assistant',
+            content: state.streamingAssistant,
+          },
+        ],
+        streamingAssistant: '',
+      }
+    }
+    case 'history':
+      return {
+        ...state,
+        messages: event.entries.map(entryToMessage),
+        hasMoreHistory: event.has_more,
+        streamingAssistant: '',
+      }
+    case 'prepend_history':
+      return {
+        ...state,
+        messages: [...event.entries.map(entryToMessage), ...state.messages],
+        hasMoreHistory: event.has_more,
+      }
+    case 'clear':
+      return initialChatState
+    case 'state_change':
+      return { ...state, runtimeState: event.state }
+    case 'toast':
+      return { ...state, toast: event.text }
+    default:
+      return state
+  }
+}
+
+function entryToMessage(entry: ChatEntry): ChatMessage {
+  return {
+    id: nextMessageId(entry.role.toLowerCase()),
+    role: entry.role === 'User' ? 'user' : entry.role === 'Assistant' ? 'assistant' : 'system',
+    content: entry.content,
+  }
+}
+
+let messageId = 0
+
+function nextMessageId(prefix: string): string {
+  messageId += 1
+  return `${prefix}-${messageId}`
+}

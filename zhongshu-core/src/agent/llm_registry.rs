@@ -1,4 +1,4 @@
-use crate::agent::llm::{LlmProvider, OpenAiProvider};
+use crate::agent::llm::{LlmProvider, OpenAiProvider, ScriptedProvider};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -123,12 +123,17 @@ impl LlmRegistry {
             .profiles
             .get(profile_name)
             .ok_or_else(|| format!("LLM profile '{profile_name}' not found"))?;
-        let api_key = std::env::var(&config.api_key_env)
-            .map_err(|_| format!("env {} not set", config.api_key_env))?;
-        let provider =
-            OpenAiProvider::new(&api_key, &config.chat_model).with_base_url(&config.api_base);
+        let provider: Arc<dyn LlmProvider> = if offline_llm_enabled(&config.api_base) {
+            Arc::new(ScriptedProvider::new(&config.chat_model))
+        } else {
+            let api_key = std::env::var(&config.api_key_env)
+                .map_err(|_| format!("env {} not set", config.api_key_env))?;
+            Arc::new(
+                OpenAiProvider::new(&api_key, &config.chat_model).with_base_url(&config.api_base),
+            )
+        };
         Ok(LlmClient {
-            provider: Arc::new(provider),
+            provider,
             model: config.chat_model.clone(),
             profile_name: profile_name.to_string(),
             reasoning_effort: None,
@@ -141,5 +146,46 @@ impl LlmRegistry {
     pub fn client_for_role(&self, role: &str) -> Result<LlmClient, String> {
         let profile = self.profile_for_role(role);
         self.build_client(profile)
+    }
+}
+
+pub fn offline_llm_enabled(api_base: &str) -> bool {
+    env_truthy("ZHONGSHU_PROOF_OFFLINE")
+        || env_truthy("ZHONGSHU_OFFLINE_LLM")
+        || api_base.eq_ignore_ascii_case("mock://offline")
+        || api_base.eq_ignore_ascii_case("scripted://offline")
+}
+
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mock_base_uses_scripted_provider_without_key() {
+        let mut registry = LlmRegistry::new();
+        registry.register_raw(
+            "default",
+            "ZHONGSHU_KEY_THAT_DOES_NOT_EXIST",
+            "mock://offline",
+            "offline-scripted",
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let client = registry.build_client("default").expect("offline client");
+        assert_eq!(client.provider.model_name(), "offline-scripted");
     }
 }

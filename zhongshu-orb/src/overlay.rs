@@ -6,8 +6,12 @@ use glib;
 use gtk::gdk::prelude::MonitorExt;
 use gtk::prelude::*;
 use serde_json::json;
+use winit::event::WindowEvent;
+use winit::event_loop::ActiveEventLoop;
+use winit::window::WindowId;
 use wry::WebViewBuilderExtUnix;
 
+use crate::overlay_assets::{legacy_chat_html, select_overlay_asset, OverlayAsset};
 use crate::overlay_contract::{parse_ui_command, UiToOverlayCommand};
 
 #[allow(unused_imports)]
@@ -41,10 +45,27 @@ pub(crate) static GTK_TX: once_cell::sync::Lazy<crossbeam_channel::Sender<GtkCom
                 glib::Propagation::Stop
             });
 
-            let html = include_str!("../assets/chat.html");
+            let asset = select_overlay_asset();
+            match &asset {
+                OverlayAsset::React { index_path, .. } => {
+                    tracing::info!(
+                        "gtk overlay loading inlined react UI from {}",
+                        index_path.display()
+                    );
+                }
+                OverlayAsset::LegacyHtml { reason } => {
+                    tracing::info!("gtk overlay loading legacy UI: {reason}");
+                }
+            }
 
-            let webview = wry::WebViewBuilder::new()
-                .with_html(html)
+            let builder = match asset {
+                OverlayAsset::React { html, .. } => wry::WebViewBuilder::new().with_html(html),
+                OverlayAsset::LegacyHtml { .. } => {
+                    wry::WebViewBuilder::new().with_html(legacy_chat_html())
+                }
+            };
+
+            let webview = builder
                 .with_user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7827.102 Safari/537.36")
                 .with_ipc_handler(move |request: http::Request<String>| {
                     IPC_HANDLER.lock().unwrap().as_ref().map(|h| h(request));
@@ -237,6 +258,12 @@ impl OverlayHandle {
         std::mem::take(&mut *self.pending_toggle_zoom.lock().unwrap())
     }
 
+    pub fn take_start_drag(&self) -> bool {
+        false
+    }
+
+    pub fn start_drag_window(&self) {}
+
     pub fn take_cancel_task(&self) -> Option<String> {
         std::mem::take(&mut *self.pending_cancel_task.lock().unwrap())
     }
@@ -254,6 +281,14 @@ impl OverlayHandle {
     pub fn show_equipment(&self, items: &[serde_json::Value]) {
         self.send(&json!({ "type": "equipment", "items": items }));
     }
+
+    pub fn window_id(&self) -> Option<WindowId> {
+        None
+    }
+
+    pub fn handle_window_event(&self, _event: &WindowEvent) -> bool {
+        false
+    }
 }
 
 impl Drop for OverlayHandle {
@@ -263,7 +298,7 @@ impl Drop for OverlayHandle {
 }
 
 /// Show the overlay window and return a handle for IPC.
-pub fn show(width: f32, height: f32) -> OverlayHandle {
+pub fn show(_event_loop: &ActiveEventLoop, width: f32, height: f32) -> OverlayHandle {
     // Initialize GTK thread (on first call only)
     let _ = *GTK_TX;
 
@@ -347,6 +382,7 @@ pub fn show(width: f32, height: f32) -> OverlayHandle {
                 UiToOverlayCommand::ToggleZoom => {
                     *ptz.lock().unwrap() = true;
                 }
+                UiToOverlayCommand::StartDrag => {}
                 UiToOverlayCommand::CancelTask(id) => {
                     *pct.lock().unwrap() = Some(id);
                 }

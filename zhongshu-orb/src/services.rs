@@ -430,7 +430,12 @@ mod tests {
             status: StepStatus::Pending,
             input: None,
             output: None,
+            error: None,
+            tool_summary: None,
+            verification: None,
             created_at: 123,
+            started_at: None,
+            finished_at: None,
         };
 
         let task = task_step_to_worker_task("task-1", "Review harness", &step, "do it");

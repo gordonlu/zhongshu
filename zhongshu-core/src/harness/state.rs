@@ -39,6 +39,7 @@ impl HarnessState {
                 last_feedback_step: 0,
                 consecutive_no_progress: 0,
                 patch_history: PatchHistory::new(),
+                pending_signals: Vec::new(),
             },
             architecture: ArchitectureState {
                 violations: Vec::new(),
@@ -118,6 +119,7 @@ pub struct RecoveryState {
     pub last_feedback_step: u32,
     pub consecutive_no_progress: u32,
     pub patch_history: PatchHistory,
+    pub pending_signals: Vec<crate::harness::recovery::policy::RecoverySignal>,
 }
 
 // ── Architecture ─────────────────────────────────────────────────────

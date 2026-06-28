@@ -74,6 +74,18 @@ impl Event {
                 HarnessUiEvent::Verification { .. } => "verification",
                 HarnessUiEvent::RecoveryFeedback { .. } => "recovery",
                 HarnessUiEvent::PhaseTransition { .. } => "phase",
+                HarnessUiEvent::CodingSessionStarted { .. } => "coding_session_started",
+                HarnessUiEvent::CodingPlanCreated { .. } => "coding_plan_created",
+                HarnessUiEvent::CodingStepStarted { .. } => "coding_step_started",
+                HarnessUiEvent::CodingStepCompleted { .. } => "coding_step_completed",
+                HarnessUiEvent::WorkerStarted { .. } => "worker_started",
+                HarnessUiEvent::WorkerCompleted { .. } => "worker_completed",
+                HarnessUiEvent::WorkerConflict { .. } => "worker_conflict",
+                HarnessUiEvent::PatchPreview { .. } => "patch_preview",
+                HarnessUiEvent::PatchApplied { .. } => "patch_applied",
+                HarnessUiEvent::ContextIncluded { .. } => "context_included",
+                HarnessUiEvent::ContextPressure { .. } => "context_pressure",
+                HarnessUiEvent::ReplayAvailable { .. } => "replay_available",
             },
             Event::Task(e) => match e {
                 TaskEvent::Triggered { .. } => "task_triggered",
@@ -172,6 +184,74 @@ pub enum ToolEvent {
 /// UI-facing events from the harness layer (verification, recovery, phase).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum HarnessUiEvent {
+    CodingSessionStarted {
+        session_id: String,
+        trace_id: String,
+        intent: String,
+        model: String,
+        deeplossless_conversation_id: Option<i64>,
+        deeplossless_replay_execution_id: Option<String>,
+    },
+    CodingPlanCreated {
+        session_id: String,
+        step_count: usize,
+        risk: String,
+    },
+    CodingStepStarted {
+        session_id: String,
+        step_id: String,
+        kind: String,
+        title: String,
+    },
+    CodingStepCompleted {
+        session_id: String,
+        step_id: String,
+        status: String,
+    },
+    WorkerStarted {
+        session_id: Option<String>,
+        worker: String,
+        task_id: String,
+        owned_files: Vec<std::path::PathBuf>,
+    },
+    WorkerCompleted {
+        session_id: Option<String>,
+        worker: String,
+        task_id: String,
+        success: bool,
+        trace_event_count: usize,
+    },
+    WorkerConflict {
+        session_id: Option<String>,
+        worker: String,
+        task_id: String,
+        reason: String,
+    },
+    PatchPreview {
+        session_id: Option<String>,
+        path: std::path::PathBuf,
+        operation: String,
+        diff_summary: String,
+    },
+    PatchApplied {
+        session_id: Option<String>,
+        path: std::path::PathBuf,
+        operation: String,
+        changed: bool,
+    },
+    ContextIncluded {
+        description: String,
+        estimated_tokens: usize,
+    },
+    ContextPressure {
+        pressure_percent: u8,
+        dropped_evidence: usize,
+        dropped_recent: usize,
+    },
+    ReplayAvailable {
+        conversation_id: Option<i64>,
+        replay_execution_id: Option<String>,
+    },
     Verification {
         command: String,
         success: bool,

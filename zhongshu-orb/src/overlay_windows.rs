@@ -1,12 +1,16 @@
-use std::collections::VecDeque;
-use std::sync::Arc;
-use std::sync::Mutex;
+#![allow(dead_code)]
 
-use glib;
-use gtk::gdk::prelude::MonitorExt;
-use gtk::prelude::*;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+
 use serde_json::json;
-use wry::WebViewBuilderExtUnix;
+use winit::application::ApplicationHandler;
+use winit::dpi::{LogicalPosition, LogicalSize};
+use winit::event::WindowEvent;
+use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::platform::windows::EventLoopBuilderExtWindows;
+use winit::window::{Window, WindowId, WindowLevel};
+use wry::{Rect, WebViewBuilder};
 
 use crate::overlay_contract::{parse_ui_command, UiToOverlayCommand};
 
@@ -15,88 +19,22 @@ pub use crate::overlay_contract::{
     AuthRequest, ChatEntry, EntryRole, OverlayToUiEvent, SettingsConfig, ToolCallEntry, ToolStatus,
 };
 
-// ── Message types ────────────────────────────────────────────────────
-
-// ── Global GTK thread state ─────────────────────────────────────────
-
-pub(crate) enum GtkCommand {
+enum WindowsCommand {
     Eval(String),
     Show(f32, f32),
     Hide,
 }
 
-pub(crate) static GTK_TX: once_cell::sync::Lazy<crossbeam_channel::Sender<GtkCommand>> =
+static WINDOWS_TX: once_cell::sync::Lazy<crossbeam_channel::Sender<WindowsCommand>> =
     once_cell::sync::Lazy::new(|| {
-        let (tx_i, rx_i) = crossbeam_channel::unbounded::<GtkCommand>();
-        std::thread::spawn(move || {
-            gtk::init().expect("GTK init failed");
-            let window = gtk::Window::new(gtk::WindowType::Toplevel);
-            window.set_title("Zhongshu");
-            window.set_default_size(520, 800);
-            window.set_default_size(520, 800);
-            window.set_decorated(true);
-            window.set_resizable(true);
-            window.connect_delete_event(|w, _| {
-                w.hide();
-                glib::Propagation::Stop
-            });
-
-            let html = include_str!("../assets/chat.html");
-
-            let webview = wry::WebViewBuilder::new()
-                .with_html(html)
-                .with_user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7827.102 Safari/537.36")
-                .with_ipc_handler(move |request: http::Request<String>| {
-                    IPC_HANDLER.lock().unwrap().as_ref().map(|h| h(request));
-                })
-                .build_gtk(&window)
-                .expect("wry WebView build_gtk failed");
-
-            window.show_all();
-
-            glib::idle_add_local(move || {
-                while let Ok(cmd) = rx_i.try_recv() {
-                    match cmd {
-                        GtkCommand::Eval(js) => {
-                            if let Err(e) = webview.evaluate_script(&js) {
-                                tracing::warn!("webview eval error: {e}");
-                            }
-                        }
-                        GtkCommand::Show(w, h) => {
-                            let (screen_w, screen_h) = gtk::gdk::Display::default()
-                                .and_then(|display| display.primary_monitor())
-                                .map(|monitor| {
-                                    let area = monitor.workarea();
-                                    (area.width() as f32, area.height() as f32)
-                                })
-                                .unwrap_or((1280.0, 900.0));
-                            let max_w = (screen_w * 0.96).max(320.0);
-                            let max_h = (screen_h * 0.92).max(480.0);
-                            let clamped_w = w.min(max_w).max(360.0) as i32;
-                            let clamped_h = h.min(max_h).max(520.0) as i32;
-                            window.resize(clamped_w, clamped_h);
-                            window.set_default_size(clamped_w, clamped_h);
-                            window.show_all();
-                        }
-                        GtkCommand::Hide => {
-                            window.hide();
-                        }
-                    }
-                }
-                glib::ControlFlow::Continue
-            });
-
-            gtk::main();
-        });
-        tx_i
+        let (tx, rx) = crossbeam_channel::unbounded::<WindowsCommand>();
+        std::thread::spawn(move || run_windows_overlay(rx));
+        tx
     });
 
-/// Thread-safe IPC handler set by the current OverlayHandle.
 static IPC_HANDLER: once_cell::sync::Lazy<
     Mutex<Option<Box<dyn Fn(http::Request<String>) + Send>>>,
 > = once_cell::sync::Lazy::new(|| Mutex::new(None));
-
-// ── Overlay handle ───────────────────────────────────────────────────
 
 pub struct OverlayHandle {
     pub pending_input: Arc<Mutex<VecDeque<String>>>,
@@ -115,22 +53,18 @@ pub struct OverlayHandle {
     pub pending_toggle_zoom: Arc<Mutex<bool>>,
     pub pending_cancel_task: Arc<Mutex<Option<String>>>,
     pub pending_complete_task: Arc<Mutex<Option<String>>>,
-    #[allow(dead_code)]
     pub request_quit: bool,
-    #[allow(dead_code)]
     pub personality_selected: bool,
 }
 
 impl OverlayHandle {
     pub fn eval(&self, js: &str) {
-        if let Err(e) = GTK_TX.send(GtkCommand::Eval(js.to_string())) {
-            tracing::warn!("gtk tx send error: {e}");
+        if let Err(e) = WINDOWS_TX.send(WindowsCommand::Eval(js.to_string())) {
+            tracing::warn!("windows overlay tx send error: {e}");
         }
     }
 
     pub fn send(&self, msg: &serde_json::Value) {
-        // Build: window.handleIpc({"type":"delta","content":"..."})
-        // serde_json::to_string gives {"type":"delta","content":"..."} which is valid JS object literal
         let js = format!(
             "window.handleIpc({})",
             serde_json::to_string(msg).unwrap_or_default()
@@ -158,12 +92,10 @@ impl OverlayHandle {
         self.send(&json!({ "type": "auth", "request": req }));
     }
 
-    #[allow(dead_code)]
     pub fn show_settings(&self, config: &SettingsConfig) {
         self.send(&json!({ "type": "settings", "config": config }));
     }
 
-    #[allow(dead_code)]
     pub fn show_personality_picker(&self) {
         self.send(&json!({ "type": "show_personality" }));
     }
@@ -180,9 +112,10 @@ impl OverlayHandle {
         self.send(&json!({ "type": "state_change", "state": state }));
     }
 
-    /// Show the window if it's hidden (re-opens from tray/notification).
     pub fn show_window(&self, width: f32, height: f32) {
-        let _ = GTK_TX.send(GtkCommand::Show(width, height));
+        if let Err(e) = WINDOWS_TX.send(WindowsCommand::Show(width, height)) {
+            tracing::warn!("windows overlay show send error: {e}");
+        }
     }
 
     pub fn take_input(&self) -> Option<String> {
@@ -224,15 +157,19 @@ impl OverlayHandle {
     pub fn take_list_tasks(&self) -> bool {
         std::mem::take(&mut *self.pending_list_tasks.lock().unwrap())
     }
+
     pub fn take_list_runbooks(&self) -> bool {
         std::mem::take(&mut *self.pending_list_runbooks.lock().unwrap())
     }
+
     pub fn take_list_equipment(&self) -> bool {
         std::mem::take(&mut *self.pending_list_equipment.lock().unwrap())
     }
+
     pub fn take_toggle_equipment(&self) -> Option<String> {
         self.pending_toggle_equipment.lock().unwrap().take()
     }
+
     pub fn take_toggle_zoom(&self) -> bool {
         std::mem::take(&mut *self.pending_toggle_zoom.lock().unwrap())
     }
@@ -248,9 +185,11 @@ impl OverlayHandle {
     pub fn show_tasks(&self, tasks: &[serde_json::Value]) {
         self.send(&json!({ "type": "tasks", "tasks": tasks }));
     }
+
     pub fn show_runbooks(&self, runbooks: &[serde_json::Value]) {
         self.send(&json!({ "type": "runbooks", "runbooks": runbooks }));
     }
+
     pub fn show_equipment(&self, items: &[serde_json::Value]) {
         self.send(&json!({ "type": "equipment", "items": items }));
     }
@@ -258,14 +197,12 @@ impl OverlayHandle {
 
 impl Drop for OverlayHandle {
     fn drop(&mut self) {
-        let _ = GTK_TX.send(GtkCommand::Hide);
+        let _ = WINDOWS_TX.send(WindowsCommand::Hide);
     }
 }
 
-/// Show the overlay window and return a handle for IPC.
 pub fn show(width: f32, height: f32) -> OverlayHandle {
-    // Initialize GTK thread (on first call only)
-    let _ = *GTK_TX;
+    let _ = &*WINDOWS_TX;
 
     let pending_input: Arc<Mutex<VecDeque<String>>> = Default::default();
     let pending_approve: Arc<Mutex<Option<String>>> = Default::default();
@@ -301,7 +238,6 @@ pub fn show(width: f32, height: f32) -> OverlayHandle {
     let pct = pending_cancel_task.clone();
     let pcmt = pending_complete_task.clone();
 
-    // Install IPC handler that writes to these shared queues
     *IPC_HANDLER.lock().unwrap() =
         Some(Box::new(
             move |request: http::Request<String>| match parse_ui_command(request.body()) {
@@ -357,7 +293,7 @@ pub fn show(width: f32, height: f32) -> OverlayHandle {
             },
         ));
 
-    let _ = GTK_TX.send(GtkCommand::Show(width, height));
+    let _ = WINDOWS_TX.send(WindowsCommand::Show(width, height));
 
     OverlayHandle {
         pending_input,
@@ -378,5 +314,157 @@ pub fn show(width: f32, height: f32) -> OverlayHandle {
         pending_complete_task,
         request_quit: false,
         personality_selected: false,
+    }
+}
+
+fn run_windows_overlay(rx: crossbeam_channel::Receiver<WindowsCommand>) {
+    let mut builder = EventLoop::<WindowsCommand>::with_user_event();
+    builder.with_any_thread(true);
+    let event_loop = match builder.build() {
+        Ok(event_loop) => event_loop,
+        Err(e) => {
+            tracing::error!("windows overlay event loop failed: {e}");
+            return;
+        }
+    };
+    let proxy = event_loop.create_proxy();
+    std::thread::spawn(move || {
+        while let Ok(cmd) = rx.recv() {
+            if proxy.send_event(cmd).is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut app = WindowsOverlayApp::default();
+    if let Err(e) = event_loop.run_app(&mut app) {
+        tracing::error!("windows overlay loop exited: {e}");
+    }
+}
+
+#[derive(Default)]
+struct WindowsOverlayApp {
+    window: Option<Window>,
+    window_id: Option<WindowId>,
+    webview: Option<wry::WebView>,
+    startup_error: Option<String>,
+}
+
+impl ApplicationHandler<WindowsCommand> for WindowsOverlayApp {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+
+        let attrs = Window::default_attributes()
+            .with_title("Zhongshu")
+            .with_inner_size(LogicalSize::new(520.0, 800.0))
+            .with_min_inner_size(LogicalSize::new(360.0, 520.0))
+            .with_decorations(false)
+            .with_resizable(true)
+            .with_visible(false)
+            .with_window_level(WindowLevel::AlwaysOnTop);
+
+        let window = match event_loop.create_window(attrs) {
+            Ok(window) => window,
+            Err(e) => {
+                tracing::error!("windows overlay window creation failed: {e}");
+                return;
+            }
+        };
+        let window_id = window.id();
+        let html = include_str!("../assets/chat.html");
+
+        match WebViewBuilder::new()
+            .with_html(html)
+            .with_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Zhongshu/1.0")
+            .with_ipc_handler(move |request: http::Request<String>| {
+                IPC_HANDLER.lock().unwrap().as_ref().map(|h| h(request));
+            })
+            .build_as_child(&window)
+        {
+            Ok(webview) => {
+                self.webview = Some(webview);
+            }
+            Err(e) => {
+                let message = format!("WebView2 unavailable: {e}");
+                tracing::error!("{message}");
+                window.set_title(&format!("Zhongshu - {message}"));
+                self.startup_error = Some(message);
+            }
+        }
+
+        self.window_id = Some(window_id);
+        self.window = Some(window);
+        self.resize_webview();
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: WindowsCommand) {
+        match event {
+            WindowsCommand::Eval(js) => {
+                if let Some(webview) = self.webview.as_ref() {
+                    if let Err(e) = webview.evaluate_script(&js) {
+                        tracing::warn!("windows webview eval error: {e}");
+                    }
+                }
+            }
+            WindowsCommand::Show(width, height) => {
+                if let Some(window) = self.window.as_ref() {
+                    let width = width.clamp(360.0, 2400.0);
+                    let height = height.clamp(520.0, 1600.0);
+                    let _ = window.request_inner_size(LogicalSize::new(width, height));
+                    window.set_visible(true);
+                    window.set_window_level(WindowLevel::AlwaysOnTop);
+                    window.focus_window();
+                    self.resize_webview();
+                    if self.startup_error.is_some() {
+                        window.request_user_attention(None);
+                    }
+                }
+            }
+            WindowsCommand::Hide => {
+                if let Some(window) = self.window.as_ref() {
+                    window.set_visible(false);
+                }
+            }
+        }
+    }
+
+    fn window_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        if Some(window_id) != self.window_id {
+            return;
+        }
+
+        match event {
+            WindowEvent::CloseRequested => {
+                if let Some(window) = self.window.as_ref() {
+                    window.set_visible(false);
+                }
+            }
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                self.resize_webview();
+            }
+            _ => {}
+        }
+    }
+}
+
+impl WindowsOverlayApp {
+    fn resize_webview(&self) {
+        let (Some(window), Some(webview)) = (self.window.as_ref(), self.webview.as_ref()) else {
+            return;
+        };
+        let size = window.inner_size().to_logical::<u32>(window.scale_factor());
+        if let Err(e) = webview.set_bounds(Rect {
+            position: LogicalPosition::new(0, 0).into(),
+            size: LogicalSize::new(size.width, size.height).into(),
+        }) {
+            tracing::warn!("windows webview resize error: {e}");
+        }
     }
 }

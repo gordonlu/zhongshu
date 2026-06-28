@@ -4,7 +4,15 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::core::models::id;
+use crate::harness::architecture::repo_intelligence::RepoIntelligenceReport;
+use crate::harness::state::VerificationState;
 use crate::harness::trace::event::HarnessEvent;
+use crate::harness::verification::execute::{
+    execute_plan, VerificationCommandRunner, VerificationExecutionReport,
+};
+use crate::harness::verification::plan::{
+    VerificationCommand, VerificationPlan, VerificationReason,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodingSession {
@@ -138,6 +146,51 @@ impl CodingSession {
         })
     }
 
+    pub async fn execute_verification_step<R: VerificationCommandRunner + Send>(
+        &mut self,
+        index: usize,
+        verification_state: &mut VerificationState,
+        runner: &mut R,
+        start_step: u32,
+    ) -> Result<CodingVerificationStepReport, CodingSessionError> {
+        let plan = {
+            let step = self
+                .plan
+                .as_ref()
+                .and_then(|plan| plan.steps.get(index))
+                .ok_or(CodingSessionError::StepIndexOutOfRange { index })?;
+            if !matches!(step.kind, CodingStepKind::Verify) {
+                return Err(CodingSessionError::InvalidPlan(format!(
+                    "step {index} is not a verification step"
+                )));
+            }
+            step.verification_plan()
+        };
+
+        let started = self.start_step(index)?;
+        let execution = execute_plan(verification_state, &plan, runner, start_step)
+            .await
+            .map_err(|error| CodingSessionError::VerificationExecution(error.to_string()))?;
+        let status = if execution.passed {
+            CodingStepStatus::Completed
+        } else {
+            CodingStepStatus::Blocked {
+                reason: execution
+                    .failure_summary
+                    .clone()
+                    .unwrap_or_else(|| "verification failed".into()),
+            }
+        };
+        let completed = self.complete_step(index, status)?;
+
+        let mut events = Vec::with_capacity(execution.trace_events.len() + 2);
+        events.push(started);
+        events.extend(execution.trace_events.iter().cloned());
+        events.push(completed);
+
+        Ok(CodingVerificationStepReport { events, execution })
+    }
+
     pub fn record_outcome(
         &mut self,
         outcome: CodingOutcome,
@@ -224,6 +277,12 @@ impl CodingSession {
             .get_mut(index)
             .ok_or(CodingSessionError::StepIndexOutOfRange { index })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodingVerificationStepReport {
+    pub events: Vec<HarnessEvent>,
+    pub execution: VerificationExecutionReport,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -320,6 +379,23 @@ impl CodingPlan {
         }
         Ok(())
     }
+
+    pub fn with_repo_verification_step(mut self, report: &RepoIntelligenceReport) -> Self {
+        if !report.verification.required || report.verification.commands.is_empty() {
+            return self;
+        }
+        let commands = report
+            .verification
+            .commands
+            .iter()
+            .map(|command| command.command.clone())
+            .collect();
+        let step = CodingStep::new("verify changed behavior", CodingStepKind::Verify)
+            .with_expected_files(report.changed_files.clone())
+            .with_verification_commands(commands);
+        self.steps.push(step);
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -369,6 +445,24 @@ impl CodingStep {
     pub fn with_verification_commands(mut self, commands: Vec<String>) -> Self {
         self.verification_commands = commands;
         self
+    }
+
+    pub fn verification_plan(&self) -> VerificationPlan {
+        if self.verification_commands.is_empty() {
+            return VerificationPlan::empty();
+        }
+        VerificationPlan {
+            required: true,
+            commands: self
+                .verification_commands
+                .iter()
+                .map(|command| {
+                    VerificationCommand::new(command.clone(), VerificationReason::UserProvided)
+                })
+                .collect(),
+            environment_notes: Vec::new(),
+            fallback_commands: Vec::new(),
+        }
     }
 
     pub fn requires_verification(&self) -> bool {
@@ -464,6 +558,7 @@ pub enum CodingSessionError {
     NonTerminalCompletion,
     SessionAlreadyFinished,
     InvalidPlan(String),
+    VerificationExecution(String),
 }
 
 impl fmt::Display for CodingSessionError {
@@ -490,6 +585,9 @@ impl fmt::Display for CodingSessionError {
             }
             CodingSessionError::SessionAlreadyFinished => write!(f, "coding session is finished"),
             CodingSessionError::InvalidPlan(reason) => write!(f, "invalid coding plan: {reason}"),
+            CodingSessionError::VerificationExecution(reason) => {
+                write!(f, "verification execution failed: {reason}")
+            }
         }
     }
 }
@@ -506,6 +604,35 @@ fn timestamp() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+
+    #[derive(Default)]
+    struct MockVerificationRunner {
+        outputs: Vec<crate::harness::verification::execute::VerificationCommandOutput>,
+    }
+
+    #[async_trait]
+    impl VerificationCommandRunner for MockVerificationRunner {
+        async fn run(
+            &mut self,
+            _command: &VerificationCommand,
+        ) -> anyhow::Result<crate::harness::verification::execute::VerificationCommandOutput>
+        {
+            Ok(self.outputs.remove(0))
+        }
+    }
+
+    fn verification_state() -> VerificationState {
+        VerificationState {
+            required: false,
+            records: Vec::new(),
+            last_success: None,
+            last_failure: None,
+            last_edit_step: 0,
+            last_verify_step: 0,
+            unavailable_reason: None,
+        }
+    }
 
     #[test]
     fn session_start_emits_trace_identity() {
@@ -714,6 +841,56 @@ mod tests {
     }
 
     #[test]
+    fn coding_plan_can_append_repo_verification_step() {
+        let report = RepoIntelligenceReport {
+            changed_files: vec![PathBuf::from("zhongshu-core/src/lib.rs")],
+            affected_files: Vec::new(),
+            affected_symbols: Vec::new(),
+            risks: Vec::new(),
+            verification: VerificationPlan::for_changes(
+                &[PathBuf::from("zhongshu-core/src/lib.rs")],
+                "fix bug",
+            ),
+            working_set: crate::harness::architecture::repo_intelligence::WorkingSet::default(),
+        };
+
+        let plan = CodingPlan::new(
+            "fix",
+            CodingRisk::Low,
+            vec![CodingStep::new("edit", CodingStepKind::Edit)],
+        )
+        .with_repo_verification_step(&report);
+
+        assert_eq!(plan.steps.len(), 2);
+        assert!(matches!(plan.steps[1].kind, CodingStepKind::Verify));
+        assert!(plan.steps[1]
+            .verification_commands
+            .contains(&"cargo test -p zhongshu-core".to_string()));
+        assert!(plan.validate().is_ok());
+    }
+
+    #[test]
+    fn coding_plan_does_not_append_empty_repo_verification() {
+        let report = RepoIntelligenceReport {
+            changed_files: Vec::new(),
+            affected_files: Vec::new(),
+            affected_symbols: Vec::new(),
+            risks: Vec::new(),
+            verification: VerificationPlan::empty(),
+            working_set: crate::harness::architecture::repo_intelligence::WorkingSet::default(),
+        };
+
+        let plan = CodingPlan::new(
+            "explain",
+            CodingRisk::Low,
+            vec![CodingStep::new("read", CodingStepKind::Read)],
+        )
+        .with_repo_verification_step(&report);
+
+        assert_eq!(plan.steps.len(), 1);
+    }
+
+    #[test]
     fn finished_session_rejects_more_mutation() {
         let mut session = CodingSession::new(".", CodingIntent::Fix, "model", "test");
         session.record_outcome(CodingOutcome::Completed).unwrap();
@@ -727,5 +904,78 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err, CodingSessionError::SessionAlreadyFinished);
+    }
+
+    #[tokio::test]
+    async fn execute_verification_step_completes_on_success() {
+        let mut session = CodingSession::new(".", CodingIntent::Fix, "model", "test");
+        let step = CodingStep::new("verify", CodingStepKind::Verify)
+            .with_verification_commands(vec!["cargo check -p zhongshu-core".into()]);
+        session
+            .set_plan(CodingPlan::new("fix", CodingRisk::Low, vec![step]))
+            .unwrap();
+        let mut state = verification_state();
+        let mut runner = MockVerificationRunner {
+            outputs: vec![
+                crate::harness::verification::execute::VerificationCommandOutput::success("ok"),
+            ],
+        };
+
+        let report = session
+            .execute_verification_step(0, &mut state, &mut runner, 10)
+            .await
+            .unwrap();
+
+        assert!(report.execution.passed);
+        assert!(matches!(
+            session.plan.as_ref().unwrap().steps[0].status,
+            CodingStepStatus::Completed
+        ));
+        assert_eq!(
+            state.last_success.as_ref().map(|record| record.step),
+            Some(11)
+        );
+        assert!(report
+            .events
+            .iter()
+            .any(|event| matches!(event, HarnessEvent::Verification { success: true, .. })));
+    }
+
+    #[tokio::test]
+    async fn execute_verification_step_blocks_on_failure() {
+        let mut session = CodingSession::new(".", CodingIntent::Fix, "model", "test");
+        let step = CodingStep::new("verify", CodingStepKind::Verify)
+            .with_verification_commands(vec!["cargo test -p zhongshu-core".into()]);
+        session
+            .set_plan(CodingPlan::new("fix", CodingRisk::Low, vec![step]))
+            .unwrap();
+        let mut state = verification_state();
+        let mut runner = MockVerificationRunner {
+            outputs: vec![
+                crate::harness::verification::execute::VerificationCommandOutput::failure(
+                    1,
+                    "test failed",
+                ),
+            ],
+        };
+
+        let report = session
+            .execute_verification_step(0, &mut state, &mut runner, 20)
+            .await
+            .unwrap();
+
+        assert!(report.execution.blocked);
+        assert!(matches!(
+            session.plan.as_ref().unwrap().steps[0].status,
+            CodingStepStatus::Blocked { .. }
+        ));
+        assert_eq!(
+            state.last_failure.as_ref().map(|record| record.step),
+            Some(21)
+        );
+        assert!(report
+            .events
+            .iter()
+            .any(|event| matches!(event, HarnessEvent::Verification { success: false, .. })));
     }
 }

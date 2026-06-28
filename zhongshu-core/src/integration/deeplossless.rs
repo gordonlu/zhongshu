@@ -72,6 +72,79 @@ pub struct DeeplosslessRollbackResult {
     pub children_remaining: Vec<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeeplosslessFileClaimResult {
+    pub status: String,
+    pub agent_id: String,
+    pub file_path: String,
+    pub conv_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeeplosslessFileClaimConflict {
+    pub file_path: String,
+    pub agent_id: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum DeeplosslessFileClaimOutcome {
+    Claimed {
+        claim: DeeplosslessFileClaimResult,
+    },
+    Conflict {
+        conflict: DeeplosslessFileClaimConflict,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeeplosslessFileReleaseResult {
+    pub status: String,
+    pub file_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeeplosslessFileReleaseMissing {
+    pub agent_id: String,
+    pub file_path: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum DeeplosslessFileReleaseOutcome {
+    Released {
+        release: DeeplosslessFileReleaseResult,
+    },
+    Missing {
+        missing: DeeplosslessFileReleaseMissing,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeeplosslessFileConflict {
+    pub agent_id: String,
+    pub file_path: String,
+    pub operation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeeplosslessFileConflictsResult {
+    #[serde(default)]
+    pub conflicts: Vec<DeeplosslessFileConflict>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct DeeplosslessErrorEnvelope {
+    error: DeeplosslessErrorBody,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct DeeplosslessErrorBody {
+    message: String,
+}
+
 impl DeeplosslessProxy {
     pub async fn new(config: DeeplosslessConfig) -> anyhow::Result<Self> {
         let key = if config.api_key.is_empty() {
@@ -311,6 +384,112 @@ impl DeeplosslessProxy {
         Ok(resp.json().await?)
     }
 
+    /// Claim a file through deeplossless' active-file registry.
+    ///
+    /// Conflict is returned as data instead of a generic error so worker
+    /// orchestration can make an explicit scheduling decision.
+    pub async fn claim_file(
+        &self,
+        agent_id: &str,
+        file_path: &str,
+        operation: &str,
+        conv_id: i64,
+    ) -> anyhow::Result<DeeplosslessFileClaimOutcome> {
+        validate_file_claim(agent_id, file_path, operation, conv_id)?;
+        let resp = reqwest::Client::new()
+            .post(self.lcm_url("file/claim")?)
+            .json(&serde_json::json!({
+                "agent_id": agent_id,
+                "file_path": file_path,
+                "operation": operation,
+                "conv_id": conv_id,
+            }))
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(DeeplosslessFileClaimOutcome::Claimed {
+                claim: resp.json().await?,
+            });
+        }
+
+        let text = resp.text().await.unwrap_or_default();
+        let message = deeplossless_error_message(&text);
+        if status == reqwest::StatusCode::CONFLICT {
+            return Ok(DeeplosslessFileClaimOutcome::Conflict {
+                conflict: DeeplosslessFileClaimConflict {
+                    file_path: file_path.to_string(),
+                    agent_id: parse_conflict_agent(&message),
+                    message,
+                },
+            });
+        }
+
+        Err(anyhow::anyhow!(
+            "file claim endpoint returned {status}: {message}"
+        ))
+    }
+
+    /// Release a file claim through deeplossless.
+    ///
+    /// Missing claims are explicit because a double release may point to a
+    /// worker lifecycle bug.
+    pub async fn release_file(
+        &self,
+        agent_id: &str,
+        file_path: &str,
+    ) -> anyhow::Result<DeeplosslessFileReleaseOutcome> {
+        validate_agent_and_file(agent_id, file_path)?;
+        let resp = reqwest::Client::new()
+            .post(self.lcm_url("file/release")?)
+            .json(&serde_json::json!({
+                "agent_id": agent_id,
+                "file_path": file_path,
+            }))
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(DeeplosslessFileReleaseOutcome::Released {
+                release: resp.json().await?,
+            });
+        }
+
+        let text = resp.text().await.unwrap_or_default();
+        let message = deeplossless_error_message(&text);
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(DeeplosslessFileReleaseOutcome::Missing {
+                missing: DeeplosslessFileReleaseMissing {
+                    agent_id: agent_id.to_string(),
+                    file_path: file_path.to_string(),
+                    message,
+                },
+            });
+        }
+
+        Err(anyhow::anyhow!(
+            "file release endpoint returned {status}: {message}"
+        ))
+    }
+
+    pub async fn file_conflicts(&self) -> anyhow::Result<DeeplosslessFileConflictsResult> {
+        let resp = reqwest::Client::new()
+            .get(self.lcm_url("file/conflicts")?)
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            let message = deeplossless_error_message(&text);
+            return Err(anyhow::anyhow!(
+                "file conflicts endpoint returned {status}: {message}"
+            ));
+        }
+        Ok(resp.json().await?)
+    }
+
     /// Load recent chat history with correct roles from the messages table.
     /// Opens a direct read-only SQLite connection to lcm.db.
     /// Returns a list of (role, content) pairs from the most recent conversation.
@@ -456,6 +635,47 @@ impl DeeplosslessProxy {
     }
 }
 
+fn validate_file_claim(
+    agent_id: &str,
+    file_path: &str,
+    operation: &str,
+    conv_id: i64,
+) -> anyhow::Result<()> {
+    validate_agent_and_file(agent_id, file_path)?;
+    if operation.trim().is_empty() {
+        return Err(anyhow::anyhow!("operation must not be empty"));
+    }
+    if conv_id <= 0 {
+        return Err(anyhow::anyhow!("conv_id must be positive"));
+    }
+    Ok(())
+}
+
+fn validate_agent_and_file(agent_id: &str, file_path: &str) -> anyhow::Result<()> {
+    if agent_id.trim().is_empty() {
+        return Err(anyhow::anyhow!("agent_id must not be empty"));
+    }
+    if file_path.trim().is_empty() {
+        return Err(anyhow::anyhow!("file_path must not be empty"));
+    }
+    Ok(())
+}
+
+fn deeplossless_error_message(body: &str) -> String {
+    serde_json::from_str::<DeeplosslessErrorEnvelope>(body)
+        .map(|envelope| envelope.error.message)
+        .unwrap_or_else(|_| body.to_string())
+}
+
+fn parse_conflict_agent(message: &str) -> Option<String> {
+    message
+        .split("held by agent '")
+        .nth(1)
+        .and_then(|rest| rest.split('\'').next())
+        .filter(|agent| !agent.is_empty())
+        .map(ToString::to_string)
+}
+
 /// Try to bind to `start_port`; if taken, try port+1, port+2, ... up to +PORT_RANGE.
 async fn bind_socket(start_port: u16) -> anyhow::Result<(tokio::net::TcpListener, u16)> {
     let attempts = if start_port == 0 { 1 } else { PORT_RANGE };
@@ -587,6 +807,77 @@ mod tests {
             proxy.lcm_url("snapshot").unwrap(),
             format!("http://127.0.0.1:{}/v1/lcm/snapshot", proxy.port())
         );
+
+        proxy.shutdown().await;
+    }
+
+    #[test]
+    fn parses_deeplossless_error_message_and_conflict_agent() {
+        let body = r#"{"error":{"code":"CONFLICT","message":"file 'src/lib.rs' held by agent 'worker-a' in another conversation"}}"#;
+        let message = deeplossless_error_message(body);
+
+        assert_eq!(
+            message,
+            "file 'src/lib.rs' held by agent 'worker-a' in another conversation"
+        );
+        assert_eq!(parse_conflict_agent(&message).as_deref(), Some("worker-a"));
+    }
+
+    #[test]
+    fn validates_file_claim_inputs() {
+        assert!(validate_file_claim("worker-a", "src/lib.rs", "edit", 1).is_ok());
+        assert!(validate_file_claim("", "src/lib.rs", "edit", 1).is_err());
+        assert!(validate_file_claim("worker-a", "", "edit", 1).is_err());
+        assert!(validate_file_claim("worker-a", "src/lib.rs", "", 1).is_err());
+        assert!(validate_file_claim("worker-a", "src/lib.rs", "edit", 0).is_err());
+    }
+
+    #[tokio::test]
+    async fn file_claims_roundtrip_through_lcm_endpoint() {
+        let (proxy, _base_url) = test_proxy().await;
+
+        let first = proxy
+            .claim_file("worker-a", "src/lib.rs", "edit", 1)
+            .await
+            .expect("first claim");
+        assert!(matches!(
+            first,
+            DeeplosslessFileClaimOutcome::Claimed { .. }
+        ));
+
+        let conflict = proxy
+            .claim_file("worker-b", "src/lib.rs", "edit", 2)
+            .await
+            .expect("conflict claim");
+        match conflict {
+            DeeplosslessFileClaimOutcome::Conflict { conflict } => {
+                assert_eq!(conflict.file_path, "src/lib.rs");
+                assert_eq!(conflict.agent_id.as_deref(), Some("worker-a"));
+            }
+            other => panic!("expected conflict, got {other:?}"),
+        }
+
+        let conflicts = proxy.file_conflicts().await.expect("conflicts");
+        assert_eq!(conflicts.conflicts.len(), 1);
+        assert_eq!(conflicts.conflicts[0].agent_id, "worker-a");
+
+        let release = proxy
+            .release_file("worker-a", "src/lib.rs")
+            .await
+            .expect("release");
+        assert!(matches!(
+            release,
+            DeeplosslessFileReleaseOutcome::Released { .. }
+        ));
+
+        let second = proxy
+            .claim_file("worker-b", "src/lib.rs", "edit", 2)
+            .await
+            .expect("second claim");
+        assert!(matches!(
+            second,
+            DeeplosslessFileClaimOutcome::Claimed { .. }
+        ));
 
         proxy.shutdown().await;
     }

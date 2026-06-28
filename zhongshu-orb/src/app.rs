@@ -195,13 +195,21 @@ impl AgentController {
         tracing::info!("chat LLM runtime updated");
     }
 
-    pub fn rebuild_equipment_tools(&self) {
+    pub async fn rebuild_equipment_tools_with_mcp(&self) {
         let mut tools = self.base_tools.clone();
-        if let Ok(equipment) = self.equipment.lock() {
+        let reports = if let Ok(equipment) = self.equipment.lock() {
             equipment.register_tools(&mut tools);
-        }
+            equipment.register_mcp_tools(&mut tools).await
+        } else {
+            Vec::new()
+        };
         *self.tools.lock().unwrap() = tools;
-        tracing::info!("chat tool registry rebuilt from active equipment");
+        for report in reports {
+            if let Some(error) = report.error {
+                tracing::warn!("MCP server '{}' skipped: {}", report.server_id, error);
+            }
+        }
+        tracing::info!("chat tool registry rebuilt from active equipment and MCP servers");
     }
 
     pub fn set_chat_history(&self, history: Vec<(String, String)>) {
@@ -524,6 +532,155 @@ impl AgentController {
                     // Publish harness trace events to EventBus for UI forwarding.
                     for event in &rr.trace_events {
                         match event {
+                            zhongshu_core::harness::trace::event::HarnessEvent::CodingSessionStarted {
+                                session_id,
+                                trace_id,
+                                intent,
+                                model,
+                                deeplossless_conversation_id,
+                                deeplossless_replay_execution_id,
+                                ..
+                            } => {
+                                eb.publish(Event::Harness(HarnessUiEvent::CodingSessionStarted {
+                                    session_id: session_id.clone(),
+                                    trace_id: trace_id.clone(),
+                                    intent: intent.clone(),
+                                    model: model.clone(),
+                                    deeplossless_conversation_id: *deeplossless_conversation_id,
+                                    deeplossless_replay_execution_id: deeplossless_replay_execution_id.clone(),
+                                }));
+                            }
+                            zhongshu_core::harness::trace::event::HarnessEvent::CodingPlanCreated {
+                                session_id,
+                                step_count,
+                                risk,
+                            } => {
+                                eb.publish(Event::Harness(HarnessUiEvent::CodingPlanCreated {
+                                    session_id: session_id.clone(),
+                                    step_count: *step_count,
+                                    risk: risk.clone(),
+                                }));
+                            }
+                            zhongshu_core::harness::trace::event::HarnessEvent::CodingStepStarted {
+                                session_id,
+                                step_id,
+                                kind,
+                                title,
+                            } => {
+                                eb.publish(Event::Harness(HarnessUiEvent::CodingStepStarted {
+                                    session_id: session_id.clone(),
+                                    step_id: step_id.clone(),
+                                    kind: kind.clone(),
+                                    title: title.clone(),
+                                }));
+                            }
+                            zhongshu_core::harness::trace::event::HarnessEvent::CodingStepCompleted {
+                                session_id,
+                                step_id,
+                                status,
+                            } => {
+                                eb.publish(Event::Harness(HarnessUiEvent::CodingStepCompleted {
+                                    session_id: session_id.clone(),
+                                    step_id: step_id.clone(),
+                                    status: status.clone(),
+                                }));
+                            }
+                            zhongshu_core::harness::trace::event::HarnessEvent::WorkerStarted {
+                                session_id,
+                                worker,
+                                task_id,
+                                owned_files,
+                            } => {
+                                eb.publish(Event::Harness(HarnessUiEvent::WorkerStarted {
+                                    session_id: session_id.clone(),
+                                    worker: worker.clone(),
+                                    task_id: task_id.clone(),
+                                    owned_files: owned_files.clone(),
+                                }));
+                            }
+                            zhongshu_core::harness::trace::event::HarnessEvent::WorkerCompleted {
+                                session_id,
+                                worker,
+                                task_id,
+                                success,
+                                trace_event_count,
+                            } => {
+                                eb.publish(Event::Harness(HarnessUiEvent::WorkerCompleted {
+                                    session_id: session_id.clone(),
+                                    worker: worker.clone(),
+                                    task_id: task_id.clone(),
+                                    success: *success,
+                                    trace_event_count: *trace_event_count,
+                                }));
+                            }
+                            zhongshu_core::harness::trace::event::HarnessEvent::WorkerConflict {
+                                session_id,
+                                worker,
+                                task_id,
+                                reason,
+                            } => {
+                                eb.publish(Event::Harness(HarnessUiEvent::WorkerConflict {
+                                    session_id: session_id.clone(),
+                                    worker: worker.clone(),
+                                    task_id: task_id.clone(),
+                                    reason: reason.clone(),
+                                }));
+                            }
+                            zhongshu_core::harness::trace::event::HarnessEvent::PatchPreview {
+                                session_id,
+                                path,
+                                operation,
+                                diff_summary,
+                            } => {
+                                eb.publish(Event::Harness(HarnessUiEvent::PatchPreview {
+                                    session_id: session_id.clone(),
+                                    path: path.clone(),
+                                    operation: operation.clone(),
+                                    diff_summary: diff_summary.clone(),
+                                }));
+                            }
+                            zhongshu_core::harness::trace::event::HarnessEvent::PatchApplied {
+                                session_id,
+                                path,
+                                operation,
+                                changed,
+                            } => {
+                                eb.publish(Event::Harness(HarnessUiEvent::PatchApplied {
+                                    session_id: session_id.clone(),
+                                    path: path.clone(),
+                                    operation: operation.clone(),
+                                    changed: *changed,
+                                }));
+                            }
+                            zhongshu_core::harness::trace::event::HarnessEvent::ContextIncluded {
+                                description,
+                                estimated_tokens,
+                            } => {
+                                eb.publish(Event::Harness(HarnessUiEvent::ContextIncluded {
+                                    description: description.clone(),
+                                    estimated_tokens: *estimated_tokens,
+                                }));
+                            }
+                            zhongshu_core::harness::trace::event::HarnessEvent::ContextPressure {
+                                pressure_percent,
+                                dropped_evidence,
+                                dropped_recent,
+                            } => {
+                                eb.publish(Event::Harness(HarnessUiEvent::ContextPressure {
+                                    pressure_percent: *pressure_percent,
+                                    dropped_evidence: *dropped_evidence,
+                                    dropped_recent: *dropped_recent,
+                                }));
+                            }
+                            zhongshu_core::harness::trace::event::HarnessEvent::ReplayAvailable {
+                                conversation_id,
+                                replay_execution_id,
+                            } => {
+                                eb.publish(Event::Harness(HarnessUiEvent::ReplayAvailable {
+                                    conversation_id: *conversation_id,
+                                    replay_execution_id: replay_execution_id.clone(),
+                                }));
+                            }
                             zhongshu_core::harness::trace::event::HarnessEvent::Verification {
                                 command,
                                 success,

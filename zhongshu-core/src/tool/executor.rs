@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 
 use crate::tool::spec::{ObservableToolInput, ToolReplayKey, ToolResultSummary, ToolSpec};
@@ -89,30 +90,93 @@ impl<'a> ToolExecutor<'a> {
 
     pub async fn execute_plan(&self, calls: Vec<ToolCallRequest>) -> ToolExecutionPlan {
         let mut results = Vec::with_capacity(calls.len());
-        let mut saw_mutation = false;
+        let mut read_group = Vec::new();
+        let mut used_parallel_read_group = false;
+        let mut used_serial_boundary = false;
+
         for call in calls {
-            let execution = self.execute(&call.name, &call.arguments).await;
-            if execution
-                .spec
-                .as_ref()
-                .map(|spec| !spec.read_only || spec.destructive)
-                .unwrap_or(true)
-            {
-                saw_mutation = true;
+            if self.can_execute_concurrently(&call.name) {
+                read_group.push(call);
+                continue;
             }
+
+            let (flushed_parallel, should_stop) = self
+                .flush_concurrent_read_group(&mut read_group, &mut results)
+                .await;
+            used_parallel_read_group |= flushed_parallel;
+            if should_stop {
+                break;
+            }
+
+            let execution = self.execute(&call.name, &call.arguments).await;
+            used_serial_boundary = true;
             let should_stop = execution.output.status != ToolStatus::Success
                 || execution.timed_out
-                || saw_mutation && call.stop_after_mutation;
+                || Self::is_mutating_execution(&execution) && call.stop_after_mutation;
             results.push(execution);
             if should_stop {
                 break;
             }
         }
 
+        if !read_group.is_empty() {
+            let (flushed_parallel, _) = self
+                .flush_concurrent_read_group(&mut read_group, &mut results)
+                .await;
+            used_parallel_read_group |= flushed_parallel;
+        }
+
         ToolExecutionPlan {
             executions: results,
-            scheduling: ToolScheduling::Serial,
+            scheduling: ToolScheduling::from_execution_shape(
+                used_parallel_read_group,
+                used_serial_boundary,
+            ),
         }
+    }
+
+    fn can_execute_concurrently(&self, name: &str) -> bool {
+        self.registry
+            .get(name)
+            .map(|tool| {
+                let spec = tool.spec();
+                spec.read_only && !spec.destructive && spec.supports_concurrent_execution
+            })
+            .unwrap_or(false)
+    }
+
+    async fn flush_concurrent_read_group(
+        &self,
+        read_group: &mut Vec<ToolCallRequest>,
+        results: &mut Vec<ToolExecution>,
+    ) -> (bool, bool) {
+        if read_group.is_empty() {
+            return (false, false);
+        }
+
+        let calls = std::mem::take(read_group);
+        let used_parallel = calls.len() > 1;
+        let executions = join_all(
+            calls
+                .iter()
+                .map(|call| self.execute(&call.name, &call.arguments)),
+        )
+        .await;
+        let should_stop = executions.iter().any(Self::is_failed_execution);
+        results.extend(executions);
+        (used_parallel, should_stop)
+    }
+
+    fn is_failed_execution(execution: &ToolExecution) -> bool {
+        execution.output.status != ToolStatus::Success || execution.timed_out
+    }
+
+    fn is_mutating_execution(execution: &ToolExecution) -> bool {
+        execution
+            .spec
+            .as_ref()
+            .map(|spec| !spec.read_only || spec.destructive)
+            .unwrap_or(true)
     }
 }
 
@@ -148,6 +212,18 @@ pub struct ToolExecutionPlan {
 #[serde(rename_all = "snake_case")]
 pub enum ToolScheduling {
     Serial,
+    ConcurrentReadOnly,
+    Mixed,
+}
+
+impl ToolScheduling {
+    fn from_execution_shape(used_parallel_read_group: bool, used_serial_boundary: bool) -> Self {
+        match (used_parallel_read_group, used_serial_boundary) {
+            (true, true) => Self::Mixed,
+            (true, false) => Self::ConcurrentReadOnly,
+            _ => Self::Serial,
+        }
+    }
 }
 
 fn parse_arguments(arguments: &str) -> serde_json::Value {
@@ -168,9 +244,18 @@ mod tests {
     use super::*;
     use crate::tool::Tool;
     use async_trait::async_trait;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     struct EchoTool;
     struct WriteTool;
+    struct ConcurrentSearchTool {
+        current: Arc<AtomicUsize>,
+        max: Arc<AtomicUsize>,
+        writes_seen: Arc<AtomicUsize>,
+    }
 
     #[async_trait]
     impl Tool for EchoTool {
@@ -207,6 +292,71 @@ mod tests {
 
         async fn execute(&self, arguments: &serde_json::Value) -> ToolOutput {
             ToolOutput::success(arguments.clone())
+        }
+    }
+
+    #[async_trait]
+    impl Tool for ConcurrentSearchTool {
+        fn name(&self) -> &str {
+            "search_files"
+        }
+
+        fn description(&self) -> &str {
+            "search"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        async fn execute(&self, arguments: &serde_json::Value) -> ToolOutput {
+            if arguments
+                .get("fail")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                return ToolOutput::error("search failed");
+            }
+
+            let active = self.current.fetch_add(1, Ordering::SeqCst) + 1;
+            record_max(&self.max, active);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            self.current.fetch_sub(1, Ordering::SeqCst);
+            ToolOutput::success(serde_json::json!({
+                "active": active,
+                "writes_seen": self.writes_seen.load(Ordering::SeqCst),
+            }))
+        }
+    }
+
+    fn concurrent_search_tool() -> (
+        ConcurrentSearchTool,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+    ) {
+        let current = Arc::new(AtomicUsize::new(0));
+        let max = Arc::new(AtomicUsize::new(0));
+        let writes_seen = Arc::new(AtomicUsize::new(0));
+        (
+            ConcurrentSearchTool {
+                current: Arc::clone(&current),
+                max: Arc::clone(&max),
+                writes_seen: Arc::clone(&writes_seen),
+            },
+            current,
+            max,
+            writes_seen,
+        )
+    }
+
+    fn record_max(max: &AtomicUsize, value: usize) {
+        let mut observed = max.load(Ordering::SeqCst);
+        while value > observed {
+            match max.compare_exchange(observed, value, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => break,
+                Err(actual) => observed = actual,
+            }
         }
     }
 
@@ -252,5 +402,61 @@ mod tests {
         assert_eq!(plan.scheduling, ToolScheduling::Serial);
         assert_eq!(plan.executions.len(), 1);
         assert_eq!(plan.executions[0].tool_name, "fs");
+    }
+
+    #[tokio::test]
+    async fn execution_plan_runs_safe_read_tools_concurrently() {
+        let (search, _current, max, _writes_seen) = concurrent_search_tool();
+        let registry = ToolRegistry::new().register(search);
+        let plan = ToolExecutor::new(&registry)
+            .execute_plan(vec![
+                ToolCallRequest::new("search_files", r#"{"query":"a"}"#),
+                ToolCallRequest::new("search_files", r#"{"query":"b"}"#),
+            ])
+            .await;
+
+        assert_eq!(plan.scheduling, ToolScheduling::ConcurrentReadOnly);
+        assert_eq!(plan.executions.len(), 2);
+        assert_eq!(max.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn execution_plan_preserves_serial_boundaries_around_mutations() {
+        let (search, _current, max, _writes_seen) = concurrent_search_tool();
+        let registry = ToolRegistry::new().register(search).register(WriteTool);
+        let plan = ToolExecutor::new(&registry)
+            .execute_plan(vec![
+                ToolCallRequest::new("search_files", r#"{"query":"a"}"#),
+                ToolCallRequest::new("search_files", r#"{"query":"b"}"#),
+                ToolCallRequest::new("fs", r#"{"path":"a.txt"}"#),
+                ToolCallRequest::new("search_files", r#"{"query":"c"}"#),
+            ])
+            .await;
+
+        assert_eq!(plan.scheduling, ToolScheduling::Mixed);
+        assert_eq!(plan.executions.len(), 4);
+        assert_eq!(plan.executions[0].tool_name, "search_files");
+        assert_eq!(plan.executions[1].tool_name, "search_files");
+        assert_eq!(plan.executions[2].tool_name, "fs");
+        assert_eq!(plan.executions[3].tool_name, "search_files");
+        assert_eq!(max.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn execution_plan_stops_after_failed_read_group() {
+        let (search, _current, _max, _writes_seen) = concurrent_search_tool();
+        let registry = ToolRegistry::new().register(search).register(WriteTool);
+        let plan = ToolExecutor::new(&registry)
+            .execute_plan(vec![
+                ToolCallRequest::new("search_files", r#"{"query":"a"}"#),
+                ToolCallRequest::new("search_files", r#"{"fail":true}"#),
+                ToolCallRequest::new("fs", r#"{"path":"a.txt"}"#),
+            ])
+            .await;
+
+        assert_eq!(plan.scheduling, ToolScheduling::ConcurrentReadOnly);
+        assert_eq!(plan.executions.len(), 2);
+        assert_eq!(plan.executions[0].tool_name, "search_files");
+        assert_eq!(plan.executions[1].output.status, ToolStatus::Error);
     }
 }

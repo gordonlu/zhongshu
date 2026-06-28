@@ -124,6 +124,8 @@ body{background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMac
 .harness-card.recovery .h-label{color:#f59e0b}
 .harness-card.phase{border-color:var(--accent-soft);background:var(--accent-soft)}
 .harness-card.phase .h-label{color:var(--accent)}
+.harness-card.coding{border-color:rgba(94,234,212,0.28);background:rgba(94,234,212,0.045)}
+.harness-card.coding .h-label{color:#5eead4}
 
 /* Thinking spinner */
 .thinking{display:flex;align-items:center;gap:6px;color:var(--text-muted);font-size:12px;padding:2px 0}
@@ -623,6 +625,16 @@ function buildMessageNode(m) {
       label.className = 'h-label';
       label.textContent = '⇄ 阶段切换: ' + escapeHtml(d.from || '') + ' → ' + escapeHtml(d.to || '');
       card.appendChild(label);
+    } else if (m._harnessType === 'coding') {
+      card.classList.add('coding');
+      let label = document.createElement('div');
+      label.className = 'h-label';
+      label.textContent = codingEventTitle(d);
+      card.appendChild(label);
+      let body = document.createElement('div');
+      body.className = 'h-command';
+      body.textContent = codingEventDetail(d);
+      card.appendChild(body);
     }
     bubble.appendChild(card);
     div.appendChild(bubble);
@@ -928,6 +940,17 @@ function handleIpc(message) {
         render();
         scrollBottom();
         break;
+      case 'coding':
+        messages.push({
+          id: 'code-' + Date.now() + '-' + Math.random().toString(36).slice(2,6),
+          role: 'system',
+          content: '',
+          _harnessType: 'coding',
+          _harnessData: msg.event || {}
+        });
+        render();
+        scrollBottom();
+        break;
       case 'zoom':
         document.getElementById('btn-zoom').classList.toggle('active', !!msg.active);
         break;
@@ -948,6 +971,60 @@ function showToast(text) {
   t.textContent = text;
   t.classList.add('show');
   setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+function codingEventTitle(event) {
+  const kind = event && event.kind ? event.kind : 'event';
+  const titles = {
+    plan_created: 'Coding plan',
+    plan_step_started: 'Step started',
+    plan_step_completed: 'Step completed',
+    worker_started: 'Worker started',
+    worker_completed: 'Worker completed',
+    worker_conflict: 'Worker conflict',
+    patch_preview: 'Patch preview',
+    patch_applied: 'Patch applied',
+    verification: 'Verification',
+    recovery_feedback: 'Recovery feedback',
+    context_pressure: 'Context pressure',
+    context_included: 'Context included',
+    replay_available: 'Replay available'
+  };
+  return titles[kind] || ('Coding ' + kind);
+}
+
+function codingEventDetail(event) {
+  if (!event) return '';
+  switch (event.kind) {
+    case 'plan_created':
+      return (event.session_id || '-') + ' | steps: ' + (event.step_count || 0) + ' | risk: ' + (event.risk || '-');
+    case 'plan_step_started':
+      return (event.step_id || '-') + ' | ' + (event.title || '');
+    case 'plan_step_completed':
+      return (event.step_id || '-') + ' | status: ' + (event.status || '-');
+    case 'worker_started':
+      return (event.worker || '-') + ' | task: ' + (event.task_id || '-') + ' | files: ' + ((event.owned_files || []).join(', ') || '-');
+    case 'worker_completed':
+      return (event.worker || '-') + ' | task: ' + (event.task_id || '-') + ' | success: ' + !!event.success;
+    case 'worker_conflict':
+      return (event.worker || '-') + ' | task: ' + (event.task_id || '-') + ' | ' + (event.reason || '');
+    case 'patch_preview':
+      return (event.path || '-') + ' | ' + (event.operation || '-') + ' | ' + (event.diff_summary || '');
+    case 'patch_applied':
+      return (event.path || '-') + ' | ' + (event.operation || '-') + ' | changed: ' + !!event.changed;
+    case 'verification':
+      return (event.success ? 'pass' : 'fail') + ' | ' + (event.command || '') + (event.exit_code !== undefined && event.exit_code !== null ? ' | exit ' + event.exit_code : '');
+    case 'recovery_feedback':
+      return (event.rule_id || '-') + ' | ' + (event.message || '');
+    case 'context_pressure':
+      return (event.pressure_percent || 0) + '% | dropped evidence: ' + (event.dropped_evidence || 0) + ' | dropped recent: ' + (event.dropped_recent || 0);
+    case 'context_included':
+      return (event.description || '-') + ' | estimated tokens: ' + (event.estimated_tokens || 0);
+    case 'replay_available':
+      return 'conversation: ' + (event.conversation_id || '-') + ' | replay: ' + (event.replay_execution_id || '-');
+    default:
+      return JSON.stringify(event);
+  }
 }
 
 function showConfirm(text, callback) {

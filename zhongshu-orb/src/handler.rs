@@ -22,8 +22,13 @@ use crate::config::AppConfig;
 use crate::hotkey::HotkeyManager;
 use crate::indicator::Indicator;
 use crate::overlay::{AuthRequest, OverlayHandle};
+use crate::overlay_contract::{CodingUiEvent, OverlayToUiEvent};
 use zhongshu_core::equipment::{EquipmentObserver, EquipmentRegistry};
 use zhongshu_core::tool::ToolRegistry;
+
+fn send_coding_event(overlay: &OverlayHandle, event: CodingUiEvent) {
+    overlay.send(&serde_json::to_value(OverlayToUiEvent::Coding { event }).unwrap_or_default());
+}
 
 // ── App state ────────────────────────────────────────────────────────
 
@@ -213,10 +218,24 @@ impl ZhongshuApp {
             match toggle_result {
                 Ok(()) => {
                     self.controller.refresh_skill_prompts();
-                    self.controller.rebuild_equipment_tools();
+                    self.runtime
+                        .block_on(self.controller.rebuild_equipment_tools_with_mcp());
                     let mut worker_tools = self.worker_base_tools.clone();
-                    if let Ok(equipment) = self.equipment.lock() {
+                    let mcp_reports = if let Ok(equipment) = self.equipment.lock() {
                         equipment.register_tools(&mut worker_tools);
+                        self.runtime
+                            .block_on(equipment.register_mcp_tools(&mut worker_tools))
+                    } else {
+                        Vec::new()
+                    };
+                    for report in mcp_reports {
+                        if let Some(error) = report.error {
+                            tracing::warn!(
+                                "worker MCP server '{}' skipped: {}",
+                                report.server_id,
+                                error
+                            );
+                        }
                     }
                     self.runtime.block_on(async {
                         self.worker_runtime.write().await.registry = worker_tools;
@@ -508,12 +527,202 @@ impl ZhongshuApp {
                         Event::Harness(event) => {
                             if let Some(ref ov) = self.overlay {
                                 match event {
+                                    HarnessUiEvent::CodingSessionStarted {
+                                        session_id: _,
+                                        trace_id: _,
+                                        intent: _,
+                                        model: _,
+                                        deeplossless_conversation_id,
+                                        deeplossless_replay_execution_id,
+                                    } => {
+                                        send_coding_event(
+                                            ov,
+                                            CodingUiEvent::ReplayAvailable {
+                                                conversation_id: deeplossless_conversation_id,
+                                                replay_execution_id:
+                                                    deeplossless_replay_execution_id,
+                                            },
+                                        );
+                                    }
+                                    HarnessUiEvent::CodingPlanCreated {
+                                        session_id,
+                                        step_count,
+                                        risk,
+                                    } => {
+                                        send_coding_event(
+                                            ov,
+                                            CodingUiEvent::PlanCreated {
+                                                session_id,
+                                                step_count,
+                                                risk,
+                                            },
+                                        );
+                                    }
+                                    HarnessUiEvent::CodingStepStarted {
+                                        session_id,
+                                        step_id,
+                                        kind: _,
+                                        title,
+                                    } => {
+                                        send_coding_event(
+                                            ov,
+                                            CodingUiEvent::PlanStepStarted {
+                                                session_id,
+                                                step_id,
+                                                title,
+                                            },
+                                        );
+                                    }
+                                    HarnessUiEvent::CodingStepCompleted {
+                                        session_id,
+                                        step_id,
+                                        status,
+                                    } => {
+                                        send_coding_event(
+                                            ov,
+                                            CodingUiEvent::PlanStepCompleted {
+                                                session_id,
+                                                step_id,
+                                                status,
+                                            },
+                                        );
+                                    }
+                                    HarnessUiEvent::WorkerStarted {
+                                        session_id,
+                                        worker,
+                                        task_id,
+                                        owned_files,
+                                    } => {
+                                        send_coding_event(
+                                            ov,
+                                            CodingUiEvent::WorkerStarted {
+                                                session_id,
+                                                worker,
+                                                task_id,
+                                                owned_files: owned_files
+                                                    .iter()
+                                                    .map(|path| path.display().to_string())
+                                                    .collect(),
+                                            },
+                                        );
+                                    }
+                                    HarnessUiEvent::WorkerCompleted {
+                                        session_id,
+                                        worker,
+                                        task_id,
+                                        success,
+                                        trace_event_count: _,
+                                    } => {
+                                        send_coding_event(
+                                            ov,
+                                            CodingUiEvent::WorkerCompleted {
+                                                session_id,
+                                                worker,
+                                                task_id,
+                                                success,
+                                            },
+                                        );
+                                    }
+                                    HarnessUiEvent::WorkerConflict {
+                                        session_id,
+                                        worker,
+                                        task_id,
+                                        reason,
+                                    } => {
+                                        send_coding_event(
+                                            ov,
+                                            CodingUiEvent::WorkerConflict {
+                                                session_id,
+                                                worker,
+                                                task_id,
+                                                reason,
+                                            },
+                                        );
+                                    }
+                                    HarnessUiEvent::PatchPreview {
+                                        session_id,
+                                        path,
+                                        operation,
+                                        diff_summary,
+                                    } => {
+                                        send_coding_event(
+                                            ov,
+                                            CodingUiEvent::PatchPreview {
+                                                session_id,
+                                                path: path.display().to_string(),
+                                                operation,
+                                                diff_summary,
+                                            },
+                                        );
+                                    }
+                                    HarnessUiEvent::PatchApplied {
+                                        session_id,
+                                        path,
+                                        operation,
+                                        changed,
+                                    } => {
+                                        send_coding_event(
+                                            ov,
+                                            CodingUiEvent::PatchApplied {
+                                                session_id,
+                                                path: path.display().to_string(),
+                                                operation,
+                                                changed,
+                                            },
+                                        );
+                                    }
+                                    HarnessUiEvent::ContextIncluded {
+                                        description,
+                                        estimated_tokens,
+                                    } => {
+                                        send_coding_event(
+                                            ov,
+                                            CodingUiEvent::ContextIncluded {
+                                                description,
+                                                estimated_tokens,
+                                            },
+                                        );
+                                    }
+                                    HarnessUiEvent::ContextPressure {
+                                        pressure_percent,
+                                        dropped_evidence,
+                                        dropped_recent,
+                                    } => {
+                                        send_coding_event(
+                                            ov,
+                                            CodingUiEvent::ContextPressure {
+                                                pressure_percent,
+                                                dropped_evidence,
+                                                dropped_recent,
+                                            },
+                                        );
+                                    }
+                                    HarnessUiEvent::ReplayAvailable {
+                                        conversation_id,
+                                        replay_execution_id,
+                                    } => {
+                                        send_coding_event(
+                                            ov,
+                                            CodingUiEvent::ReplayAvailable {
+                                                conversation_id,
+                                                replay_execution_id,
+                                            },
+                                        );
+                                    }
                                     HarnessUiEvent::Verification {
                                         command,
                                         success,
                                         exit_code,
                                         step,
                                     } => {
+                                        send_coding_event(
+                                            ov,
+                                            CodingUiEvent::Verification {
+                                                command: command.clone(),
+                                                success,
+                                                exit_code,
+                                            },
+                                        );
                                         ov.send(&serde_json::json!({
                                             "type": "verification",
                                             "command": command,
@@ -523,6 +732,13 @@ impl ZhongshuApp {
                                         }));
                                     }
                                     HarnessUiEvent::RecoveryFeedback { rule_id, message } => {
+                                        send_coding_event(
+                                            ov,
+                                            CodingUiEvent::RecoveryFeedback {
+                                                rule_id: rule_id.clone(),
+                                                message: message.clone(),
+                                            },
+                                        );
                                         ov.send(&serde_json::json!({
                                             "type": "recovery_feedback",
                                             "rule_id": rule_id,

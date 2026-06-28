@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::tool::{Tool, ToolRegistry};
 
 use super::manifest::{EquipmentId, EquipmentStatus, Manifest};
+use super::mcp::{build_mcp_tools, preflight_stdio_server, McpPreflightReport};
 use super::permission::PermissionGuard;
 
 /// Callback to check whether a dangerous equipment action should proceed.
@@ -47,6 +48,10 @@ impl EquipmentRegistry {
     pub fn needs_approval(manifest: &Manifest) -> bool {
         manifest.permissions.shell.allowed
             || !manifest.permissions.shell.allowed_commands.is_empty()
+            || manifest.permissions.network.allowed
+            || manifest.permissions.filesystem.allowed
+            || manifest.permissions.browser.allowed
+            || !manifest.mcp_servers.is_empty()
     }
 
     /// Scan the equipment directory and load all manifests.
@@ -186,6 +191,73 @@ impl EquipmentRegistry {
         }
     }
 
+    /// Preflight and register active MCP stdio tools.
+    ///
+    /// A failed MCP server is returned in the report and skipped so one broken
+    /// extension cannot poison the whole tool registry.
+    pub async fn register_mcp_tools(
+        &self,
+        tool_registry: &mut ToolRegistry,
+    ) -> Vec<McpPreflightReport> {
+        let mut reports = Vec::new();
+        let servers = self.active_mcp_servers();
+        for (eq_id, eq_dir, permissions, server) in servers {
+            let report = preflight_stdio_server(&server, &eq_dir).await;
+            if report.error.is_none() {
+                for tool in build_mcp_tools(&server, &eq_dir, report.tools.clone()) {
+                    tracing::info!(
+                        "equipment: registering MCP tool '{}' from '{}'",
+                        tool.name(),
+                        eq_id
+                    );
+                    let guarded =
+                        Arc::new(PermissionGuard::new(tool, permissions.clone())) as Arc<dyn Tool>;
+                    tool_registry.register_ref(guarded);
+                }
+            } else if let Some(error) = &report.error {
+                tracing::warn!(
+                    "equipment '{}' MCP server '{}' preflight failed: {}",
+                    eq_id,
+                    report.server_id,
+                    error
+                );
+            }
+            reports.push(report);
+        }
+        reports
+    }
+
+    fn active_mcp_servers(
+        &self,
+    ) -> Vec<(
+        EquipmentId,
+        PathBuf,
+        super::manifest::EquipmentPermissions,
+        super::manifest::McpServerConfig,
+    )> {
+        let mut servers = Vec::new();
+        for eq in self.loaded.values() {
+            if eq.status != EquipmentStatus::Active {
+                continue;
+            }
+            if !matches!(
+                eq.manifest.equipment_type,
+                super::manifest::EquipmentType::ToolExtension
+            ) {
+                continue;
+            }
+            for server in &eq.manifest.mcp_servers {
+                servers.push((
+                    eq.id.clone(),
+                    eq.dir.clone(),
+                    eq.manifest.permissions.clone(),
+                    server.clone(),
+                ));
+            }
+        }
+        servers
+    }
+
     /// Unregister all tools belonging to a specific equipment from the given
     /// `ToolRegistry`.  Returns the number of tools removed.
     pub fn unregister_tools(&self, tool_registry: &mut ToolRegistry, id: &str) -> usize {
@@ -209,6 +281,14 @@ impl EquipmentRegistry {
         }
         if manifest.version.trim().is_empty() {
             errors.push("version is required".into());
+        }
+        for server in &manifest.mcp_servers {
+            if server.id.trim().is_empty() {
+                errors.push("mcp server id is required".into());
+            }
+            if server.command.trim().is_empty() {
+                errors.push(format!("mcp server '{}' command is required", server.id));
+            }
         }
         if errors.is_empty() {
             Ok(())
@@ -422,7 +502,8 @@ fn is_newer_version(new: &str, old: &str) -> bool {
 mod tests {
     use super::*;
     use crate::equipment::manifest::{
-        EquipmentEntry, EquipmentPermissions, EquipmentType, ShellPermission,
+        BrowserPermission, EquipmentEntry, EquipmentPermissions, EquipmentType,
+        FilesystemPermission, McpServerConfig, NetworkPermission, ShellPermission,
     };
     use std::fs;
 
@@ -439,11 +520,13 @@ mod tests {
             equipment_type: eq_type,
             tools: tools.into_iter().map(String::from).collect(),
             profiles: vec![],
+            mcp_servers: vec![],
             permissions: EquipmentPermissions {
                 shell: ShellPermission {
                     allowed: shell_allowed,
                     allowed_commands: vec![],
                 },
+                ..Default::default()
             },
             entry: EquipmentEntry::None {},
         }
@@ -491,6 +574,7 @@ mod tests {
             equipment_type: EquipmentType::Skill,
             tools: vec![],
             profiles: vec![],
+            mcp_servers: vec![],
             permissions: Default::default(),
             entry: EquipmentEntry::None {},
         };
@@ -512,6 +596,102 @@ mod tests {
             true,
         );
         assert!(EquipmentRegistry::needs_approval(&m));
+    }
+
+    #[test]
+    fn needs_approval_returns_true_for_network_allowed() {
+        let m = Manifest {
+            name: "net-ext".into(),
+            version: "1.0.0".into(),
+            description: "".into(),
+            equipment_type: EquipmentType::ToolExtension,
+            tools: vec!["webfetch".into()],
+            profiles: vec![],
+            mcp_servers: vec![],
+            permissions: EquipmentPermissions {
+                network: NetworkPermission {
+                    allowed: true,
+                    allowed_hosts: vec![],
+                },
+                ..Default::default()
+            },
+            entry: EquipmentEntry::None {},
+        };
+        assert!(EquipmentRegistry::needs_approval(&m));
+    }
+
+    #[test]
+    fn needs_approval_returns_true_for_filesystem_allowed() {
+        let m = Manifest {
+            name: "fs-ext".into(),
+            version: "1.0.0".into(),
+            description: "".into(),
+            equipment_type: EquipmentType::ToolExtension,
+            tools: vec!["read".into()],
+            profiles: vec![],
+            mcp_servers: vec![],
+            permissions: EquipmentPermissions {
+                filesystem: FilesystemPermission {
+                    allowed: true,
+                    allowed_paths: vec![],
+                    write_allowed: false,
+                },
+                ..Default::default()
+            },
+            entry: EquipmentEntry::None {},
+        };
+        assert!(EquipmentRegistry::needs_approval(&m));
+    }
+
+    #[test]
+    fn needs_approval_returns_true_for_browser_allowed() {
+        let m = Manifest {
+            name: "browser-ext".into(),
+            version: "1.0.0".into(),
+            description: "".into(),
+            equipment_type: EquipmentType::ToolExtension,
+            tools: vec!["browser".into()],
+            profiles: vec![],
+            mcp_servers: vec![],
+            permissions: EquipmentPermissions {
+                browser: BrowserPermission { allowed: true },
+                ..Default::default()
+            },
+            entry: EquipmentEntry::None {},
+        };
+        assert!(EquipmentRegistry::needs_approval(&m));
+    }
+
+    #[test]
+    fn needs_approval_returns_true_for_mcp_server() {
+        let mut m = make_manifest("mcp-ext", EquipmentType::ToolExtension, vec![], false);
+        m.mcp_servers.push(McpServerConfig {
+            id: "repo-tools".into(),
+            command: "node".into(),
+            args: vec!["server.js".into()],
+            env: Default::default(),
+            working_dir: None,
+            timeout_ms: 1000,
+        });
+
+        assert!(EquipmentRegistry::needs_approval(&m));
+    }
+
+    #[test]
+    fn validate_manifest_rejects_invalid_mcp_server() {
+        let mut m = make_manifest("mcp-ext", EquipmentType::ToolExtension, vec![], false);
+        m.mcp_servers.push(McpServerConfig {
+            id: "repo-tools".into(),
+            command: "".into(),
+            args: Vec::new(),
+            env: Default::default(),
+            working_dir: None,
+            timeout_ms: 1000,
+        });
+
+        let errors = EquipmentRegistry::validate_manifest(&m).expect_err("invalid mcp");
+
+        assert!(errors.iter().any(|error| error.contains("command")));
     }
 
     #[test]

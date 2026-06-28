@@ -341,6 +341,7 @@ pub async fn run_agent(
                 }
             }
 
+            let mut tool_timed_out = false;
             let output = match tokio::time::timeout(
                 runtime.budget.tool_timeout,
                 runtime
@@ -356,6 +357,7 @@ pub async fn run_agent(
                         tc.function.name,
                         runtime.budget.tool_timeout
                     );
+                    tool_timed_out = true;
                     ToolOutput::error(format!(
                         "tool '{}' timed out after {:?}",
                         tc.function.name, runtime.budget.tool_timeout
@@ -379,6 +381,23 @@ pub async fn run_agent(
             // Wait for the user to approve/deny before continuing.
             if output.status == ToolStatus::AuthRequired {
                 info!(tool = %tc.function.name, status = "auth_required");
+                crate::harness::recovery::record_signal(
+                    &mut runtime.harness_state.recovery,
+                    crate::harness::recovery::policy::RecoverySignal::permission_blocked(
+                        output
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| "tool requires approval".into()),
+                    ),
+                );
+                let recovery_feedback = crate::harness::recovery::check(
+                    &mut runtime.harness_state.recovery,
+                    false,
+                    false,
+                    false,
+                    harness_step,
+                );
+                emit_recovery_feedback(runtime, &mut messages, recovery_feedback);
                 crate::authority::set_pending_source(source);
                 messages.push(Message::tool_result(
                     &tc.id,
@@ -492,6 +511,27 @@ pub async fn run_agent(
                     exit_code,
                     harness_step,
                 );
+
+                if tool_timed_out {
+                    crate::harness::recovery::record_signal(
+                        &mut runtime.harness_state.recovery,
+                        crate::harness::recovery::policy::RecoverySignal::tool_timeout(
+                            &tc.function.name,
+                            runtime.budget.tool_timeout,
+                        ),
+                    );
+                }
+                if is_verification_tool_call(tc) && !tool_success {
+                    crate::harness::recovery::record_signal(
+                        &mut runtime.harness_state.recovery,
+                        crate::harness::recovery::policy::RecoverySignal::verification_failed(
+                            output
+                                .error
+                                .as_deref()
+                                .unwrap_or("verification command failed"),
+                        ),
+                    );
+                }
 
                 // Recovery: failure fingerprint
                 if !tool_success {
@@ -657,17 +697,7 @@ pub async fn run_agent(
                 step_had_successful_test,
                 harness_step,
             );
-            for fb in &recovery_feedback {
-                let text = crate::harness::render::render_feedback(fb);
-                messages.push(Message::system(text));
-                record_trace(
-                    runtime,
-                    HarnessEvent::RecoveryFeedback {
-                        rule_id: fb.rule_id.clone(),
-                        message: fb.message.clone(),
-                    },
-                );
-            }
+            emit_recovery_feedback(runtime, &mut messages, recovery_feedback);
         }
     }
 
@@ -731,6 +761,24 @@ fn finish_loop_result(
 
 fn record_trace(runtime: &mut AgentRuntime, event: HarnessEvent) {
     runtime.harness_state.trace.events.push(event);
+}
+
+fn emit_recovery_feedback(
+    runtime: &mut AgentRuntime,
+    messages: &mut Vec<Message>,
+    recovery_feedback: Vec<crate::harness::action::HarnessFeedback>,
+) {
+    for fb in &recovery_feedback {
+        let text = crate::harness::render::render_feedback(fb);
+        messages.push(Message::system(text));
+        record_trace(
+            runtime,
+            HarnessEvent::RecoveryFeedback {
+                rule_id: fb.rule_id.clone(),
+                message: fb.message.clone(),
+            },
+        );
+    }
 }
 
 fn record_verification_trace(
@@ -1038,6 +1086,61 @@ mod tests {
         }
     }
 
+    struct SlowTool;
+
+    #[async_trait]
+    impl Tool for SlowTool {
+        fn name(&self) -> &str {
+            "slow"
+        }
+        fn description(&self) -> &str {
+            "slow tool for timeout recovery testing"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type":"object","properties":{}})
+        }
+        async fn execute(&self, _arguments: &serde_json::Value) -> ToolOutput {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            ToolOutput::success(json!({"ok": true}))
+        }
+    }
+
+    struct AuthTool;
+
+    #[async_trait]
+    impl Tool for AuthTool {
+        fn name(&self) -> &str {
+            "auth_tool"
+        }
+        fn description(&self) -> &str {
+            "authorization tool for recovery testing"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type":"object","properties":{}})
+        }
+        async fn execute(&self, _arguments: &serde_json::Value) -> ToolOutput {
+            ToolOutput::auth_required("auth_tool", "auth_tool run")
+        }
+    }
+
+    struct FailingSelfTestTool;
+
+    #[async_trait]
+    impl Tool for FailingSelfTestTool {
+        fn name(&self) -> &str {
+            "self_test"
+        }
+        fn description(&self) -> &str {
+            "failing verification tool for recovery testing"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type":"object","properties":{}})
+        }
+        async fn execute(&self, _arguments: &serde_json::Value) -> ToolOutput {
+            ToolOutput::error("verification failed")
+        }
+    }
+
     /// A provider that follows a scripted sequence of tool-call / text responses.
     #[derive(Clone)]
     struct ScriptedProvider {
@@ -1111,6 +1214,15 @@ mod tests {
         }
     }
 
+    fn has_recovery_rule(result: &LoopResult, expected_rule: &str) -> bool {
+        result.trace_events.iter().any(|event| {
+            matches!(
+                event,
+                HarnessEvent::RecoveryFeedback { rule_id, .. } if rule_id == expected_rule
+            )
+        })
+    }
+
     #[tokio::test]
     async fn recovery_no_progress_triggers_after_5_steps() {
         let provider = ScriptedProvider {
@@ -1159,6 +1271,95 @@ mod tests {
             "expected no-progress hint in: {:?}",
             recovery_events
         );
+    }
+
+    #[tokio::test]
+    async fn recovery_records_tool_timeout_signal() {
+        let provider = ScriptedProvider {
+            script: Arc::new(vec![
+                ("slow".into(), "{}".into(), true),
+                ("__text__".into(), "done".into(), true),
+            ]),
+            idx: Arc::new(Mutex::new(0)),
+        };
+        let mut budget = small_budget();
+        budget.tool_timeout = Duration::from_millis(10);
+        let mut runtime = AgentRuntime::new(
+            provider,
+            ToolRegistry::new().register(SlowTool),
+            "recovery-test",
+            budget,
+        );
+
+        let result = run_agent(
+            &mut runtime,
+            vec![Message::user("run a slow tool")],
+            None,
+            "test",
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(result.stop_reason, StopReason::Finished));
+        assert!(has_recovery_rule(&result, "recovery/tool_timeout"));
+    }
+
+    #[tokio::test]
+    async fn recovery_records_auth_required_signal() {
+        let provider = ScriptedProvider {
+            script: Arc::new(vec![
+                ("auth_tool".into(), "{}".into(), true),
+                ("__text__".into(), "done".into(), true),
+            ]),
+            idx: Arc::new(Mutex::new(0)),
+        };
+        let mut runtime = AgentRuntime::new(
+            provider,
+            ToolRegistry::new().register(AuthTool),
+            "recovery-test",
+            small_budget(),
+        );
+
+        let result = run_agent(
+            &mut runtime,
+            vec![Message::user("run auth tool")],
+            None,
+            "test",
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(result.stop_reason, StopReason::Finished));
+        assert!(has_recovery_rule(&result, "recovery/permission_blocked"));
+    }
+
+    #[tokio::test]
+    async fn recovery_records_verification_failure_signal() {
+        let provider = ScriptedProvider {
+            script: Arc::new(vec![
+                ("self_test".into(), "{}".into(), true),
+                ("__text__".into(), "not tested".into(), true),
+            ]),
+            idx: Arc::new(Mutex::new(0)),
+        };
+        let mut runtime = AgentRuntime::new(
+            provider,
+            ToolRegistry::new().register(FailingSelfTestTool),
+            "recovery-test",
+            small_budget(),
+        );
+
+        let result = run_agent(
+            &mut runtime,
+            vec![Message::user("check status")],
+            None,
+            "test",
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(result.stop_reason, StopReason::Finished));
+        assert!(has_recovery_rule(&result, "recovery/verification_failed"));
     }
 
     #[tokio::test]

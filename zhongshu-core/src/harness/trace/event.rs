@@ -29,6 +29,46 @@ pub enum HarnessEvent {
         step_id: String,
         status: String,
     },
+    WorkerStarted {
+        session_id: Option<String>,
+        worker: String,
+        task_id: String,
+        owned_files: Vec<PathBuf>,
+    },
+    WorkerCompleted {
+        session_id: Option<String>,
+        worker: String,
+        task_id: String,
+        success: bool,
+        trace_event_count: usize,
+    },
+    WorkerConflict {
+        session_id: Option<String>,
+        worker: String,
+        task_id: String,
+        reason: String,
+    },
+    PatchPreview {
+        session_id: Option<String>,
+        path: PathBuf,
+        operation: String,
+        diff_summary: String,
+    },
+    PatchApplied {
+        session_id: Option<String>,
+        path: PathBuf,
+        operation: String,
+        changed: bool,
+    },
+    ContextPressure {
+        pressure_percent: u8,
+        dropped_evidence: usize,
+        dropped_recent: usize,
+    },
+    ReplayAvailable {
+        conversation_id: Option<i64>,
+        replay_execution_id: Option<String>,
+    },
     CodingOutcomeRecorded {
         timestamp: u64,
         session_id: String,

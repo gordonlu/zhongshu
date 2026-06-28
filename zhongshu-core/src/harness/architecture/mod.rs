@@ -7,6 +7,7 @@ pub mod impact;
 pub mod index;
 pub mod layer;
 pub mod parser;
+pub mod repo_intelligence;
 pub mod rules;
 pub mod rust_ast;
 pub mod semantic;

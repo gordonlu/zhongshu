@@ -169,7 +169,7 @@ mod tests {
         // Verify centre pixel is lit.
         buf.fill(0);
         draw_orb(&mut buf, ww, hh, 100, 140, 255, 0.0, OrbMode::Idle);
-        let centre = buf[(hh as usize / 2 * ww as usize + ww as usize / 2)];
+        let centre = buf[hh as usize / 2 * ww as usize + ww as usize / 2];
         assert_ne!(centre & 0x00FFFFFF, 0, "centre pixel should have colour");
 
         // Verify centre is much brighter than a corner (soft glow reaches

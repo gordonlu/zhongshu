@@ -1,3 +1,5 @@
+#![cfg(not(windows))]
+
 use gtk::prelude::*;
 use std::sync::Once;
 use std::time::Duration;

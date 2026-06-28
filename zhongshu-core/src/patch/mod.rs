@@ -60,8 +60,111 @@ impl PatchEngine {
         ))
     }
 
+    pub fn preview_multi_replace(
+        &self,
+        request: MultiReplaceRequest,
+    ) -> Result<PatchPreview, PatchError> {
+        let path = self.resolve_workspace_path(&request.path)?;
+        let snapshot = self
+            .reads
+            .get(&path)
+            .ok_or_else(|| PatchError::FileNotRead { path: path.clone() })?;
+        self.ensure_not_stale(snapshot)?;
+        let updated = apply_multi_replace(&snapshot.content, &request.edits)?;
+        Ok(PatchPreview::new(path, snapshot, updated, true))
+    }
+
+    pub fn preview_write_file(
+        &self,
+        request: WholeFileRequest,
+    ) -> Result<PatchPreview, PatchError> {
+        let path = self.resolve_workspace_path(&request.path)?;
+        match self.reads.get(&path) {
+            Some(snapshot) => {
+                self.ensure_not_stale(snapshot)?;
+                if snapshot.content == request.content {
+                    return Err(PatchError::NoOp);
+                }
+                Ok(PatchPreview::new(path, snapshot, request.content, true))
+            }
+            None if path.exists() => Err(PatchError::FileNotRead { path }),
+            None if request.allow_create => {
+                if let Some(parent) = path.parent() {
+                    if !parent.exists() {
+                        return Err(PatchError::ParentDirectoryMissing {
+                            path: parent.to_path_buf(),
+                        });
+                    }
+                }
+                let line_ending = request
+                    .line_ending
+                    .unwrap_or_else(|| LineEnding::detect(&request.content));
+                let snapshot = FileSnapshot {
+                    path: path.clone(),
+                    content: String::new(),
+                    modified: None,
+                    encoding: request.encoding.unwrap_or(TextEncoding::Utf8),
+                    line_ending,
+                };
+                if request.content.is_empty() {
+                    return Err(PatchError::NoOp);
+                }
+                Ok(PatchPreview::new(path, &snapshot, request.content, true))
+            }
+            None => Err(PatchError::FileNotRead { path }),
+        }
+    }
+
+    pub fn preview_operation(
+        &self,
+        operation: PatchOperation,
+    ) -> Result<PatchPreview, PatchAttemptFailure> {
+        let kind = operation.kind();
+        let path = operation.path().to_path_buf();
+        let result = match operation {
+            PatchOperation::Replace(request) => self.preview_replace(request),
+            PatchOperation::MultiReplace(request) => self.preview_multi_replace(request),
+            PatchOperation::WriteFile(request) => self.preview_write_file(request),
+        };
+        result.map_err(|error| PatchAttemptFailure::from_error(kind, Some(path), error))
+    }
+
     pub fn apply_replace(&mut self, request: ReplaceRequest) -> Result<PatchResult, PatchError> {
         let preview = self.preview_replace(request)?;
+        self.apply_preview(preview)
+    }
+
+    pub fn apply_multi_replace(
+        &mut self,
+        request: MultiReplaceRequest,
+    ) -> Result<PatchResult, PatchError> {
+        let preview = self.preview_multi_replace(request)?;
+        self.apply_preview(preview)
+    }
+
+    pub fn apply_write_file(
+        &mut self,
+        request: WholeFileRequest,
+    ) -> Result<PatchResult, PatchError> {
+        let preview = self.preview_write_file(request)?;
+        self.apply_preview(preview)
+    }
+
+    pub fn apply_operation(
+        &mut self,
+        operation: PatchOperation,
+    ) -> Result<PatchResult, PatchAttemptFailure> {
+        let kind = operation.kind();
+        let path = operation.path().to_path_buf();
+        let result = match operation {
+            PatchOperation::Replace(request) => self.apply_replace(request),
+            PatchOperation::MultiReplace(request) => self.apply_multi_replace(request),
+            PatchOperation::WriteFile(request) => self.apply_write_file(request),
+        };
+        result.map_err(|error| PatchAttemptFailure::from_error(kind, Some(path), error))
+    }
+
+    fn apply_preview(&mut self, preview: PatchPreview) -> Result<PatchResult, PatchError> {
         write_text_preserving(
             &preview.path,
             &preview.updated_content,
@@ -147,6 +250,45 @@ impl PatchEngine {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PatchOperation {
+    Replace(ReplaceRequest),
+    MultiReplace(MultiReplaceRequest),
+    WriteFile(WholeFileRequest),
+}
+
+impl PatchOperation {
+    pub fn kind(&self) -> PatchOperationKind {
+        match self {
+            PatchOperation::Replace(_) => PatchOperationKind::Replace,
+            PatchOperation::MultiReplace(_) => PatchOperationKind::MultiReplace,
+            PatchOperation::WriteFile(request) if request.allow_create => {
+                PatchOperationKind::CreateFile
+            }
+            PatchOperation::WriteFile(_) => PatchOperationKind::WholeFileWrite,
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        match self {
+            PatchOperation::Replace(request) => &request.path,
+            PatchOperation::MultiReplace(request) => &request.path,
+            PatchOperation::WriteFile(request) => &request.path,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PatchOperationKind {
+    Read,
+    Replace,
+    MultiReplace,
+    WholeFileWrite,
+    CreateFile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplaceRequest {
     pub path: PathBuf,
     pub old_text: String,
@@ -179,6 +321,87 @@ impl ReplaceRequest {
             new_text: new_text.into(),
             replace_all: true,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MultiReplaceRequest {
+    pub path: PathBuf,
+    pub edits: Vec<ReplaceEdit>,
+}
+
+impl MultiReplaceRequest {
+    pub fn new(path: impl Into<PathBuf>, edits: Vec<ReplaceEdit>) -> Self {
+        Self {
+            path: path.into(),
+            edits,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplaceEdit {
+    pub old_text: String,
+    pub new_text: String,
+    pub replace_all: bool,
+}
+
+impl ReplaceEdit {
+    pub fn once(old_text: impl Into<String>, new_text: impl Into<String>) -> Self {
+        Self {
+            old_text: old_text.into(),
+            new_text: new_text.into(),
+            replace_all: false,
+        }
+    }
+
+    pub fn all(old_text: impl Into<String>, new_text: impl Into<String>) -> Self {
+        Self {
+            old_text: old_text.into(),
+            new_text: new_text.into(),
+            replace_all: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WholeFileRequest {
+    pub path: PathBuf,
+    pub content: String,
+    pub allow_create: bool,
+    pub encoding: Option<TextEncoding>,
+    pub line_ending: Option<LineEnding>,
+}
+
+impl WholeFileRequest {
+    pub fn replace(path: impl Into<PathBuf>, content: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            content: content.into(),
+            allow_create: false,
+            encoding: None,
+            line_ending: None,
+        }
+    }
+
+    pub fn create(path: impl Into<PathBuf>, content: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            content: content.into(),
+            allow_create: true,
+            encoding: Some(TextEncoding::Utf8),
+            line_ending: None,
+        }
+    }
+
+    pub fn with_encoding(mut self, encoding: TextEncoding) -> Self {
+        self.encoding = Some(encoding);
+        self
+    }
+
+    pub fn with_line_ending(mut self, line_ending: LineEnding) -> Self {
+        self.line_ending = Some(line_ending);
+        self
     }
 }
 
@@ -246,6 +469,48 @@ impl PatchRuntimeCheckpoint {
             deeplossless_snapshot_id: None,
             deeplossless_rollback_node_id: Some(node_id),
             replay_execution_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchAttemptFailure {
+    pub evidence: PatchFailureEvidence,
+    pub error: PatchError,
+}
+
+impl PatchAttemptFailure {
+    fn from_error(operation: PatchOperationKind, path: Option<PathBuf>, error: PatchError) -> Self {
+        Self {
+            evidence: PatchFailureEvidence::from_error(operation, path, &error),
+            error,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatchFailureEvidence {
+    pub operation: PatchOperationKind,
+    pub path: Option<PathBuf>,
+    pub error_code: String,
+    pub message: String,
+    pub recoverable: bool,
+    pub suggested_action: String,
+}
+
+impl PatchFailureEvidence {
+    pub fn from_error(
+        operation: PatchOperationKind,
+        path: Option<PathBuf>,
+        error: &PatchError,
+    ) -> Self {
+        Self {
+            operation,
+            path,
+            error_code: error.code().to_string(),
+            message: error.to_string(),
+            recoverable: error.is_recoverable(),
+            suggested_action: error.suggested_action().to_string(),
         }
     }
 }
@@ -349,15 +614,82 @@ pub enum PatchError {
         path: PathBuf,
         message: String,
     },
+    ParentDirectoryMissing {
+        path: PathBuf,
+    },
     StaleRead {
         path: PathBuf,
     },
     EmptyOldText,
+    EmptyPatch,
     NoOp,
     TextNotFound,
     AmbiguousMatch {
         matches: usize,
     },
+}
+
+impl PatchError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            PatchError::WorkspaceUnavailable { .. } => "workspace_unavailable",
+            PatchError::OutsideWorkspace { .. } => "outside_workspace",
+            PatchError::UnsafePath { .. } => "unsafe_path",
+            PatchError::FileNotRead { .. } => "file_not_read",
+            PatchError::FileTooLarge { .. } => "file_too_large",
+            PatchError::BinaryFile { .. } => "binary_file",
+            PatchError::ReadFailed { .. } => "read_failed",
+            PatchError::WriteFailed { .. } => "write_failed",
+            PatchError::DecodeFailed { .. } => "decode_failed",
+            PatchError::ParentDirectoryMissing { .. } => "parent_directory_missing",
+            PatchError::StaleRead { .. } => "stale_read",
+            PatchError::EmptyOldText => "empty_old_text",
+            PatchError::EmptyPatch => "empty_patch",
+            PatchError::NoOp => "no_op",
+            PatchError::TextNotFound => "text_not_found",
+            PatchError::AmbiguousMatch { .. } => "ambiguous_match",
+        }
+    }
+
+    pub fn is_recoverable(&self) -> bool {
+        matches!(
+            self,
+            PatchError::FileNotRead { .. }
+                | PatchError::StaleRead { .. }
+                | PatchError::TextNotFound
+                | PatchError::AmbiguousMatch { .. }
+                | PatchError::NoOp
+                | PatchError::EmptyPatch
+        )
+    }
+
+    pub fn suggested_action(&self) -> &'static str {
+        match self {
+            PatchError::FileNotRead { .. } => "read the target file before patching",
+            PatchError::StaleRead { .. } => "re-read the file and regenerate the patch",
+            PatchError::TextNotFound => "re-read nearby context and use an exact current match",
+            PatchError::AmbiguousMatch { .. } => {
+                "use a more specific match or explicitly replace all matches"
+            }
+            PatchError::NoOp => "drop the no-op edit from the patch plan",
+            PatchError::EmptyPatch => "provide at least one edit",
+            PatchError::EmptyOldText => "provide non-empty old text",
+            PatchError::ParentDirectoryMissing { .. } => {
+                "create or choose an existing parent directory"
+            }
+            PatchError::OutsideWorkspace { .. } | PatchError::UnsafePath { .. } => {
+                "choose a path inside the workspace"
+            }
+            PatchError::BinaryFile { .. }
+            | PatchError::FileTooLarge { .. }
+            | PatchError::DecodeFailed { .. } => "use a specialized non-text editing path",
+            PatchError::WorkspaceUnavailable { .. }
+            | PatchError::ReadFailed { .. }
+            | PatchError::WriteFailed { .. } => {
+                "inspect filesystem state and retry only after resolving the error"
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for PatchError {
@@ -392,10 +724,14 @@ impl std::fmt::Display for PatchError {
             PatchError::DecodeFailed { path, message } => {
                 write!(f, "failed to decode {}: {message}", path.display())
             }
+            PatchError::ParentDirectoryMissing { path } => {
+                write!(f, "parent directory {} does not exist", path.display())
+            }
             PatchError::StaleRead { path } => {
                 write!(f, "file {} changed since last read", path.display())
             }
             PatchError::EmptyOldText => write!(f, "old text cannot be empty"),
+            PatchError::EmptyPatch => write!(f, "patch must contain at least one edit"),
             PatchError::NoOp => write!(f, "patch would not change file"),
             PatchError::TextNotFound => write!(f, "old text not found"),
             PatchError::AmbiguousMatch { matches } => {
@@ -426,6 +762,28 @@ fn apply_replace(content: &str, request: &ReplaceRequest) -> Result<String, Patc
     } else {
         content.replacen(&request.old_text, &request.new_text, 1)
     };
+    if updated == content {
+        return Err(PatchError::NoOp);
+    }
+    Ok(updated)
+}
+
+fn apply_multi_replace(content: &str, edits: &[ReplaceEdit]) -> Result<String, PatchError> {
+    if edits.is_empty() {
+        return Err(PatchError::EmptyPatch);
+    }
+    let mut updated = content.to_string();
+    for edit in edits {
+        updated = apply_replace(
+            &updated,
+            &ReplaceRequest {
+                path: PathBuf::new(),
+                old_text: edit.old_text.clone(),
+                new_text: edit.new_text.clone(),
+                replace_all: edit.replace_all,
+            },
+        )?;
+    }
     if updated == content {
         return Err(PatchError::NoOp);
     }
@@ -625,5 +983,139 @@ mod tests {
                 .and_then(|checkpoint| checkpoint.deeplossless_snapshot_id),
             Some(7)
         );
+    }
+
+    #[test]
+    fn applies_multi_replace_in_one_previewed_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        fs::write(&file, "alpha\nbeta\ngamma\n").unwrap();
+        let mut engine = PatchEngine::new(dir.path()).unwrap();
+        engine.read("a.txt").unwrap();
+
+        let result = engine
+            .apply_multi_replace(MultiReplaceRequest::new(
+                "a.txt",
+                vec![
+                    ReplaceEdit::once("alpha", "one"),
+                    ReplaceEdit::once("gamma", "three"),
+                ],
+            ))
+            .unwrap();
+
+        assert!(result.diff.changed);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "one\nbeta\nthree\n");
+    }
+
+    #[test]
+    fn failed_multi_replace_does_not_write_partial_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        fs::write(&file, "alpha\nbeta\n").unwrap();
+        let mut engine = PatchEngine::new(dir.path()).unwrap();
+        engine.read("a.txt").unwrap();
+
+        let err = engine
+            .apply_multi_replace(MultiReplaceRequest::new(
+                "a.txt",
+                vec![
+                    ReplaceEdit::once("alpha", "one"),
+                    ReplaceEdit::once("missing", "two"),
+                ],
+            ))
+            .unwrap_err();
+
+        assert_eq!(err, PatchError::TextNotFound);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "alpha\nbeta\n");
+    }
+
+    #[test]
+    fn whole_file_write_requires_read_for_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        fs::write(&file, "old").unwrap();
+        let mut engine = PatchEngine::new(dir.path()).unwrap();
+
+        let err = engine
+            .apply_write_file(WholeFileRequest::replace("a.txt", "new"))
+            .unwrap_err();
+
+        assert!(matches!(err, PatchError::FileNotRead { .. }));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "old");
+    }
+
+    #[test]
+    fn whole_file_write_preserves_existing_encoding_and_line_endings() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        fs::write(&file, "\u{feff}old\r\ntext\r\n").unwrap();
+        let mut engine = PatchEngine::new(dir.path()).unwrap();
+        let snapshot = engine.read("a.txt").unwrap();
+        assert_eq!(snapshot.encoding, TextEncoding::Utf8Bom);
+        assert_eq!(snapshot.line_ending, LineEnding::Crlf);
+
+        engine
+            .apply_write_file(WholeFileRequest::replace("a.txt", "new\ntext\n"))
+            .unwrap();
+
+        let raw = fs::read(&file).unwrap();
+        assert!(raw.starts_with(&[0xEF, 0xBB, 0xBF]));
+        assert_eq!(
+            String::from_utf8(raw[3..].to_vec()).unwrap(),
+            "new\r\ntext\r\n"
+        );
+    }
+
+    #[test]
+    fn creates_new_file_only_when_explicitly_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("new.txt");
+        let mut engine = PatchEngine::new(dir.path()).unwrap();
+
+        let err = engine
+            .apply_write_file(WholeFileRequest::replace("new.txt", "hello"))
+            .unwrap_err();
+        assert!(matches!(err, PatchError::FileNotRead { .. }));
+
+        let result = engine
+            .apply_write_file(WholeFileRequest::create("new.txt", "hello\n"))
+            .unwrap();
+
+        assert!(result.diff.changed);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "hello\n");
+    }
+
+    #[test]
+    fn create_rejects_missing_parent_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = PatchEngine::new(dir.path()).unwrap();
+
+        let err = engine
+            .apply_write_file(WholeFileRequest::create("missing/a.txt", "hello"))
+            .unwrap_err();
+
+        assert!(matches!(err, PatchError::ParentDirectoryMissing { .. }));
+    }
+
+    #[test]
+    fn preview_operation_returns_recovery_evidence_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        fs::write(&file, "hello").unwrap();
+        let engine = PatchEngine::new(dir.path()).unwrap();
+
+        let failure = engine
+            .preview_operation(PatchOperation::Replace(ReplaceRequest::once(
+                "a.txt", "hello", "hi",
+            )))
+            .unwrap_err();
+
+        assert_eq!(failure.evidence.operation, PatchOperationKind::Replace);
+        assert_eq!(failure.evidence.error_code, "file_not_read");
+        assert!(failure.evidence.recoverable);
+        assert!(failure
+            .evidence
+            .suggested_action
+            .contains("read the target file"));
     }
 }

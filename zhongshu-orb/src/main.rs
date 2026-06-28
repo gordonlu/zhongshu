@@ -7,8 +7,9 @@ mod indicator;
 #[cfg(not(windows))]
 mod overlay;
 #[cfg(windows)]
-#[path = "overlay_stub.rs"]
+#[path = "overlay_windows.rs"]
 mod overlay;
+mod overlay_contract;
 mod render;
 mod services;
 
@@ -310,7 +311,18 @@ fn main() {
         .register(memory_query_tool.clone());
     let mut main_registry = base_main_registry.clone();
     // Register equipment-provided tools into the main agent registry
-    equipment.lock().unwrap().register_tools(&mut main_registry);
+    {
+        let reports = r.block_on(async {
+            let equipment = equipment.lock().unwrap();
+            equipment.register_tools(&mut main_registry);
+            equipment.register_mcp_tools(&mut main_registry).await
+        });
+        for report in reports {
+            if let Some(error) = report.error {
+                tracing::warn!("MCP server '{}' skipped: {}", report.server_id, error);
+            }
+        }
+    }
     let controller = Arc::new(AgentController::new(
         eb.clone(),
         response_tx.clone(),
@@ -380,10 +392,22 @@ fn main() {
         .register(suggestion_tool.clone())
         .register(memory_query_tool.clone());
     let mut worker_registry = base_worker_registry.clone();
-    equipment
-        .lock()
-        .unwrap()
-        .register_tools(&mut worker_registry);
+    {
+        let reports = r.block_on(async {
+            let equipment = equipment.lock().unwrap();
+            equipment.register_tools(&mut worker_registry);
+            equipment.register_mcp_tools(&mut worker_registry).await
+        });
+        for report in reports {
+            if let Some(error) = report.error {
+                tracing::warn!(
+                    "worker MCP server '{}' skipped: {}",
+                    report.server_id,
+                    error
+                );
+            }
+        }
+    }
     let worker_runtime = Arc::new(tokio::sync::RwLock::new(AgentRuntime::new(
         provider.clone(),
         worker_registry,

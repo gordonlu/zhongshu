@@ -9,8 +9,16 @@ use crate::agent::worker::Worker;
 use crate::agent::AttentionLevel;
 use crate::harness::architecture::index::ProjectIndex;
 use crate::harness::trace::event::HarnessEvent;
+use crate::integration::{
+    DeeplosslessFileClaimOutcome, DeeplosslessFileReleaseOutcome, DeeplosslessProxy,
+};
+use crate::patch::{
+    PatchAttemptFailure, PatchEngine, PatchOperation, PatchOperationKind, PatchResult,
+};
+use async_trait::async_trait;
 
 /// A file-scoped sub-task assignment for a single worker.
+#[derive(Debug, Clone)]
 pub struct WorkerAssignment {
     pub worker_name: String,
     pub task_description: String,
@@ -19,6 +27,7 @@ pub struct WorkerAssignment {
 }
 
 /// A file edit conflict between two workers.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conflict {
     pub file: PathBuf,
     pub workers: Vec<String>,
@@ -31,6 +40,208 @@ pub struct OwnershipViolation {
     pub file: PathBuf,
     pub owned_files: Vec<PathBuf>,
     pub reason: String,
+}
+
+/// A static overlap in worker ownership before any worker starts editing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssignmentFileOverlap {
+    pub file: PathBuf,
+    pub workers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerFileClaim {
+    pub worker: String,
+    pub file: PathBuf,
+    pub operation: String,
+    pub conv_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerFileClaimConflict {
+    pub worker: String,
+    pub file: PathBuf,
+    pub holder: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerFileClaimReleaseFailure {
+    pub worker: String,
+    pub file: PathBuf,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkerFileClaimReport {
+    pub active_claims: Vec<WorkerFileClaim>,
+    pub local_overlaps: Vec<AssignmentFileOverlap>,
+    pub conflicts: Vec<WorkerFileClaimConflict>,
+    pub release_failures: Vec<WorkerFileClaimReleaseFailure>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerExecutionStatus {
+    Completed,
+    BlockedBeforeExecution,
+    WorkerFailed,
+    CompletedWithReviewFindings,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkerExecutionReport {
+    pub status: WorkerExecutionStatus,
+    pub reports: Vec<Report>,
+    pub claim_report: WorkerFileClaimReport,
+    pub conflicts: Vec<Conflict>,
+    pub ownership_violations: Vec<OwnershipViolation>,
+    pub release_failures: Vec<WorkerFileClaimReleaseFailure>,
+    pub execution_error: Option<String>,
+    pub trace_events: Vec<HarnessEvent>,
+}
+
+impl WorkerExecutionReport {
+    pub fn has_blockers(&self) -> bool {
+        self.status != WorkerExecutionStatus::Completed
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerPatchProposal {
+    pub worker: String,
+    pub files: Vec<PathBuf>,
+    pub summary: String,
+    pub verification_commands: Vec<String>,
+    pub operations: Vec<PatchOperation>,
+}
+
+impl WorkerPatchProposal {
+    pub fn new(worker: impl Into<String>, files: Vec<PathBuf>, summary: impl Into<String>) -> Self {
+        Self {
+            worker: worker.into(),
+            files,
+            summary: summary.into(),
+            verification_commands: Vec::new(),
+            operations: Vec::new(),
+        }
+    }
+
+    pub fn with_verification_commands(mut self, commands: Vec<String>) -> Self {
+        self.verification_commands = commands;
+        self
+    }
+
+    pub fn with_operations(mut self, operations: Vec<PatchOperation>) -> Self {
+        self.operations = operations;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerMergeStatus {
+    Approved,
+    RequiresParentReview,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerPatchDecision {
+    pub proposal: WorkerPatchProposal,
+    pub approved: bool,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerMergeReview {
+    pub status: WorkerMergeStatus,
+    pub decisions: Vec<WorkerPatchDecision>,
+    pub blockers: Vec<String>,
+}
+
+impl WorkerMergeReview {
+    pub fn has_blockers(&self) -> bool {
+        self.status == WorkerMergeStatus::Blocked || !self.blockers.is_empty()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkerPatchApplyReport {
+    pub applied: Vec<PatchResult>,
+    pub failures: Vec<WorkerPatchApplyFailure>,
+}
+
+impl WorkerPatchApplyReport {
+    pub fn passed(&self) -> bool {
+        self.failures.is_empty()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkerPatchApplyFailure {
+    pub worker: String,
+    pub operation: PatchOperationKind,
+    pub path: Option<PathBuf>,
+    pub message: String,
+    pub evidence: Option<crate::patch::PatchFailureEvidence>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerPatchPipelineStatus {
+    Applied,
+    Blocked,
+    ApplyFailed,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkerPatchPipelineReport {
+    pub status: WorkerPatchPipelineStatus,
+    pub execution: WorkerExecutionReport,
+    pub merge_review: WorkerMergeReview,
+    pub apply_report: WorkerPatchApplyReport,
+}
+
+impl WorkerPatchPipelineReport {
+    pub fn passed(&self) -> bool {
+        self.status == WorkerPatchPipelineStatus::Applied && self.apply_report.passed()
+    }
+}
+
+#[async_trait]
+pub trait FileClaimCoordinator: Send + Sync {
+    async fn claim_file(
+        &self,
+        agent_id: &str,
+        file_path: &str,
+        operation: &str,
+        conv_id: i64,
+    ) -> anyhow::Result<DeeplosslessFileClaimOutcome>;
+
+    async fn release_file(
+        &self,
+        agent_id: &str,
+        file_path: &str,
+    ) -> anyhow::Result<DeeplosslessFileReleaseOutcome>;
+}
+
+#[async_trait]
+impl FileClaimCoordinator for DeeplosslessProxy {
+    async fn claim_file(
+        &self,
+        agent_id: &str,
+        file_path: &str,
+        operation: &str,
+        conv_id: i64,
+    ) -> anyhow::Result<DeeplosslessFileClaimOutcome> {
+        DeeplosslessProxy::claim_file(self, agent_id, file_path, operation, conv_id).await
+    }
+
+    async fn release_file(
+        &self,
+        agent_id: &str,
+        file_path: &str,
+    ) -> anyhow::Result<DeeplosslessFileReleaseOutcome> {
+        DeeplosslessProxy::release_file(self, agent_id, file_path).await
+    }
 }
 
 /// Parent orchestrator: splits work, launches workers, detects conflicts, parent-review.
@@ -110,20 +321,237 @@ impl Orchestrator {
         let mut reports = Vec::new();
 
         for a in &assignments {
-            let task = crate::task::Task {
-                id: format!("worker-{}", a.worker_name),
-                source: "orchestrator".into(),
-                tool: "agent".into(),
-                arguments: serde_json::json!({
-                    "task": a.task_description,
-                }),
-            };
-
-            let report = Worker::execute(&self.runtime, &a.profile, task, None).await?;
-            reports.push(report);
+            reports.push(self.execute_assignment(a).await?);
         }
 
         Ok(reports)
+    }
+
+    /// Execute file-owned worker assignments under deeplossless file claims.
+    ///
+    /// This composes the production safety sequence for worker orchestration:
+    /// local overlap check, remote file claim, worker execution, parent-side
+    /// conflict/ownership review, and best-effort release. Worker execution
+    /// errors are returned inside the report so claim release failures are not
+    /// lost.
+    pub async fn execute_with_file_claims<C: FileClaimCoordinator>(
+        &self,
+        assignments: Vec<WorkerAssignment>,
+        coordinator: &C,
+        conv_id: i64,
+        operation: &str,
+    ) -> anyhow::Result<WorkerExecutionReport> {
+        self.execute_with_file_claims_mode(
+            assignments,
+            coordinator,
+            conv_id,
+            operation,
+            false,
+            None,
+        )
+        .await
+    }
+
+    /// Execute file-owned worker assignments concurrently under the same
+    /// claim/review/release contract as `execute_with_file_claims`.
+    ///
+    /// This is intended for independent read-only collection or review workers.
+    /// File claims are still acquired before any worker starts so parent-side
+    /// ownership remains explicit.
+    pub async fn execute_with_file_claims_concurrent<C: FileClaimCoordinator>(
+        &self,
+        assignments: Vec<WorkerAssignment>,
+        coordinator: &C,
+        conv_id: i64,
+        operation: &str,
+    ) -> anyhow::Result<WorkerExecutionReport> {
+        self.execute_with_file_claims_mode(assignments, coordinator, conv_id, operation, true, None)
+            .await
+    }
+
+    /// Execute workers for a coding session and tag parent-side worker trace
+    /// events with the session id.
+    pub async fn execute_session_workers_with_file_claims<C: FileClaimCoordinator>(
+        &self,
+        session_id: impl Into<String>,
+        assignments: Vec<WorkerAssignment>,
+        coordinator: &C,
+        conv_id: i64,
+        operation: &str,
+        concurrent: bool,
+    ) -> anyhow::Result<WorkerExecutionReport> {
+        let session_id = session_id.into();
+        self.execute_with_file_claims_mode(
+            assignments,
+            coordinator,
+            conv_id,
+            operation,
+            concurrent,
+            Some(session_id.as_str()),
+        )
+        .await
+    }
+
+    async fn execute_with_file_claims_mode<C: FileClaimCoordinator>(
+        &self,
+        assignments: Vec<WorkerAssignment>,
+        coordinator: &C,
+        conv_id: i64,
+        operation: &str,
+        concurrent: bool,
+        session_id: Option<&str>,
+    ) -> anyhow::Result<WorkerExecutionReport> {
+        let claim_report = self
+            .claim_worker_files(&assignments, coordinator, conv_id, operation)
+            .await?;
+        if !claim_report.local_overlaps.is_empty() || !claim_report.conflicts.is_empty() {
+            return Ok(WorkerExecutionReport {
+                status: WorkerExecutionStatus::BlockedBeforeExecution,
+                reports: Vec::new(),
+                release_failures: claim_report.release_failures.clone(),
+                claim_report,
+                conflicts: Vec::new(),
+                ownership_violations: Vec::new(),
+                execution_error: None,
+                trace_events: Vec::new(),
+            });
+        }
+
+        let (reports, execution_error, trace_events) = self
+            .execute_claimed_assignments(&assignments, concurrent, session_id)
+            .await;
+
+        let conflicts = self.detect_conflicts(&reports);
+        let ownership_violations = self.detect_ownership_violations(&assignments, &reports);
+        let mut release_failures = claim_report.release_failures.clone();
+        release_failures.extend(
+            self.release_worker_file_claims(&claim_report.active_claims, coordinator)
+                .await,
+        );
+
+        let status = if execution_error.is_some() {
+            WorkerExecutionStatus::WorkerFailed
+        } else if !conflicts.is_empty()
+            || !ownership_violations.is_empty()
+            || !release_failures.is_empty()
+        {
+            WorkerExecutionStatus::CompletedWithReviewFindings
+        } else {
+            WorkerExecutionStatus::Completed
+        };
+
+        Ok(WorkerExecutionReport {
+            status,
+            reports,
+            claim_report,
+            conflicts,
+            ownership_violations,
+            release_failures,
+            execution_error,
+            trace_events,
+        })
+    }
+
+    async fn execute_claimed_assignments(
+        &self,
+        assignments: &[WorkerAssignment],
+        concurrent: bool,
+        session_id: Option<&str>,
+    ) -> (Vec<Report>, Option<String>, Vec<HarnessEvent>) {
+        let session_id = session_id.map(str::to_string);
+        if concurrent {
+            let mut trace_events = assignments
+                .iter()
+                .map(|assignment| worker_started_event(assignment, session_id.clone()))
+                .collect::<Vec<_>>();
+            let results = futures::future::join_all(
+                assignments
+                    .iter()
+                    .map(|assignment| self.execute_assignment(assignment)),
+            )
+            .await;
+            let mut reports = Vec::new();
+            let mut execution_error = None;
+            for (assignment, result) in assignments.iter().zip(results) {
+                match result {
+                    Ok(report) => {
+                        trace_events.push(worker_completed_event(
+                            assignment,
+                            session_id.clone(),
+                            true,
+                            report.trace_events.len(),
+                        ));
+                        reports.push(report);
+                    }
+                    Err(error) if execution_error.is_none() => {
+                        trace_events.push(worker_completed_event(
+                            assignment,
+                            session_id.clone(),
+                            false,
+                            0,
+                        ));
+                        execution_error = Some(format!(
+                            "worker '{}' failed: {error}",
+                            assignment.worker_name
+                        ));
+                    }
+                    Err(_) => trace_events.push(worker_completed_event(
+                        assignment,
+                        session_id.clone(),
+                        false,
+                        0,
+                    )),
+                }
+            }
+            return (reports, execution_error, trace_events);
+        }
+
+        let mut reports = Vec::new();
+        let mut trace_events = Vec::new();
+        for assignment in assignments {
+            trace_events.push(worker_started_event(assignment, session_id.clone()));
+            match self.execute_assignment(assignment).await {
+                Ok(report) => {
+                    trace_events.push(worker_completed_event(
+                        assignment,
+                        session_id.clone(),
+                        true,
+                        report.trace_events.len(),
+                    ));
+                    reports.push(report);
+                }
+                Err(error) => {
+                    trace_events.push(worker_completed_event(
+                        assignment,
+                        session_id.clone(),
+                        false,
+                        0,
+                    ));
+                    return (
+                        reports,
+                        Some(format!(
+                            "worker '{}' failed: {error}",
+                            assignment.worker_name
+                        )),
+                        trace_events,
+                    );
+                }
+            }
+        }
+        (reports, None, trace_events)
+    }
+
+    async fn execute_assignment(&self, assignment: &WorkerAssignment) -> anyhow::Result<Report> {
+        let task = crate::task::Task {
+            id: worker_task_id(assignment),
+            source: "orchestrator".into(),
+            tool: "agent".into(),
+            arguments: serde_json::json!({
+                "task": assignment.task_description,
+            }),
+        };
+
+        Worker::execute(&self.runtime, &assignment.profile, task, None).await
     }
 
     /// Detect file edit conflicts across worker reports.
@@ -202,6 +630,414 @@ impl Orchestrator {
         }
 
         violations
+    }
+
+    /// Review worker patch proposals before the parent applies or merges them.
+    ///
+    /// This is intentionally a policy boundary only: workers can propose files
+    /// and verification commands, but the parent still owns actual patch
+    /// application through `PatchEngine`.
+    pub fn review_worker_patch_proposals(
+        &self,
+        assignments: &[WorkerAssignment],
+        execution: &WorkerExecutionReport,
+        proposals: Vec<WorkerPatchProposal>,
+    ) -> WorkerMergeReview {
+        let mut blockers = execution_blockers(execution);
+        let ownership: std::collections::BTreeMap<String, Vec<PathBuf>> = assignments
+            .iter()
+            .map(|assignment| {
+                (
+                    assignment.worker_name.clone(),
+                    normalize_owned_files(&assignment.owned_files),
+                )
+            })
+            .collect();
+
+        let mut decisions = Vec::new();
+        for mut proposal in proposals {
+            proposal.files = normalize_owned_files(&proposal.files);
+            let mut reasons = Vec::new();
+            if proposal.summary.trim().is_empty() {
+                reasons.push("proposal summary is empty".into());
+            }
+            if proposal.files.is_empty() {
+                reasons.push("proposal does not name any files".into());
+            }
+            if proposal.operations.is_empty() {
+                reasons.push("proposal does not include patch operations".into());
+            }
+            for operation in &proposal.operations {
+                let operation_path = normalize_path(&operation.path().to_path_buf());
+                if !proposal
+                    .files
+                    .iter()
+                    .any(|file| path_matches_owned(&operation_path, file))
+                {
+                    reasons.push(format!(
+                        "operation path {} is not listed in proposal files",
+                        operation_path.display()
+                    ));
+                }
+            }
+            match ownership.get(&proposal.worker) {
+                Some(owned_files) if owned_files.is_empty() => {
+                    reasons.push("worker has unscoped ownership; parent review required".into());
+                }
+                Some(owned_files) => {
+                    for file in &proposal.files {
+                        if !owned_files
+                            .iter()
+                            .any(|owned| path_matches_owned(file, owned))
+                        {
+                            reasons.push(format!(
+                                "file {} is outside worker ownership",
+                                file.display()
+                            ));
+                        }
+                    }
+                }
+                None => reasons.push("worker has no assignment".into()),
+            }
+
+            let approved = reasons.is_empty();
+            decisions.push(WorkerPatchDecision {
+                proposal,
+                approved,
+                reasons,
+            });
+        }
+
+        if decisions.is_empty() {
+            blockers.push("no worker patch proposals submitted".into());
+        }
+
+        let status = if execution.status == WorkerExecutionStatus::WorkerFailed
+            || execution.status == WorkerExecutionStatus::BlockedBeforeExecution
+            || !execution.conflicts.is_empty()
+            || !execution.claim_report.local_overlaps.is_empty()
+            || !execution.claim_report.conflicts.is_empty()
+        {
+            WorkerMergeStatus::Blocked
+        } else if !blockers.is_empty() || decisions.iter().any(|decision| !decision.approved) {
+            WorkerMergeStatus::RequiresParentReview
+        } else {
+            WorkerMergeStatus::Approved
+        };
+
+        WorkerMergeReview {
+            status,
+            decisions,
+            blockers,
+        }
+    }
+
+    /// Apply approved worker patch proposals through `PatchEngine`.
+    ///
+    /// This method deliberately refuses non-approved reviews. It performs the
+    /// parent-owned application step, while PatchEngine enforces read-before-
+    /// write, stale reads, path safety, encoding, and line-ending behavior.
+    pub fn apply_worker_patch_review(
+        &self,
+        engine: &mut PatchEngine,
+        review: &WorkerMergeReview,
+    ) -> WorkerPatchApplyReport {
+        if review.status != WorkerMergeStatus::Approved
+            || review.decisions.iter().any(|decision| !decision.approved)
+        {
+            return WorkerPatchApplyReport {
+                applied: Vec::new(),
+                failures: vec![WorkerPatchApplyFailure {
+                    worker: "orchestrator".into(),
+                    operation: PatchOperationKind::Read,
+                    path: None,
+                    message: "worker merge review is not approved".into(),
+                    evidence: None,
+                }],
+            };
+        }
+
+        let mut applied = Vec::new();
+        let mut failures = Vec::new();
+        for decision in &review.decisions {
+            for operation in &decision.proposal.operations {
+                if operation.kind() != PatchOperationKind::CreateFile {
+                    if let Err(error) = engine.read(operation.path()) {
+                        failures.push(WorkerPatchApplyFailure {
+                            worker: decision.proposal.worker.clone(),
+                            operation: PatchOperationKind::Read,
+                            path: Some(operation.path().to_path_buf()),
+                            message: error.to_string(),
+                            evidence: Some(crate::patch::PatchFailureEvidence::from_error(
+                                PatchOperationKind::Read,
+                                Some(operation.path().to_path_buf()),
+                                &error,
+                            )),
+                        });
+                        continue;
+                    }
+                }
+
+                match engine.apply_operation(operation.clone()) {
+                    Ok(result) => applied.push(result),
+                    Err(failure) => {
+                        failures.push(apply_failure_from_patch(&decision.proposal.worker, failure))
+                    }
+                }
+            }
+        }
+
+        WorkerPatchApplyReport { applied, failures }
+    }
+
+    /// Execute workers, review their patch proposals, and apply approved
+    /// operations through `PatchEngine`.
+    ///
+    /// This is the production-safe orchestration entrypoint for worker-owned
+    /// patches: execution must be clean, merge review must approve every
+    /// proposal, and actual file writes go through PatchEngine.
+    pub async fn execute_worker_patch_pipeline<C: FileClaimCoordinator>(
+        &self,
+        assignments: Vec<WorkerAssignment>,
+        coordinator: &C,
+        conv_id: i64,
+        operation: &str,
+        concurrent: bool,
+        proposals: Vec<WorkerPatchProposal>,
+        engine: &mut PatchEngine,
+    ) -> anyhow::Result<WorkerPatchPipelineReport> {
+        self.execute_worker_patch_pipeline_mode(
+            None,
+            assignments,
+            coordinator,
+            conv_id,
+            operation,
+            concurrent,
+            proposals,
+            engine,
+        )
+        .await
+    }
+
+    pub async fn execute_session_worker_patch_pipeline<C: FileClaimCoordinator>(
+        &self,
+        session_id: impl Into<String>,
+        assignments: Vec<WorkerAssignment>,
+        coordinator: &C,
+        conv_id: i64,
+        operation: &str,
+        concurrent: bool,
+        proposals: Vec<WorkerPatchProposal>,
+        engine: &mut PatchEngine,
+    ) -> anyhow::Result<WorkerPatchPipelineReport> {
+        self.execute_worker_patch_pipeline_mode(
+            Some(session_id.into()),
+            assignments,
+            coordinator,
+            conv_id,
+            operation,
+            concurrent,
+            proposals,
+            engine,
+        )
+        .await
+    }
+
+    async fn execute_worker_patch_pipeline_mode<C: FileClaimCoordinator>(
+        &self,
+        session_id: Option<String>,
+        assignments: Vec<WorkerAssignment>,
+        coordinator: &C,
+        conv_id: i64,
+        operation: &str,
+        concurrent: bool,
+        proposals: Vec<WorkerPatchProposal>,
+        engine: &mut PatchEngine,
+    ) -> anyhow::Result<WorkerPatchPipelineReport> {
+        let execution = self
+            .execute_with_file_claims_mode(
+                assignments.clone(),
+                coordinator,
+                conv_id,
+                operation,
+                concurrent,
+                session_id.as_deref(),
+            )
+            .await?;
+        let merge_review = self.review_worker_patch_proposals(&assignments, &execution, proposals);
+        let apply_report = if merge_review.status == WorkerMergeStatus::Approved {
+            self.apply_worker_patch_review(engine, &merge_review)
+        } else {
+            WorkerPatchApplyReport {
+                applied: Vec::new(),
+                failures: Vec::new(),
+            }
+        };
+        let status = if merge_review.status != WorkerMergeStatus::Approved {
+            WorkerPatchPipelineStatus::Blocked
+        } else if apply_report.passed() {
+            WorkerPatchPipelineStatus::Applied
+        } else {
+            WorkerPatchPipelineStatus::ApplyFailed
+        };
+
+        Ok(WorkerPatchPipelineReport {
+            status,
+            execution,
+            merge_review,
+            apply_report,
+        })
+    }
+
+    /// Detect duplicate or nested file ownership before workers start.
+    ///
+    /// deeplossless rejects conflicts across conversations. Within one
+    /// conversation, Zhongshu still needs this local check so two workers do
+    /// not claim overlapping ownership and race each other.
+    pub fn detect_assignment_file_overlaps(
+        &self,
+        assignments: &[WorkerAssignment],
+    ) -> Vec<AssignmentFileOverlap> {
+        let mut overlaps: std::collections::BTreeMap<PathBuf, Vec<String>> =
+            std::collections::BTreeMap::new();
+
+        for (left_index, left) in assignments.iter().enumerate() {
+            let left_files = normalize_owned_files(&left.owned_files);
+            if left_files.is_empty() {
+                continue;
+            }
+
+            for right in assignments.iter().skip(left_index + 1) {
+                let right_files = normalize_owned_files(&right.owned_files);
+                if right_files.is_empty() {
+                    continue;
+                }
+
+                for left_file in &left_files {
+                    for right_file in &right_files {
+                        if paths_overlap(left_file, right_file) {
+                            let file = overlap_key(left_file, right_file);
+                            let workers = overlaps.entry(file).or_default();
+                            workers.push(left.worker_name.clone());
+                            workers.push(right.worker_name.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        overlaps
+            .into_iter()
+            .map(|(file, mut workers)| {
+                workers.sort();
+                workers.dedup();
+                AssignmentFileOverlap { file, workers }
+            })
+            .collect()
+    }
+
+    /// Claim every assigned file before worker execution.
+    ///
+    /// On the first remote conflict, claims acquired during this call are
+    /// released before returning so the caller never receives a partial active
+    /// claim set.
+    pub async fn claim_worker_files<C: FileClaimCoordinator>(
+        &self,
+        assignments: &[WorkerAssignment],
+        coordinator: &C,
+        conv_id: i64,
+        operation: &str,
+    ) -> anyhow::Result<WorkerFileClaimReport> {
+        if conv_id <= 0 {
+            return Err(anyhow::anyhow!("conv_id must be positive"));
+        }
+        if operation.trim().is_empty() {
+            return Err(anyhow::anyhow!("operation must not be empty"));
+        }
+
+        let local_overlaps = self.detect_assignment_file_overlaps(assignments);
+        if !local_overlaps.is_empty() {
+            return Ok(WorkerFileClaimReport {
+                local_overlaps,
+                ..WorkerFileClaimReport::default()
+            });
+        }
+
+        let mut active_claims = Vec::new();
+        let mut conflicts = Vec::new();
+        let mut release_failures = Vec::new();
+
+        for assignment in assignments {
+            for file in normalize_owned_files(&assignment.owned_files) {
+                let file_path = file.to_string_lossy().to_string();
+                match coordinator
+                    .claim_file(&assignment.worker_name, &file_path, operation, conv_id)
+                    .await?
+                {
+                    DeeplosslessFileClaimOutcome::Claimed { .. } => {
+                        active_claims.push(WorkerFileClaim {
+                            worker: assignment.worker_name.clone(),
+                            file,
+                            operation: operation.to_string(),
+                            conv_id,
+                        });
+                    }
+                    DeeplosslessFileClaimOutcome::Conflict { conflict } => {
+                        conflicts.push(WorkerFileClaimConflict {
+                            worker: assignment.worker_name.clone(),
+                            file,
+                            holder: conflict.agent_id,
+                            message: conflict.message,
+                        });
+                        release_failures.extend(
+                            self.release_worker_file_claims(&active_claims, coordinator)
+                                .await,
+                        );
+                        active_claims.clear();
+                        return Ok(WorkerFileClaimReport {
+                            active_claims,
+                            local_overlaps: Vec::new(),
+                            conflicts,
+                            release_failures,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(WorkerFileClaimReport {
+            active_claims,
+            local_overlaps: Vec::new(),
+            conflicts,
+            release_failures,
+        })
+    }
+
+    pub async fn release_worker_file_claims<C: FileClaimCoordinator>(
+        &self,
+        claims: &[WorkerFileClaim],
+        coordinator: &C,
+    ) -> Vec<WorkerFileClaimReleaseFailure> {
+        let mut failures = Vec::new();
+        for claim in claims {
+            let file_path = claim.file.to_string_lossy().to_string();
+            match coordinator.release_file(&claim.worker, &file_path).await {
+                Ok(DeeplosslessFileReleaseOutcome::Released { .. }) => {}
+                Ok(DeeplosslessFileReleaseOutcome::Missing { missing }) => {
+                    failures.push(WorkerFileClaimReleaseFailure {
+                        worker: claim.worker.clone(),
+                        file: claim.file.clone(),
+                        message: missing.message,
+                    });
+                }
+                Err(error) => failures.push(WorkerFileClaimReleaseFailure {
+                    worker: claim.worker.clone(),
+                    file: claim.file.clone(),
+                    message: error.to_string(),
+                }),
+            }
+        }
+        failures
     }
 
     /// Parent review: unify worker reports into a single coherent report.
@@ -307,6 +1143,90 @@ fn normalize_owned_files(files: &[PathBuf]) -> Vec<PathBuf> {
     normalized
 }
 
+fn worker_started_event(assignment: &WorkerAssignment, session_id: Option<String>) -> HarnessEvent {
+    HarnessEvent::WorkerStarted {
+        session_id,
+        worker: assignment.worker_name.clone(),
+        task_id: worker_task_id(assignment),
+        owned_files: normalize_owned_files(&assignment.owned_files),
+    }
+}
+
+fn worker_completed_event(
+    assignment: &WorkerAssignment,
+    session_id: Option<String>,
+    success: bool,
+    trace_event_count: usize,
+) -> HarnessEvent {
+    HarnessEvent::WorkerCompleted {
+        session_id,
+        worker: assignment.worker_name.clone(),
+        task_id: worker_task_id(assignment),
+        success,
+        trace_event_count,
+    }
+}
+
+fn worker_task_id(assignment: &WorkerAssignment) -> String {
+    format!("worker-{}", assignment.worker_name)
+}
+
+fn execution_blockers(execution: &WorkerExecutionReport) -> Vec<String> {
+    let mut blockers = Vec::new();
+    if let Some(error) = &execution.execution_error {
+        blockers.push(error.clone());
+    }
+    for overlap in &execution.claim_report.local_overlaps {
+        blockers.push(format!(
+            "assignment overlap on {} between {}",
+            overlap.file.display(),
+            overlap.workers.join(", ")
+        ));
+    }
+    for conflict in &execution.claim_report.conflicts {
+        blockers.push(format!(
+            "file claim conflict on {} held by {}: {}",
+            conflict.file.display(),
+            conflict.holder.as_deref().unwrap_or("unknown"),
+            conflict.message
+        ));
+    }
+    for conflict in &execution.conflicts {
+        blockers.push(format!(
+            "worker edit conflict on {} between {}",
+            conflict.file.display(),
+            conflict.workers.join(", ")
+        ));
+    }
+    for violation in &execution.ownership_violations {
+        blockers.push(format!(
+            "worker {} edited {} outside ownership: {}",
+            violation.worker,
+            violation.file.display(),
+            violation.reason
+        ));
+    }
+    for failure in &execution.release_failures {
+        blockers.push(format!(
+            "failed to release claim for {} on {}: {}",
+            failure.worker,
+            failure.file.display(),
+            failure.message
+        ));
+    }
+    blockers
+}
+
+fn apply_failure_from_patch(worker: &str, failure: PatchAttemptFailure) -> WorkerPatchApplyFailure {
+    WorkerPatchApplyFailure {
+        worker: worker.to_string(),
+        operation: failure.evidence.operation,
+        path: failure.evidence.path.clone(),
+        message: failure.error.to_string(),
+        evidence: Some(failure.evidence),
+    }
+}
+
 fn normalize_path(path: &PathBuf) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
@@ -325,6 +1245,18 @@ fn path_matches_owned(file: &PathBuf, owned: &PathBuf) -> bool {
     file == owned || file.starts_with(owned)
 }
 
+fn paths_overlap(left: &PathBuf, right: &PathBuf) -> bool {
+    path_matches_owned(left, right) || path_matches_owned(right, left)
+}
+
+fn overlap_key(left: &PathBuf, right: &PathBuf) -> PathBuf {
+    if left.components().count() <= right.components().count() {
+        left.clone()
+    } else {
+        right.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,9 +1265,24 @@ mod tests {
     use crate::harness::architecture::index::FileIndex;
     use crate::tool::ToolRegistry;
     use async_trait::async_trait;
+    use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::time::Duration;
 
     struct MockProvider;
+    #[derive(Clone)]
+    struct ConcurrentMockProvider {
+        in_flight: Arc<AtomicUsize>,
+        max_in_flight: Arc<AtomicUsize>,
+    }
+    struct MockFileClaimCoordinator {
+        conflict_files: BTreeSet<String>,
+        missing_releases: BTreeSet<String>,
+        claimed: Mutex<Vec<(String, String)>>,
+        released: Mutex<Vec<(String, String)>>,
+    }
 
     #[async_trait]
     impl LlmProvider for MockProvider {
@@ -364,6 +1311,136 @@ mod tests {
         fn change_model(&self, _model: &str) -> Arc<dyn LlmProvider> {
             Arc::new(MockProvider)
         }
+    }
+
+    #[async_trait]
+    impl LlmProvider for ConcurrentMockProvider {
+        async fn chat(
+            &self,
+            _request: ChatCompletionRequest,
+        ) -> anyhow::Result<ChatCompletionResponse> {
+            let current = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_in_flight.fetch_max(current, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(ChatCompletionResponse {
+                choices: vec![FinalChoice {
+                    message: Message::assistant("worker done"),
+                    finish_reason: Some("stop".into()),
+                }],
+                usage: None,
+            })
+        }
+
+        async fn stream_chat(
+            &self,
+            _request: ChatCompletionRequest,
+            mut _on_event: Box<dyn FnMut(crate::agent::llm::StreamEvent) + Send>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn model_name(&self) -> &str {
+            "concurrent-mock"
+        }
+
+        fn change_model(&self, _model: &str) -> Arc<dyn LlmProvider> {
+            Arc::new(self.clone())
+        }
+    }
+
+    impl MockFileClaimCoordinator {
+        fn new() -> Self {
+            Self {
+                conflict_files: BTreeSet::new(),
+                missing_releases: BTreeSet::new(),
+                claimed: Mutex::new(Vec::new()),
+                released: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn with_conflict(mut self, file_path: &str) -> Self {
+            self.conflict_files.insert(test_file_key(file_path));
+            self
+        }
+
+        fn with_missing_release(mut self, file_path: &str) -> Self {
+            self.missing_releases.insert(test_file_key(file_path));
+            self
+        }
+
+        fn claimed(&self) -> Vec<(String, String)> {
+            self.claimed.lock().unwrap().clone()
+        }
+
+        fn released(&self) -> Vec<(String, String)> {
+            self.released.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl FileClaimCoordinator for MockFileClaimCoordinator {
+        async fn claim_file(
+            &self,
+            agent_id: &str,
+            file_path: &str,
+            _operation: &str,
+            conv_id: i64,
+        ) -> anyhow::Result<DeeplosslessFileClaimOutcome> {
+            let file_key = test_file_key(file_path);
+            if self.conflict_files.contains(&file_key) {
+                return Ok(DeeplosslessFileClaimOutcome::Conflict {
+                    conflict: crate::integration::DeeplosslessFileClaimConflict {
+                        file_path: file_key,
+                        agent_id: Some("remote-worker".into()),
+                        message: "remote conflict".into(),
+                    },
+                });
+            }
+            self.claimed
+                .lock()
+                .unwrap()
+                .push((agent_id.to_string(), file_key.clone()));
+            Ok(DeeplosslessFileClaimOutcome::Claimed {
+                claim: crate::integration::DeeplosslessFileClaimResult {
+                    status: "claimed".into(),
+                    agent_id: agent_id.to_string(),
+                    file_path: file_key,
+                    conv_id,
+                },
+            })
+        }
+
+        async fn release_file(
+            &self,
+            agent_id: &str,
+            file_path: &str,
+        ) -> anyhow::Result<DeeplosslessFileReleaseOutcome> {
+            let file_key = test_file_key(file_path);
+            self.released
+                .lock()
+                .unwrap()
+                .push((agent_id.to_string(), file_key.clone()));
+            if self.missing_releases.contains(&file_key) {
+                return Ok(DeeplosslessFileReleaseOutcome::Missing {
+                    missing: crate::integration::DeeplosslessFileReleaseMissing {
+                        agent_id: agent_id.to_string(),
+                        file_path: file_key,
+                        message: "missing claim".into(),
+                    },
+                });
+            }
+            Ok(DeeplosslessFileReleaseOutcome::Released {
+                release: crate::integration::DeeplosslessFileReleaseResult {
+                    status: "released".into(),
+                    file_path: file_key,
+                },
+            })
+        }
+    }
+
+    fn test_file_key(file_path: &str) -> String {
+        file_path.replace('/', "\\")
     }
 
     fn dummy_profile(name: &str) -> AgentProfile {
@@ -399,6 +1476,19 @@ mod tests {
             );
         }
         index
+    }
+
+    fn completed_execution() -> WorkerExecutionReport {
+        WorkerExecutionReport {
+            status: WorkerExecutionStatus::Completed,
+            reports: Vec::new(),
+            claim_report: WorkerFileClaimReport::default(),
+            conflicts: Vec::new(),
+            ownership_violations: Vec::new(),
+            release_failures: Vec::new(),
+            execution_error: None,
+            trace_events: Vec::new(),
+        }
     }
 
     #[test]
@@ -617,6 +1707,566 @@ mod tests {
 
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].reason, "worker has no assignment");
+    }
+
+    #[test]
+    fn merge_review_approves_owned_patch_proposal() {
+        let assignment = WorkerAssignment {
+            worker_name: "w1".into(),
+            task_description: "edit owned".into(),
+            owned_files: vec![PathBuf::from("src/a.rs")],
+            profile: dummy_profile("w1"),
+        };
+        let proposal =
+            WorkerPatchProposal::new("w1", vec![PathBuf::from("src/a.rs")], "update owned file")
+                .with_verification_commands(vec!["cargo test -p zhongshu-core".into()])
+                .with_operations(vec![PatchOperation::Replace(
+                    crate::patch::ReplaceRequest::once("src/a.rs", "old", "new"),
+                )]);
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+
+        let review = orch.review_worker_patch_proposals(
+            &[assignment],
+            &completed_execution(),
+            vec![proposal],
+        );
+
+        assert_eq!(review.status, WorkerMergeStatus::Approved);
+        assert!(review.blockers.is_empty());
+        assert_eq!(review.decisions.len(), 1);
+        assert!(review.decisions[0].approved);
+    }
+
+    #[test]
+    fn merge_review_requires_parent_review_for_out_of_scope_patch() {
+        let assignment = WorkerAssignment {
+            worker_name: "w1".into(),
+            task_description: "edit owned".into(),
+            owned_files: vec![PathBuf::from("src/a.rs")],
+            profile: dummy_profile("w1"),
+        };
+        let proposal =
+            WorkerPatchProposal::new("w1", vec![PathBuf::from("src/b.rs")], "edit other file")
+                .with_operations(vec![PatchOperation::Replace(
+                    crate::patch::ReplaceRequest::once("src/b.rs", "old", "new"),
+                )]);
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+
+        let review = orch.review_worker_patch_proposals(
+            &[assignment],
+            &completed_execution(),
+            vec![proposal],
+        );
+
+        assert_eq!(review.status, WorkerMergeStatus::RequiresParentReview);
+        assert_eq!(review.decisions.len(), 1);
+        assert!(!review.decisions[0].approved);
+        assert!(review.decisions[0]
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("outside worker ownership")));
+    }
+
+    #[test]
+    fn merge_review_blocks_when_worker_execution_conflicted() {
+        let assignment = WorkerAssignment {
+            worker_name: "w1".into(),
+            task_description: "edit owned".into(),
+            owned_files: vec![PathBuf::from("src/a.rs")],
+            profile: dummy_profile("w1"),
+        };
+        let mut execution = completed_execution();
+        execution.status = WorkerExecutionStatus::CompletedWithReviewFindings;
+        execution.conflicts = vec![Conflict {
+            file: PathBuf::from("src/a.rs"),
+            workers: vec!["w1".into(), "w2".into()],
+        }];
+        let proposal =
+            WorkerPatchProposal::new("w1", vec![PathBuf::from("src/a.rs")], "edit owned file")
+                .with_operations(vec![PatchOperation::Replace(
+                    crate::patch::ReplaceRequest::once("src/a.rs", "old", "new"),
+                )]);
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+
+        let review = orch.review_worker_patch_proposals(&[assignment], &execution, vec![proposal]);
+
+        assert_eq!(review.status, WorkerMergeStatus::Blocked);
+        assert!(review.has_blockers());
+        assert!(review
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("worker edit conflict")));
+    }
+
+    #[test]
+    fn merge_review_requires_parent_review_without_patch_operations() {
+        let assignment = WorkerAssignment {
+            worker_name: "w1".into(),
+            task_description: "edit owned".into(),
+            owned_files: vec![PathBuf::from("src/a.rs")],
+            profile: dummy_profile("w1"),
+        };
+        let proposal =
+            WorkerPatchProposal::new("w1", vec![PathBuf::from("src/a.rs")], "summary only");
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+
+        let review = orch.review_worker_patch_proposals(
+            &[assignment],
+            &completed_execution(),
+            vec![proposal],
+        );
+
+        assert_eq!(review.status, WorkerMergeStatus::RequiresParentReview);
+        assert!(!review.decisions[0].approved);
+        assert!(review.decisions[0]
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("patch operations")));
+    }
+
+    #[test]
+    fn apply_worker_patch_review_applies_approved_operations() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let src = temp.path().join("src");
+        std::fs::create_dir(&src).expect("create src");
+        std::fs::write(src.join("a.rs"), "old\n").expect("write file");
+        let mut engine = PatchEngine::new(temp.path()).expect("patch engine");
+        let assignment = WorkerAssignment {
+            worker_name: "w1".into(),
+            task_description: "edit owned".into(),
+            owned_files: vec![PathBuf::from("src/a.rs")],
+            profile: dummy_profile("w1"),
+        };
+        let proposal =
+            WorkerPatchProposal::new("w1", vec![PathBuf::from("src/a.rs")], "update owned file")
+                .with_operations(vec![PatchOperation::Replace(
+                    crate::patch::ReplaceRequest::once("src/a.rs", "old", "new"),
+                )]);
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+        let review = orch.review_worker_patch_proposals(
+            &[assignment],
+            &completed_execution(),
+            vec![proposal],
+        );
+
+        let report = orch.apply_worker_patch_review(&mut engine, &review);
+
+        assert!(report.passed());
+        assert_eq!(report.applied.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(src.join("a.rs")).expect("read file"),
+            "new\n"
+        );
+    }
+
+    #[test]
+    fn apply_worker_patch_review_refuses_unapproved_review() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("a.rs"), "old\n").expect("write file");
+        let mut engine = PatchEngine::new(temp.path()).expect("patch engine");
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+        let review = WorkerMergeReview {
+            status: WorkerMergeStatus::RequiresParentReview,
+            decisions: Vec::new(),
+            blockers: Vec::new(),
+        };
+
+        let report = orch.apply_worker_patch_review(&mut engine, &review);
+
+        assert!(!report.passed());
+        assert_eq!(report.failures.len(), 1);
+        assert!(report.failures[0].message.contains("not approved"));
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("a.rs")).expect("read file"),
+            "old\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_patch_pipeline_applies_approved_worker_patch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let src = temp.path().join("src");
+        std::fs::create_dir(&src).expect("create src");
+        std::fs::write(src.join("a.rs"), "old\n").expect("write file");
+        let mut engine = PatchEngine::new(temp.path()).expect("patch engine");
+        let assignments = vec![WorkerAssignment {
+            worker_name: "w1".into(),
+            task_description: "edit owned".into(),
+            owned_files: vec![PathBuf::from("src/a.rs")],
+            profile: dummy_profile("w1"),
+        }];
+        let proposals = vec![WorkerPatchProposal::new(
+            "w1",
+            vec![PathBuf::from("src/a.rs")],
+            "update owned file",
+        )
+        .with_operations(vec![PatchOperation::Replace(
+            crate::patch::ReplaceRequest::once("src/a.rs", "old", "new"),
+        )])];
+        let coordinator = MockFileClaimCoordinator::new();
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+
+        let report = orch
+            .execute_worker_patch_pipeline(
+                assignments,
+                &coordinator,
+                7,
+                "edit",
+                false,
+                proposals,
+                &mut engine,
+            )
+            .await
+            .expect("worker patch pipeline");
+
+        assert_eq!(report.status, WorkerPatchPipelineStatus::Applied);
+        assert!(report.passed());
+        assert_eq!(report.apply_report.applied.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(src.join("a.rs")).expect("read file"),
+            "new\n"
+        );
+        assert_eq!(
+            coordinator.released(),
+            vec![("w1".into(), "src\\a.rs".into())]
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_patch_pipeline_blocks_unapproved_patch_without_writing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let src = temp.path().join("src");
+        std::fs::create_dir(&src).expect("create src");
+        std::fs::write(src.join("a.rs"), "old\n").expect("write file");
+        let mut engine = PatchEngine::new(temp.path()).expect("patch engine");
+        let assignments = vec![WorkerAssignment {
+            worker_name: "w1".into(),
+            task_description: "edit owned".into(),
+            owned_files: vec![PathBuf::from("src/a.rs")],
+            profile: dummy_profile("w1"),
+        }];
+        let proposals = vec![WorkerPatchProposal::new(
+            "w1",
+            vec![PathBuf::from("src/b.rs")],
+            "edit other file",
+        )
+        .with_operations(vec![PatchOperation::Replace(
+            crate::patch::ReplaceRequest::once("src/b.rs", "old", "new"),
+        )])];
+        let coordinator = MockFileClaimCoordinator::new();
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+
+        let report = orch
+            .execute_worker_patch_pipeline(
+                assignments,
+                &coordinator,
+                7,
+                "edit",
+                false,
+                proposals,
+                &mut engine,
+            )
+            .await
+            .expect("worker patch pipeline");
+
+        assert_eq!(report.status, WorkerPatchPipelineStatus::Blocked);
+        assert_eq!(
+            report.merge_review.status,
+            WorkerMergeStatus::RequiresParentReview
+        );
+        assert!(report.apply_report.applied.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(src.join("a.rs")).expect("read file"),
+            "old\n"
+        );
+    }
+
+    #[test]
+    fn detects_assignment_file_overlaps_before_remote_claims() {
+        let assignments = vec![
+            WorkerAssignment {
+                worker_name: "w1".into(),
+                task_description: "edit".into(),
+                owned_files: vec![PathBuf::from("src")],
+                profile: dummy_profile("w1"),
+            },
+            WorkerAssignment {
+                worker_name: "w2".into(),
+                task_description: "edit".into(),
+                owned_files: vec![PathBuf::from("src/a.rs")],
+                profile: dummy_profile("w2"),
+            },
+        ];
+
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+        let overlaps = orch.detect_assignment_file_overlaps(&assignments);
+
+        assert_eq!(overlaps.len(), 1);
+        assert_eq!(overlaps[0].file, PathBuf::from("src"));
+        assert_eq!(overlaps[0].workers, vec!["w1", "w2"]);
+    }
+
+    #[tokio::test]
+    async fn claim_worker_files_claims_each_owned_file() {
+        let assignments = vec![
+            WorkerAssignment {
+                worker_name: "w1".into(),
+                task_description: "edit".into(),
+                owned_files: vec![PathBuf::from("src/a.rs")],
+                profile: dummy_profile("w1"),
+            },
+            WorkerAssignment {
+                worker_name: "w2".into(),
+                task_description: "edit".into(),
+                owned_files: vec![PathBuf::from("src/b.rs")],
+                profile: dummy_profile("w2"),
+            },
+        ];
+        let coordinator = MockFileClaimCoordinator::new();
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+
+        let report = orch
+            .claim_worker_files(&assignments, &coordinator, 7, "edit")
+            .await
+            .expect("claim worker files");
+
+        assert_eq!(report.active_claims.len(), 2);
+        assert!(report.conflicts.is_empty());
+        assert!(report.local_overlaps.is_empty());
+        assert_eq!(
+            coordinator.claimed(),
+            vec![
+                ("w1".into(), "src\\a.rs".into()),
+                ("w2".into(), "src\\b.rs".into())
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_worker_files_releases_acquired_claims_on_conflict() {
+        let assignments = vec![
+            WorkerAssignment {
+                worker_name: "w1".into(),
+                task_description: "edit".into(),
+                owned_files: vec![PathBuf::from("src/a.rs")],
+                profile: dummy_profile("w1"),
+            },
+            WorkerAssignment {
+                worker_name: "w2".into(),
+                task_description: "edit".into(),
+                owned_files: vec![PathBuf::from("src/b.rs")],
+                profile: dummy_profile("w2"),
+            },
+        ];
+        let coordinator = MockFileClaimCoordinator::new().with_conflict("src\\b.rs");
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+
+        let report = orch
+            .claim_worker_files(&assignments, &coordinator, 7, "edit")
+            .await
+            .expect("claim worker files");
+
+        assert!(report.active_claims.is_empty());
+        assert_eq!(report.conflicts.len(), 1);
+        assert_eq!(report.conflicts[0].holder.as_deref(), Some("remote-worker"));
+        assert_eq!(
+            coordinator.released(),
+            vec![("w1".into(), "src\\a.rs".into())]
+        );
+    }
+
+    #[tokio::test]
+    async fn release_worker_file_claims_reports_missing_claims() {
+        let coordinator = MockFileClaimCoordinator::new().with_missing_release("src\\a.rs");
+        let claims = vec![WorkerFileClaim {
+            worker: "w1".into(),
+            file: PathBuf::from("src/a.rs"),
+            operation: "edit".into(),
+            conv_id: 7,
+        }];
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+
+        let failures = orch.release_worker_file_claims(&claims, &coordinator).await;
+
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].message, "missing claim");
+    }
+
+    #[tokio::test]
+    async fn execute_with_file_claims_runs_workers_and_releases_claims() {
+        let assignments = vec![WorkerAssignment {
+            worker_name: "w1".into(),
+            task_description: "inspect".into(),
+            owned_files: vec![PathBuf::from("src/a.rs")],
+            profile: dummy_profile("w1"),
+        }];
+        let coordinator = MockFileClaimCoordinator::new();
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+
+        let report = orch
+            .execute_with_file_claims(assignments, &coordinator, 7, "read")
+            .await
+            .expect("execute with file claims");
+
+        assert_eq!(report.status, WorkerExecutionStatus::Completed);
+        assert!(!report.has_blockers());
+        assert_eq!(report.reports.len(), 1);
+        assert_eq!(report.claim_report.active_claims.len(), 1);
+        assert_eq!(
+            coordinator.released(),
+            vec![("w1".into(), "src\\a.rs".into())]
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_with_file_claims_concurrent_runs_workers_in_parallel() {
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let runtime = AgentRuntime::new(
+            ConcurrentMockProvider {
+                in_flight: in_flight.clone(),
+                max_in_flight: max_in_flight.clone(),
+            },
+            ToolRegistry::new(),
+            "mock-model",
+            AgentBudget::default(),
+        );
+        let assignments = vec![
+            WorkerAssignment {
+                worker_name: "w1".into(),
+                task_description: "inspect a".into(),
+                owned_files: vec![PathBuf::from("src/a.rs")],
+                profile: dummy_profile("w1"),
+            },
+            WorkerAssignment {
+                worker_name: "w2".into(),
+                task_description: "inspect b".into(),
+                owned_files: vec![PathBuf::from("src/b.rs")],
+                profile: dummy_profile("w2"),
+            },
+        ];
+        let coordinator = MockFileClaimCoordinator::new();
+        let orch = Orchestrator::new(runtime, LlmRegistry::new());
+
+        let report = orch
+            .execute_with_file_claims_concurrent(assignments, &coordinator, 7, "read")
+            .await
+            .expect("execute with file claims");
+
+        assert_eq!(report.status, WorkerExecutionStatus::Completed);
+        assert_eq!(report.reports.len(), 2);
+        assert_eq!(report.trace_events.len(), 4);
+        assert!(
+            max_in_flight.load(Ordering::SeqCst) >= 2,
+            "workers should overlap in-flight execution"
+        );
+        assert_eq!(
+            coordinator.released(),
+            vec![
+                ("w1".into(), "src\\a.rs".into()),
+                ("w2".into(), "src\\b.rs".into())
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_session_workers_with_file_claims_tags_worker_trace() {
+        let assignments = vec![WorkerAssignment {
+            worker_name: "w1".into(),
+            task_description: "inspect".into(),
+            owned_files: vec![PathBuf::from("src/a.rs")],
+            profile: dummy_profile("w1"),
+        }];
+        let coordinator = MockFileClaimCoordinator::new();
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+
+        let report = orch
+            .execute_session_workers_with_file_claims(
+                "session-1",
+                assignments,
+                &coordinator,
+                7,
+                "read",
+                false,
+            )
+            .await
+            .expect("execute session workers");
+
+        assert_eq!(report.status, WorkerExecutionStatus::Completed);
+        assert!(matches!(
+            report.trace_events.first(),
+            Some(HarnessEvent::WorkerStarted {
+                session_id,
+                worker,
+                task_id,
+                owned_files,
+            }) if session_id.as_deref() == Some("session-1")
+                && worker == "w1"
+                && task_id == "worker-w1"
+                && owned_files == &vec![PathBuf::from("src/a.rs")]
+        ));
+        assert!(matches!(
+            report.trace_events.get(1),
+            Some(HarnessEvent::WorkerCompleted {
+                session_id,
+                worker,
+                task_id,
+                success: true,
+                trace_event_count,
+            }) if session_id.as_deref() == Some("session-1")
+                && worker == "w1"
+                && task_id == "worker-w1"
+                && *trace_event_count > 0
+        ));
+    }
+
+    #[tokio::test]
+    async fn execute_with_file_claims_blocks_on_remote_conflict_without_reports() {
+        let assignments = vec![WorkerAssignment {
+            worker_name: "w1".into(),
+            task_description: "edit".into(),
+            owned_files: vec![PathBuf::from("src/a.rs")],
+            profile: dummy_profile("w1"),
+        }];
+        let coordinator = MockFileClaimCoordinator::new().with_conflict("src\\a.rs");
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+
+        let report = orch
+            .execute_with_file_claims(assignments, &coordinator, 7, "edit")
+            .await
+            .expect("execute with file claims");
+
+        assert_eq!(report.status, WorkerExecutionStatus::BlockedBeforeExecution);
+        assert!(report.has_blockers());
+        assert!(report.reports.is_empty());
+        assert_eq!(report.claim_report.conflicts.len(), 1);
+        assert!(coordinator.released().is_empty());
+    }
+
+    #[tokio::test]
+    async fn execute_with_file_claims_reports_release_failure() {
+        let assignments = vec![WorkerAssignment {
+            worker_name: "w1".into(),
+            task_description: "inspect".into(),
+            owned_files: vec![PathBuf::from("src/a.rs")],
+            profile: dummy_profile("w1"),
+        }];
+        let coordinator = MockFileClaimCoordinator::new().with_missing_release("src\\a.rs");
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+
+        let report = orch
+            .execute_with_file_claims(assignments, &coordinator, 7, "read")
+            .await
+            .expect("execute with file claims");
+
+        assert_eq!(
+            report.status,
+            WorkerExecutionStatus::CompletedWithReviewFindings
+        );
+        assert!(report.has_blockers());
+        assert_eq!(report.reports.len(), 1);
+        assert_eq!(report.release_failures.len(), 1);
+        assert_eq!(report.release_failures[0].message, "missing claim");
     }
 
     #[tokio::test]

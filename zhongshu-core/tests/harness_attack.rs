@@ -229,6 +229,7 @@ fn attack_repeated_test_failure_recorded() {
         last_feedback_step: 0,
         consecutive_no_progress: 0,
         patch_history: PatchHistory::new(),
+        pending_signals: Vec::new(),
     };
     for _ in 0..3 {
         fingerprint::record(&mut state, "shell", "cargo test", "test foo failed", 1);

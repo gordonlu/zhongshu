@@ -1,3 +1,5 @@
+import type { PatchDiffPayload } from '../../ipc/events'
+
 export type DiffLineKind = 'add' | 'remove' | 'hunk' | 'meta' | 'context'
 
 type DiffLine = {
@@ -7,7 +9,15 @@ type DiffLine = {
   newLine?: number
 }
 
-export function DiffViewer({ path, summary }: { path: string; summary: string }) {
+export function DiffViewer({
+  path,
+  summary,
+  stats,
+}: {
+  path: string
+  summary: string
+  stats?: PatchDiffPayload
+}) {
   const lines = parseDiffLines(summary)
   const hasDiff = lines.some((line) => line.kind === 'add' || line.kind === 'remove' || line.kind === 'hunk')
 
@@ -15,7 +25,7 @@ export function DiffViewer({ path, summary }: { path: string; summary: string })
     <section className="diff-viewer" aria-label={`Preview ${path}`}>
       <div className="diff-viewer-header">
         <span>{path}</span>
-        <strong>{hasDiff ? `${lines.length} lines` : 'summary'}</strong>
+        <strong>{stats ? `+${stats.added_lines} -${stats.removed_lines}` : hasDiff ? `${lines.length} lines` : 'summary'}</strong>
       </div>
       {hasDiff ? (
         <pre className="diff-lines">

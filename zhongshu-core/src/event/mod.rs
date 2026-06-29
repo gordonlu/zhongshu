@@ -232,6 +232,7 @@ pub enum HarnessUiEvent {
         path: std::path::PathBuf,
         operation: String,
         diff_summary: String,
+        diff: Option<crate::patch::PatchDiffPayload>,
     },
     PatchApplied {
         session_id: Option<String>,

@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::patch::PatchDiffPayload;
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum HarnessEvent {
     CodingSessionStarted {
@@ -53,6 +55,8 @@ pub enum HarnessEvent {
         path: PathBuf,
         operation: String,
         diff_summary: String,
+        #[serde(default)]
+        diff: Option<PatchDiffPayload>,
     },
     PatchApplied {
         session_id: Option<String>,

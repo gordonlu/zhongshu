@@ -11,8 +11,9 @@ use winit::event_loop::ActiveEventLoop;
 use winit::window::WindowId;
 use wry::WebViewBuilderExtUnix;
 
-use crate::overlay_assets::{legacy_chat_html, select_overlay_asset, OverlayAsset};
+use crate::overlay_assets::select_overlay_asset;
 use crate::overlay_contract::{parse_ui_command, UiToOverlayCommand};
+use crate::overlay_host::{log_selected_asset, webview_builder_for_asset};
 
 #[allow(unused_imports)]
 pub use crate::overlay_contract::{
@@ -46,24 +47,8 @@ pub(crate) static GTK_TX: once_cell::sync::Lazy<crossbeam_channel::Sender<GtkCom
             });
 
             let asset = select_overlay_asset();
-            match &asset {
-                OverlayAsset::React { index_path, .. } => {
-                    tracing::info!(
-                        "gtk overlay loading inlined react UI from {}",
-                        index_path.display()
-                    );
-                }
-                OverlayAsset::LegacyHtml { reason } => {
-                    tracing::info!("gtk overlay loading legacy UI: {reason}");
-                }
-            }
-
-            let builder = match asset {
-                OverlayAsset::React { html, .. } => wry::WebViewBuilder::new().with_html(html),
-                OverlayAsset::LegacyHtml { .. } => {
-                    wry::WebViewBuilder::new().with_html(legacy_chat_html())
-                }
-            };
+            log_selected_asset("gtk", &asset);
+            let builder = webview_builder_for_asset(asset);
 
             let webview = builder
                 .with_user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.7827.102 Safari/537.36")

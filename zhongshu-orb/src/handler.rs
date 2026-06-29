@@ -507,6 +507,11 @@ impl ZhongshuApp {
                         }
                         Event::Tool(ToolEvent::Completed { name, success }) => {
                             if let Some(ref ov) = self.overlay {
+                                ov.send(&serde_json::json!({
+                                    "type": "tool_result",
+                                    "name": name.clone(),
+                                    "success": success,
+                                }));
                                 ov.toast(&format!(
                                     "工具完成: {name} {}",
                                     if success { "✓" } else { "✗" }
@@ -645,6 +650,7 @@ impl ZhongshuApp {
                                         path,
                                         operation,
                                         diff_summary,
+                                        diff,
                                     } => {
                                         send_coding_event(
                                             ov,
@@ -653,6 +659,7 @@ impl ZhongshuApp {
                                                 path: path.display().to_string(),
                                                 operation,
                                                 diff_summary,
+                                                diff: diff.map(Into::into),
                                             },
                                         );
                                     }

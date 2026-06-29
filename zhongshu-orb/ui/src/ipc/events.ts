@@ -15,6 +15,17 @@ export type ChatEntry = {
   tool_calls: ToolCallEntry[]
 }
 
+export type PatchDiffPayload = {
+  summary: string
+  unified_diff: string
+  changed: boolean
+  replace_all: boolean
+  removed_lines: number
+  added_lines: number
+  before_hash: string
+  after_hash: string
+}
+
 export type AuthRequest = {
   request_id: string
   source: string
@@ -44,7 +55,7 @@ export type CodingUiEvent =
   | { kind: 'worker_started'; session_id?: string; worker: string; task_id: string; owned_files: string[] }
   | { kind: 'worker_completed'; session_id?: string; worker: string; task_id: string; success: boolean }
   | { kind: 'worker_conflict'; session_id?: string; worker: string; task_id: string; reason: string }
-  | { kind: 'patch_preview'; session_id?: string; path: string; operation: string; diff_summary: string }
+  | { kind: 'patch_preview'; session_id?: string; path: string; operation: string; diff_summary: string; diff?: PatchDiffPayload | null }
   | { kind: 'patch_applied'; session_id?: string; path: string; operation: string; changed: boolean }
   | { kind: 'verification'; command: string; success: boolean; exit_code?: number }
   | { kind: 'recovery_feedback'; rule_id: string; message: string }
@@ -57,6 +68,8 @@ export type OverlayToUiEvent =
   | { type: 'complete' }
   | { type: 'history'; entries: ChatEntry[]; has_more: boolean }
   | { type: 'prepend_history'; entries: ChatEntry[]; has_more: boolean }
+  | { type: 'tool_call'; name: string }
+  | { type: 'tool_result'; name: string; success: boolean }
   | { type: 'auth'; request: AuthRequest }
   | { type: 'settings'; config: SettingsConfig }
   | { type: 'tasks'; tasks: unknown[] }
@@ -67,5 +80,8 @@ export type OverlayToUiEvent =
   | { type: 'mode_change'; mode: string }
   | { type: 'zoom'; active: boolean }
   | { type: 'coding'; event: CodingUiEvent }
+  | { type: 'verification'; command: string; success: boolean; exit_code?: number; step?: string }
+  | { type: 'recovery_feedback'; rule_id: string; message: string }
+  | { type: 'phase_transition'; from: string; to: string }
   | { type: 'show_personality' }
   | { type: 'clear' }

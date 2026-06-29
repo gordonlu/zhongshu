@@ -1,4 +1,4 @@
-import type { CodingUiEvent, OverlayToUiEvent } from '../ipc/events'
+import type { CodingUiEvent, OverlayToUiEvent, PatchDiffPayload } from '../ipc/events'
 
 export type PlanStep = {
   id: string
@@ -18,6 +18,7 @@ export type ChangeState = {
   path: string
   operation: string
   summary: string
+  diff?: PatchDiffPayload
   status: 'preview' | 'applied'
   changed?: boolean
 }
@@ -38,7 +39,17 @@ export type CodingState = {
   changes: ChangeState[]
   verifications: VerificationState[]
   recoveryMessages: string[]
+  contextIncluded: {
+    description: string
+    estimatedTokens: number
+  }[]
+  phase?: {
+    from: string
+    to: string
+  }
   contextPressure?: number
+  droppedEvidence?: number
+  droppedRecent?: number
   replay?: {
     conversationId?: number
     replayExecutionId?: string
@@ -53,11 +64,43 @@ export const initialCodingState: CodingState = {
   changes: [],
   verifications: [],
   recoveryMessages: [],
+  contextIncluded: [],
 }
 
 export function codingReducer(state: CodingState, event: OverlayToUiEvent): CodingState {
-  if (event.type !== 'coding') return state
-  return reduceCodingEvent(state, event.event)
+  if (event.type === 'coding') return reduceCodingEvent(state, event.event)
+  if (event.type === 'verification') {
+    return {
+      ...state,
+      active: true,
+      verifications: [
+        ...state.verifications,
+        {
+          command: event.command,
+          success: event.success,
+          exitCode: event.exit_code,
+        },
+      ],
+    }
+  }
+  if (event.type === 'recovery_feedback') {
+    return {
+      ...state,
+      active: true,
+      recoveryMessages: [...state.recoveryMessages, `${event.rule_id}: ${event.message}`],
+    }
+  }
+  if (event.type === 'phase_transition') {
+    return {
+      ...state,
+      active: true,
+      phase: {
+        from: event.from,
+        to: event.to,
+      },
+    }
+  }
+  return state
 }
 
 function reduceCodingEvent(state: CodingState, event: CodingUiEvent): CodingState {
@@ -128,7 +171,8 @@ function reduceCodingEvent(state: CodingState, event: CodingUiEvent): CodingStat
         changes: upsertChange(state.changes, {
           path: event.path,
           operation: event.operation,
-          summary: event.diff_summary,
+          summary: event.diff?.summary || event.diff_summary,
+          diff: event.diff ?? undefined,
           status: 'preview',
         }),
       }
@@ -141,6 +185,7 @@ function reduceCodingEvent(state: CodingState, event: CodingUiEvent): CodingStat
           path: event.path,
           operation: event.operation,
           summary: existingChange?.summary ?? (event.changed ? 'changed' : 'unchanged'),
+          diff: existingChange?.diff,
           status: 'applied',
           changed: event.changed,
         }),
@@ -169,6 +214,8 @@ function reduceCodingEvent(state: CodingState, event: CodingUiEvent): CodingStat
         ...state,
         active: true,
         contextPressure: event.pressure_percent,
+        droppedEvidence: event.dropped_evidence,
+        droppedRecent: event.dropped_recent,
       }
     case 'replay_available':
       return {
@@ -180,7 +227,17 @@ function reduceCodingEvent(state: CodingState, event: CodingUiEvent): CodingStat
         },
       }
     case 'context_included':
-      return state
+      return {
+        ...state,
+        active: true,
+        contextIncluded: [
+          ...state.contextIncluded.slice(-19),
+          {
+            description: event.description,
+            estimatedTokens: event.estimated_tokens,
+          },
+        ],
+      }
   }
 }
 

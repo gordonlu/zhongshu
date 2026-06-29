@@ -25,4 +25,17 @@ describe('chatReducer', () => {
     expect(state.hasMoreHistory).toBe(true)
     expect(state.messages.map((message) => message.role)).toEqual(['user', 'assistant'])
   })
+
+  it('groups live tool start and result events', () => {
+    const started = chatReducer(initialChatState, { type: 'tool_call', name: 'browser_automation' })
+    const completed = chatReducer(started, { type: 'tool_result', name: 'browser_automation', success: true })
+
+    expect(completed.toolActivities).toMatchObject([
+      {
+        name: 'browser_automation',
+        status: 'done',
+        success: true,
+      },
+    ])
+  })
 })

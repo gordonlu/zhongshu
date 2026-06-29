@@ -438,6 +438,10 @@ impl PatchPreview {
         self.runtime_checkpoint = Some(checkpoint);
         self
     }
+
+    pub fn diff_payload(&self) -> PatchDiffPayload {
+        PatchDiffPayload::from_preview(self)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -525,6 +529,47 @@ pub struct PatchDiff {
     pub after_hash: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatchDiffPayload {
+    pub summary: String,
+    pub unified_diff: String,
+    pub changed: bool,
+    pub replace_all: bool,
+    pub removed_lines: usize,
+    pub added_lines: usize,
+    pub before_hash: String,
+    pub after_hash: String,
+}
+
+impl PatchDiffPayload {
+    pub fn from_preview(preview: &PatchPreview) -> Self {
+        Self {
+            summary: format!(
+                "{} removed, {} added",
+                preview.diff.removed_lines, preview.diff.added_lines
+            ),
+            unified_diff: unified_diff(
+                &preview.path,
+                &preview.original_content,
+                &preview.updated_content,
+            ),
+            changed: preview.diff.changed,
+            replace_all: preview.diff.replace_all,
+            removed_lines: preview.diff.removed_lines,
+            added_lines: preview.diff.added_lines,
+            before_hash: preview.diff.before_hash.clone(),
+            after_hash: preview.diff.after_hash.clone(),
+        }
+    }
+
+    pub fn from_summary(summary: impl Into<String>) -> Self {
+        Self {
+            summary: summary.into(),
+            ..Self::default()
+        }
+    }
+}
+
 impl PatchDiff {
     fn from_contents(before: &str, after: &str, replace_all: bool) -> Self {
         Self {
@@ -536,6 +581,73 @@ impl PatchDiff {
             after_hash: stable_hash(after),
         }
     }
+}
+
+fn unified_diff(path: &Path, before: &str, after: &str) -> String {
+    if before == after {
+        return String::new();
+    }
+
+    let before_lines: Vec<&str> = before.lines().collect();
+    let after_lines: Vec<&str> = after.lines().collect();
+    let mut prefix = 0;
+    while prefix < before_lines.len()
+        && prefix < after_lines.len()
+        && before_lines[prefix] == after_lines[prefix]
+    {
+        prefix += 1;
+    }
+
+    let mut suffix = 0;
+    while suffix + prefix < before_lines.len()
+        && suffix + prefix < after_lines.len()
+        && before_lines[before_lines.len() - 1 - suffix]
+            == after_lines[after_lines.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+
+    let context_before_start = prefix.saturating_sub(3);
+    let before_changed_end = before_lines.len().saturating_sub(suffix);
+    let after_changed_end = after_lines.len().saturating_sub(suffix);
+    let context_after_before_end = (before_changed_end + 3).min(before_lines.len());
+    let context_after_after_end = (after_changed_end + 3).min(after_lines.len());
+
+    let old_count = context_after_before_end.saturating_sub(context_before_start);
+    let new_count = context_after_after_end.saturating_sub(context_before_start);
+    let path = path.to_string_lossy().replace('\\', "/");
+    let mut output = String::new();
+    output.push_str(&format!("--- a/{path}\n"));
+    output.push_str(&format!("+++ b/{path}\n"));
+    output.push_str(&format!(
+        "@@ -{},{} +{},{} @@\n",
+        context_before_start + 1,
+        old_count,
+        context_before_start + 1,
+        new_count
+    ));
+
+    for line in &before_lines[context_before_start..prefix] {
+        output.push(' ');
+        output.push_str(line);
+        output.push('\n');
+    }
+    for line in &before_lines[prefix..before_changed_end] {
+        output.push('-');
+        output.push_str(line);
+        output.push('\n');
+    }
+    for line in &after_lines[prefix..after_changed_end] {
+        output.push('+');
+        output.push_str(line);
+        output.push('\n');
+    }
+    for line in &before_lines[before_changed_end..context_after_before_end] {
+        output.push(' ');
+        output.push_str(line);
+        output.push('\n');
+    }
+    output
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -983,6 +1095,27 @@ mod tests {
                 .and_then(|checkpoint| checkpoint.deeplossless_snapshot_id),
             Some(7)
         );
+    }
+
+    #[test]
+    fn preview_diff_payload_contains_unified_diff_and_stats() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        fs::write(&file, "one\ntwo\nthree\n").unwrap();
+        let mut engine = PatchEngine::new(dir.path()).unwrap();
+        engine.read("a.txt").unwrap();
+
+        let preview = engine
+            .preview_replace(ReplaceRequest::once("a.txt", "two", "2"))
+            .unwrap();
+        let payload = preview.diff_payload();
+
+        assert!(payload.changed);
+        assert_eq!(payload.removed_lines, 3);
+        assert_eq!(payload.added_lines, 3);
+        assert!(payload.unified_diff.contains("--- a/"));
+        assert!(payload.unified_diff.contains("-two"));
+        assert!(payload.unified_diff.contains("+2"));
     }
 
     #[test]

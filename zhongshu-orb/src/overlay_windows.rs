@@ -6,10 +6,11 @@ use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowId, WindowLevel};
-use wry::{Rect, WebViewBuilder};
+use wry::Rect;
 
-use crate::overlay_assets::{legacy_chat_html, select_overlay_asset, OverlayAsset};
+use crate::overlay_assets::select_overlay_asset;
 use crate::overlay_contract::{parse_ui_command, UiToOverlayCommand};
+use crate::overlay_host::{log_selected_asset, webview_builder_for_asset};
 
 #[allow(unused_imports)]
 pub use crate::overlay_contract::{
@@ -102,8 +103,19 @@ impl OverlayHandle {
     }
 
     pub fn show_window(&self, width: f32, height: f32) {
-        let width = width.clamp(360.0, 2400.0);
-        let height = height.clamp(520.0, 1600.0);
+        let (max_width, max_height) = self
+            .window
+            .current_monitor()
+            .map(|monitor| {
+                let size = monitor.size().to_logical::<f32>(self.window.scale_factor());
+                (
+                    (size.width * 0.96).max(360.0),
+                    (size.height * 0.92).max(520.0),
+                )
+            })
+            .unwrap_or((2400.0, 1600.0));
+        let width = width.clamp(360.0, max_width);
+        let height = height.clamp(520.0, max_height);
         let _ = self
             .window
             .request_inner_size(LogicalSize::new(width, height));
@@ -279,22 +291,8 @@ pub fn show(event_loop: &ActiveEventLoop, width: f32, height: f32) -> OverlayHan
         .expect("windows overlay window creation failed");
 
     let asset = select_overlay_asset();
-    match &asset {
-        OverlayAsset::React { index_path, .. } => {
-            tracing::info!(
-                "windows overlay loading inlined react UI from {}",
-                index_path.display()
-            );
-        }
-        OverlayAsset::LegacyHtml { reason } => {
-            tracing::info!("windows overlay loading legacy UI: {reason}");
-        }
-    }
-
-    let builder = match asset {
-        OverlayAsset::React { html, .. } => WebViewBuilder::new().with_html(html),
-        OverlayAsset::LegacyHtml { .. } => WebViewBuilder::new().with_html(legacy_chat_html()),
-    };
+    log_selected_asset("windows", &asset);
+    let builder = webview_builder_for_asset(asset);
 
     let pi = pending_input.clone();
     let pa = pending_approve.clone();

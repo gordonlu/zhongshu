@@ -11,6 +11,7 @@ mod overlay;
 mod overlay;
 mod overlay_assets;
 mod overlay_contract;
+mod overlay_host;
 mod render;
 mod services;
 

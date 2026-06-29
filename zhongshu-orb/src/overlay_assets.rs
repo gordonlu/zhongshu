@@ -1,19 +1,41 @@
+use std::borrow::Cow;
 use std::env;
 use std::fs;
+use std::path::Component;
 use std::path::{Path, PathBuf};
 
 const LEGACY_CHAT_HTML: &str = include_str!("../assets/chat.html");
 const UI_MODE_ENV: &str = "ZHONGSHU_ORB_UI";
 const UI_DIST_ENV: &str = "ZHONGSHU_ORB_UI_DIST";
+const UI_LOADER_ENV: &str = "ZHONGSHU_ORB_UI_LOADER";
+const PROTOCOL_NAME: &str = "zhongshu";
+const PROTOCOL_URL: &str = "zhongshu://localhost/index.html";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OverlayAsset {
-    React { index_path: PathBuf, html: String },
-    LegacyHtml { reason: String },
+    ReactProtocol {
+        index_path: PathBuf,
+        dist_dir: PathBuf,
+    },
+    ReactInline {
+        index_path: PathBuf,
+        html: String,
+    },
+    LegacyHtml {
+        reason: String,
+    },
 }
 
 pub fn legacy_chat_html() -> &'static str {
     LEGACY_CHAT_HTML
+}
+
+pub fn react_protocol_name() -> &'static str {
+    PROTOCOL_NAME
+}
+
+pub fn react_protocol_url() -> &'static str {
+    PROTOCOL_URL
 }
 
 pub fn select_overlay_asset() -> OverlayAsset {
@@ -31,7 +53,19 @@ fn select_overlay_asset_from(
     cwd: &Path,
     manifest_dir: &Path,
 ) -> OverlayAsset {
+    let loader = env::var(UI_LOADER_ENV).unwrap_or_else(|_| "protocol".to_string());
+    select_overlay_asset_from_with_loader(mode, &loader, explicit_dist, cwd, manifest_dir)
+}
+
+fn select_overlay_asset_from_with_loader(
+    mode: &str,
+    loader: &str,
+    explicit_dist: Option<&Path>,
+    cwd: &Path,
+    manifest_dir: &Path,
+) -> OverlayAsset {
     let normalized_mode = mode.trim().to_ascii_lowercase();
+    let loader = loader.trim().to_ascii_lowercase();
     if normalized_mode == "legacy" {
         return OverlayAsset::LegacyHtml {
             reason: format!("{UI_MODE_ENV}=legacy"),
@@ -40,10 +74,22 @@ fn select_overlay_asset_from(
 
     let candidates = react_index_candidates(explicit_dist, cwd, manifest_dir);
     for candidate in candidates {
-        if let Some(html) = load_react_html(&candidate) {
-            return OverlayAsset::React {
-                index_path: candidate,
-                html,
+        if !candidate.exists() {
+            continue;
+        }
+        if loader == "inline" {
+            if let Some(html) = load_react_html(&candidate) {
+                return OverlayAsset::ReactInline {
+                    index_path: candidate,
+                    html,
+                };
+            }
+            continue;
+        }
+        if let Some(dist_dir) = candidate.parent() {
+            return OverlayAsset::ReactProtocol {
+                index_path: candidate.clone(),
+                dist_dir: dist_dir.to_path_buf(),
             };
         }
     }
@@ -54,6 +100,102 @@ fn select_overlay_asset_from(
         "react UI build output not found".to_string()
     };
     OverlayAsset::LegacyHtml { reason }
+}
+
+pub fn serve_react_protocol_asset(
+    dist_dir: &Path,
+    request: http::Request<Vec<u8>>,
+) -> http::Response<Cow<'static, [u8]>> {
+    let path = request.uri().path();
+    let relative = if path == "/" || path.is_empty() {
+        "index.html"
+    } else {
+        path.trim_start_matches('/')
+    };
+    let relative_path = Path::new(relative);
+    if relative_path
+        .components()
+        .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return protocol_response(
+            http::StatusCode::FORBIDDEN,
+            "text/plain; charset=utf-8",
+            b"forbidden".to_vec(),
+        );
+    }
+
+    let root = match fs::canonicalize(dist_dir) {
+        Ok(root) => root,
+        Err(e) => {
+            return protocol_response(
+                http::StatusCode::INTERNAL_SERVER_ERROR,
+                "text/plain; charset=utf-8",
+                format!("cannot read UI dist: {e}").into_bytes(),
+            );
+        }
+    };
+    let candidate = match fs::canonicalize(root.join(relative_path)) {
+        Ok(path) => path,
+        Err(_) => {
+            return protocol_response(
+                http::StatusCode::NOT_FOUND,
+                "text/plain; charset=utf-8",
+                b"not found".to_vec(),
+            );
+        }
+    };
+    if !candidate.starts_with(&root) {
+        return protocol_response(
+            http::StatusCode::FORBIDDEN,
+            "text/plain; charset=utf-8",
+            b"forbidden".to_vec(),
+        );
+    }
+
+    match fs::read(&candidate) {
+        Ok(body) => protocol_response(http::StatusCode::OK, content_type(relative), body),
+        Err(e) => protocol_response(
+            http::StatusCode::INTERNAL_SERVER_ERROR,
+            "text/plain; charset=utf-8",
+            format!("cannot read UI asset: {e}").into_bytes(),
+        ),
+    }
+}
+
+fn protocol_response(
+    status: http::StatusCode,
+    content_type: &'static str,
+    body: Vec<u8>,
+) -> http::Response<Cow<'static, [u8]>> {
+    http::Response::builder()
+        .status(status)
+        .header(http::header::CONTENT_TYPE, content_type)
+        .body(Cow::Owned(body))
+        .unwrap_or_else(|_| http::Response::new(Cow::Borrowed(&b"response build failed"[..])))
+}
+
+fn content_type(path: &str) -> &'static str {
+    if path.ends_with(".html") {
+        "text/html; charset=utf-8"
+    } else if path.ends_with(".js") || path.ends_with(".mjs") {
+        "text/javascript; charset=utf-8"
+    } else if path.ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else if path.ends_with(".svg") {
+        "image/svg+xml"
+    } else if path.ends_with(".png") {
+        "image/png"
+    } else if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if path.ends_with(".webp") {
+        "image/webp"
+    } else if path.ends_with(".woff2") {
+        "font/woff2"
+    } else if path.ends_with(".wasm") {
+        "application/wasm"
+    } else {
+        "application/octet-stream"
+    }
 }
 
 fn react_index_candidates(
@@ -191,7 +333,7 @@ mod tests {
 
         assert!(matches!(
             selected,
-            OverlayAsset::React { index_path, .. }
+            OverlayAsset::ReactProtocol { index_path, .. }
                 if index_path == dist.join("index.html")
         ));
 
@@ -202,7 +344,7 @@ mod tests {
             &root.join("zhongshu-orb"),
         );
 
-        assert!(matches!(selected, OverlayAsset::React { .. }));
+        assert!(matches!(selected, OverlayAsset::ReactProtocol { .. }));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -219,15 +361,60 @@ mod tests {
     }
 
     #[test]
-    fn react_dist_is_inlined_for_webview2_html_loading() {
-        let root = unique_test_dir("inline");
+    fn auto_mode_uses_protocol_loader_by_default() {
+        let root = unique_test_dir("protocol");
         let dist = root.join("ui-dist");
         write_react_dist(&dist);
 
         let selected =
             select_overlay_asset_from("auto", Some(&dist), &root, &root.join("zhongshu-orb"));
 
-        let OverlayAsset::React { html, .. } = selected else {
+        assert!(matches!(
+            selected,
+            OverlayAsset::ReactProtocol { index_path, dist_dir }
+                if index_path == dist.join("index.html") && dist_dir == dist
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn protocol_loader_serves_dist_assets() {
+        let root = unique_test_dir("protocol-serve");
+        let dist = root.join("ui-dist");
+        write_react_dist(&dist);
+
+        let response = serve_react_protocol_asset(
+            &dist,
+            http::Request::builder()
+                .uri("zhongshu://localhost/assets/index.js")
+                .body(Vec::new())
+                .unwrap(),
+        );
+
+        assert_eq!(response.status(), http::StatusCode::OK);
+        assert_eq!(
+            response.headers().get(http::header::CONTENT_TYPE).unwrap(),
+            "text/javascript; charset=utf-8"
+        );
+        assert!(String::from_utf8_lossy(response.body()).contains("__ZHONGSHU_TEST__"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn inline_loader_keeps_legacy_webview2_fallback() {
+        let root = unique_test_dir("inline");
+        let dist = root.join("ui-dist");
+        write_react_dist(&dist);
+
+        let selected = select_overlay_asset_from_with_loader(
+            "auto",
+            "inline",
+            Some(&dist),
+            &root,
+            &root.join("zhongshu-orb"),
+        );
+
+        let OverlayAsset::ReactInline { html, .. } = selected else {
             panic!("expected react html");
         };
 

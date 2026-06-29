@@ -101,6 +101,28 @@ describe('App IPC interactions', () => {
     fireEvent.mouseDown(listTasksButton!, { button: 0 })
     expect(postMessage).toHaveBeenCalledTimes(callCount)
   })
+
+  it('routes mode switch and personality picker commands', async () => {
+    const postMessage = installWebViewHost()
+    const { App } = await import('./App')
+
+    render(<App />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Coding' }))
+    expect(JSON.parse(postMessage.mock.calls.at(-1)?.[0] ?? '{}')).toEqual({
+      type: 'save_settings',
+      config: { mode: 'coding' },
+    })
+
+    act(() => {
+      window.handleIpc?.({ type: 'show_personality' })
+    })
+    fireEvent.click(screen.getByRole('button', { name: '极客' }))
+    expect(JSON.parse(postMessage.mock.calls.at(-1)?.[0] ?? '{}')).toEqual({
+      type: 'pick_personality',
+      personality: '极客',
+    })
+  })
 })
 
 function installWebViewHost() {

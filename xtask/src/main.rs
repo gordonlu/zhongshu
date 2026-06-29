@@ -1,8 +1,10 @@
+use std::collections::BTreeSet;
 use std::env;
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -38,6 +40,31 @@ enum ProofMode {
     Pr,
     Baseline,
     Release,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ProofArea {
+    CoreRuntime,
+    Harness,
+    StorageRuntime,
+    EquipmentMcp,
+    DesktopUi,
+    ProofRunner,
+    DocsRoadmap,
+}
+
+impl ProofArea {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::CoreRuntime => "core-runtime",
+            Self::Harness => "harness",
+            Self::StorageRuntime => "storage-runtime",
+            Self::EquipmentMcp => "equipment-mcp",
+            Self::DesktopUi => "desktop-ui",
+            Self::ProofRunner => "proof-runner",
+            Self::DocsRoadmap => "docs-roadmap",
+        }
+    }
 }
 
 impl ProofMode {
@@ -110,6 +137,9 @@ struct CheckSpec {
     id: &'static str,
     title: &'static str,
     command: Vec<&'static str>,
+    areas: &'static [ProofArea],
+    modes: &'static [ProofMode],
+    requires_loopback_bind: bool,
     skip_reason: Option<&'static str>,
 }
 
@@ -125,6 +155,13 @@ struct CheckResult {
     skip_reason: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ProofSelection {
+    changed_files: Vec<String>,
+    changed_areas: BTreeSet<ProofArea>,
+    loopback_bind_available: bool,
+}
+
 fn run_proof(args: &[String]) -> Result<(), String> {
     let args = parse_proof_args(args)?;
     let workspace = workspace_root()?;
@@ -137,10 +174,11 @@ fn run_proof(args: &[String]) -> Result<(), String> {
     fs::create_dir_all(run_dir.join("logs"))
         .map_err(|err| format!("cannot create {}: {err}", run_dir.display()))?;
 
-    let specs = local_check_specs();
+    let selection = build_selection(&workspace)?;
+    let specs = proof_check_specs();
     let mut results = Vec::with_capacity(specs.len());
     for spec in specs {
-        let result = run_check(&workspace, &run_dir, &spec)?;
+        let result = run_check(&workspace, &run_dir, &spec, args.mode, &selection)?;
         results.push(result);
     }
 
@@ -148,14 +186,17 @@ fn run_proof(args: &[String]) -> Result<(), String> {
         &run_dir.join("report.json"),
         args.mode,
         generated_at,
+        &selection,
         &results,
     )?;
     write_report_markdown(
         &run_dir.join("report.md"),
         args.mode,
         generated_at,
+        &selection,
         &results,
     )?;
+    write_junit_xml(&run_dir.join("junit.xml"), &results)?;
 
     let summary = summarize(&results);
     println!(
@@ -183,60 +224,198 @@ fn unix_secs() -> u64 {
         .as_secs()
 }
 
-fn local_check_specs() -> Vec<CheckSpec> {
+fn build_selection(workspace: &Path) -> Result<ProofSelection, String> {
+    let changed_files = changed_files(workspace)?;
+    let changed_areas = classify_changed_areas(&changed_files);
+    let loopback_bind_available = TcpListener::bind("127.0.0.1:0").is_ok();
+    Ok(ProofSelection {
+        changed_files,
+        changed_areas,
+        loopback_bind_available,
+    })
+}
+
+fn changed_files(workspace: &Path) -> Result<Vec<String>, String> {
+    let output = Command::new("git")
+        .args(["diff", "--name-only", "HEAD"])
+        .current_dir(workspace)
+        .output()
+        .map_err(|err| format!("cannot inspect changed files: {err}"))?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(ToString::to_string)
+        .collect())
+}
+
+fn classify_changed_areas(files: &[String]) -> BTreeSet<ProofArea> {
+    let mut areas = BTreeSet::new();
+    for file in files {
+        if file.starts_with("zhongshu-orb/") {
+            areas.insert(ProofArea::DesktopUi);
+        } else if file.starts_with("xtask/") || file == ".roadmap/TEST_ROADMAP.md" {
+            areas.insert(ProofArea::ProofRunner);
+        } else if file.starts_with(".roadmap/") || file.ends_with(".md") {
+            areas.insert(ProofArea::DocsRoadmap);
+        } else if file.starts_with("zhongshu-core/src/harness/") {
+            areas.insert(ProofArea::Harness);
+        } else if file.starts_with("zhongshu-core/src/equipment/") {
+            areas.insert(ProofArea::EquipmentMcp);
+        } else if file.starts_with("zhongshu-core/src/integration/")
+            || file.starts_with("zhongshu-core/src/core/")
+        {
+            areas.insert(ProofArea::StorageRuntime);
+        } else if file.starts_with("zhongshu-core/src/") {
+            areas.insert(ProofArea::CoreRuntime);
+        }
+    }
+    areas
+}
+
+fn proof_check_specs() -> Vec<CheckSpec> {
     vec![
         CheckSpec {
             id: "cargo-fmt",
             title: "Rust formatting",
             command: vec!["cargo", "fmt", "--check"],
+            areas: &[],
+            modes: &[ProofMode::Local, ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
+            requires_loopback_bind: false,
             skip_reason: None,
         },
         CheckSpec {
             id: "core-tests",
             title: "Core tests",
-            command: vec!["cargo", "test", "-p", "zhongshu-core"],
+            command: vec![
+                "cargo",
+                "test",
+                "-p",
+                "zhongshu-core",
+                "--lib",
+                "--",
+                "--skip",
+                "integration::deeplossless::tests::file_claims_roundtrip_through_lcm_endpoint",
+                "--skip",
+                "integration::deeplossless::tests::lcm_url_formats_endpoint_with_separator",
+                "--skip",
+                "integration::deeplossless::tests::proxy_rejects_without_api_key",
+                "--skip",
+                "integration::deeplossless::tests::proxy_starts_and_listens",
+            ],
+            areas: &[
+                ProofArea::CoreRuntime,
+                ProofArea::Harness,
+                ProofArea::StorageRuntime,
+                ProofArea::EquipmentMcp,
+                ProofArea::ProofRunner,
+            ],
+            modes: &[ProofMode::Local, ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
+            requires_loopback_bind: false,
+            skip_reason: None,
+        },
+        CheckSpec {
+            id: "deeplossless-proxy-tests",
+            title: "Deeplossless proxy loopback tests",
+            command: vec![
+                "cargo",
+                "test",
+                "-p",
+                "zhongshu-core",
+                "integration::deeplossless::tests::",
+            ],
+            areas: &[ProofArea::StorageRuntime, ProofArea::ProofRunner],
+            modes: &[ProofMode::Local, ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
+            requires_loopback_bind: true,
             skip_reason: None,
         },
         CheckSpec {
             id: "orb-check",
             title: "Orb compile check",
             command: vec!["cargo", "check", "-p", "zhongshu-orb"],
+            areas: &[ProofArea::DesktopUi, ProofArea::ProofRunner],
+            modes: &[ProofMode::Local, ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
+            requires_loopback_bind: false,
             skip_reason: None,
         },
         CheckSpec {
             id: "orb-tests",
             title: "Orb tests",
-            command: vec!["cargo", "test", "-p", "zhongshu-orb"],
+            command: vec!["cargo", "test", "-p", "zhongshu-orb", "--bin", "zhongshu-orb"],
+            areas: &[ProofArea::DesktopUi, ProofArea::ProofRunner],
+            modes: &[ProofMode::Local, ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
+            requires_loopback_bind: false,
             skip_reason: None,
         },
         CheckSpec {
             id: "ui-typecheck",
             title: "UI TypeScript typecheck",
-            command: vec!["pnpm", "--dir", "zhongshu-orb/ui", "typecheck"],
+            command: vec!["corepack", "pnpm", "--dir", "zhongshu-orb/ui", "typecheck"],
+            areas: &[ProofArea::DesktopUi, ProofArea::ProofRunner],
+            modes: &[ProofMode::Local, ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
+            requires_loopback_bind: false,
             skip_reason: None,
         },
         CheckSpec {
             id: "ui-tests",
             title: "UI tests",
-            command: vec!["pnpm", "--dir", "zhongshu-orb/ui", "test"],
+            command: vec!["corepack", "pnpm", "--dir", "zhongshu-orb/ui", "test"],
+            areas: &[ProofArea::DesktopUi, ProofArea::ProofRunner],
+            modes: &[ProofMode::Local, ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
+            requires_loopback_bind: false,
             skip_reason: None,
         },
         CheckSpec {
             id: "ui-build",
             title: "UI production build",
-            command: vec!["pnpm", "--dir", "zhongshu-orb/ui", "build"],
+            command: vec!["corepack", "pnpm", "--dir", "zhongshu-orb/ui", "build"],
+            areas: &[ProofArea::DesktopUi, ProofArea::ProofRunner],
+            modes: &[ProofMode::Local, ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
+            requires_loopback_bind: false,
+            skip_reason: None,
+        },
+        CheckSpec {
+            id: "capability-metadata",
+            title: "Capability case metadata",
+            command: vec![
+                "cargo",
+                "test",
+                "-p",
+                "zhongshu-core",
+                "harness::verification::proof::tests::capability_cases_cover_first_wave",
+            ],
+            areas: &[ProofArea::CoreRuntime, ProofArea::Harness, ProofArea::ProofRunner],
+            modes: &[ProofMode::Local, ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
+            requires_loopback_bind: false,
+            skip_reason: None,
+        },
+        CheckSpec {
+            id: "harness-attack",
+            title: "Harness attack matrix",
+            command: vec!["cargo", "test", "-p", "zhongshu-core", "--test", "harness_attack"],
+            areas: &[ProofArea::CoreRuntime, ProofArea::Harness, ProofArea::ProofRunner],
+            modes: &[ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
+            requires_loopback_bind: false,
             skip_reason: None,
         },
         CheckSpec {
             id: "git-diff-check",
             title: "Git whitespace check",
             command: vec!["git", "diff", "--check"],
+            areas: &[],
+            modes: &[ProofMode::Local, ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
+            requires_loopback_bind: false,
             skip_reason: None,
         },
         CheckSpec {
             id: "windows-webview2-visual",
             title: "Windows WebView2 visual smoke",
             command: Vec::new(),
+            areas: &[ProofArea::DesktopUi],
+            modes: &[ProofMode::Local, ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
+            requires_loopback_bind: false,
             skip_reason: Some(
                 "manual desktop evidence required: screenshot/log for WebView2 window startup, focus, resize, and close-hide behavior",
             ),
@@ -245,6 +424,9 @@ fn local_check_specs() -> Vec<CheckSpec> {
             id: "ubuntu-gtk-visual",
             title: "Ubuntu GTK visual smoke",
             command: Vec::new(),
+            areas: &[ProofArea::DesktopUi],
+            modes: &[ProofMode::Local, ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
+            requires_loopback_bind: false,
             skip_reason: Some(
                 "manual desktop evidence required when GTK overlay changes; user previously reported Ubuntu command execution path works",
             ),
@@ -252,8 +434,14 @@ fn local_check_specs() -> Vec<CheckSpec> {
     ]
 }
 
-fn run_check(workspace: &Path, run_dir: &Path, spec: &CheckSpec) -> Result<CheckResult, String> {
-    if let Some(reason) = spec.skip_reason {
+fn run_check(
+    workspace: &Path,
+    run_dir: &Path,
+    spec: &CheckSpec,
+    mode: ProofMode,
+    selection: &ProofSelection,
+) -> Result<CheckResult, String> {
+    if let Some(reason) = skip_reason_for_spec(spec, mode, selection) {
         println!("skip {}: {}", spec.id, reason);
         return Ok(CheckResult {
             id: spec.id.into(),
@@ -263,7 +451,7 @@ fn run_check(workspace: &Path, run_dir: &Path, spec: &CheckSpec) -> Result<Check
             duration_ms: None,
             exit_code: None,
             log_path: None,
-            skip_reason: Some(reason.into()),
+            skip_reason: Some(reason),
         });
     }
 
@@ -297,6 +485,36 @@ fn run_check(workspace: &Path, run_dir: &Path, spec: &CheckSpec) -> Result<Check
     })
 }
 
+fn skip_reason_for_spec(
+    spec: &CheckSpec,
+    mode: ProofMode,
+    selection: &ProofSelection,
+) -> Option<String> {
+    if let Some(reason) = spec.skip_reason {
+        return Some(reason.to_string());
+    }
+    if !spec.modes.contains(&mode) {
+        return Some(format!("not selected for proof mode '{}'", mode.as_str()));
+    }
+    if spec.requires_loopback_bind && !selection.loopback_bind_available {
+        return Some("loopback TCP bind is unavailable in this environment".into());
+    }
+    if mode == ProofMode::Local
+        && !selection.changed_files.is_empty()
+        && !spec.areas.is_empty()
+        && !spec
+            .areas
+            .iter()
+            .any(|area| selection.changed_areas.contains(area))
+    {
+        return Some(format!(
+            "not selected for changed areas: {}",
+            area_list(&selection.changed_areas)
+        ));
+    }
+    None
+}
+
 fn run_command(
     workspace: &Path,
     program: &str,
@@ -309,6 +527,21 @@ fn run_command(
         .output()
     {
         Ok(output) => Ok(output),
+        Err(err) if program == "corepack" && err.kind() == io::ErrorKind::NotFound => {
+            let Some((fallback_program, fallback_args)) = command_args.split_first() else {
+                return Err(format!("cannot run '{}': {err}", display_command.join(" ")));
+            };
+            Command::new(fallback_program)
+                .args(fallback_args.iter().map(OsStr::new))
+                .current_dir(workspace)
+                .output()
+                .map_err(|fallback_err| {
+                    format!(
+                        "cannot run '{}' through corepack ({err}) or directly ({fallback_err})",
+                        display_command.join(" ")
+                    )
+                })
+        }
         Err(err) if cfg!(windows) && err.kind() == io::ErrorKind::NotFound => Command::new("cmd")
             .arg("/C")
             .arg(program)
@@ -365,6 +598,7 @@ fn write_report_json(
     path: &Path,
     mode: ProofMode,
     generated_at: u64,
+    selection: &ProofSelection,
     results: &[CheckResult],
 ) -> Result<(), String> {
     let summary = summarize(results);
@@ -373,6 +607,30 @@ fn write_report_json(
     writeln!(&mut json, "  \"schema_version\": 1,").unwrap();
     writeln!(&mut json, "  \"mode\": \"{}\",", mode.as_str()).unwrap();
     writeln!(&mut json, "  \"generated_at_unix_secs\": {generated_at},").unwrap();
+    writeln!(
+        &mut json,
+        "  \"changed_files\": {},",
+        json_string_array(&selection.changed_files)
+    )
+    .unwrap();
+    writeln!(
+        &mut json,
+        "  \"changed_areas\": {},",
+        json_string_array(
+            &selection
+                .changed_areas
+                .iter()
+                .map(|area| area.as_str().to_string())
+                .collect::<Vec<_>>()
+        )
+    )
+    .unwrap();
+    writeln!(
+        &mut json,
+        "  \"loopback_bind_available\": {},",
+        selection.loopback_bind_available
+    )
+    .unwrap();
     writeln!(
         &mut json,
         "  \"summary\": {{ \"passed\": {}, \"failed\": {}, \"skipped\": {} }},",
@@ -422,6 +680,7 @@ fn write_report_markdown(
     path: &Path,
     mode: ProofMode,
     generated_at: u64,
+    selection: &ProofSelection,
     results: &[CheckResult],
 ) -> Result<(), String> {
     let summary = summarize(results);
@@ -430,6 +689,24 @@ fn write_report_markdown(
     writeln!(&mut markdown).unwrap();
     writeln!(&mut markdown, "- Mode: `{}`", mode.as_str()).unwrap();
     writeln!(&mut markdown, "- Generated: `{generated_at}`").unwrap();
+    writeln!(
+        &mut markdown,
+        "- Changed areas: `{}`",
+        area_list(&selection.changed_areas)
+    )
+    .unwrap();
+    writeln!(
+        &mut markdown,
+        "- Changed files: `{}`",
+        selection.changed_files.len()
+    )
+    .unwrap();
+    writeln!(
+        &mut markdown,
+        "- Loopback bind available: `{}`",
+        selection.loopback_bind_available
+    )
+    .unwrap();
     writeln!(&mut markdown, "- Passed: `{}`", summary.passed).unwrap();
     writeln!(&mut markdown, "- Failed: `{}`", summary.failed).unwrap();
     writeln!(&mut markdown, "- Skipped: `{}`", summary.skipped).unwrap();
@@ -459,6 +736,55 @@ fn write_report_markdown(
         .unwrap();
     }
     fs::write(path, markdown).map_err(|err| format!("cannot write {}: {err}", path.display()))
+}
+
+fn write_junit_xml(path: &Path, results: &[CheckResult]) -> Result<(), String> {
+    let summary = summarize(results);
+    let mut xml = String::new();
+    writeln!(&mut xml, r#"<?xml version="1.0" encoding="UTF-8"?>"#).unwrap();
+    writeln!(
+        &mut xml,
+        r#"<testsuite name="zhongshu-proof" tests="{}" failures="{}" skipped="{}">"#,
+        results.len(),
+        summary.failed,
+        summary.skipped
+    )
+    .unwrap();
+    for result in results {
+        writeln!(
+            &mut xml,
+            r#"  <testcase classname="proof" name="{}" time="{}">"#,
+            xml_escape(&result.id),
+            result
+                .duration_ms
+                .map(|duration| format!("{:.3}", duration as f64 / 1000.0))
+                .unwrap_or_else(|| "0".to_string())
+        )
+        .unwrap();
+        match result.status {
+            CheckStatus::Failed => {
+                writeln!(
+                    &mut xml,
+                    r#"    <failure message="exit code {:?}">See {}</failure>"#,
+                    result.exit_code,
+                    xml_escape(result.log_path.as_deref().unwrap_or(""))
+                )
+                .unwrap();
+            }
+            CheckStatus::Skipped => {
+                writeln!(
+                    &mut xml,
+                    r#"    <skipped message="{}" />"#,
+                    xml_escape(result.skip_reason.as_deref().unwrap_or(""))
+                )
+                .unwrap();
+            }
+            CheckStatus::Passed => {}
+        }
+        writeln!(&mut xml, "  </testcase>").unwrap();
+    }
+    writeln!(&mut xml, "</testsuite>").unwrap();
+    fs::write(path, xml).map_err(|err| format!("cannot write {}: {err}", path.display()))
 }
 
 fn write_optional_u128(out: &mut String, key: &str, value: Option<u128>, comma: bool) {
@@ -501,6 +827,17 @@ fn json_string_array(values: &[String]) -> String {
     out
 }
 
+fn area_list(areas: &BTreeSet<ProofArea>) -> String {
+    if areas.is_empty() {
+        return "none".into();
+    }
+    areas
+        .iter()
+        .map(|area| area.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn json_escape(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for ch in value.chars() {
@@ -517,6 +854,15 @@ fn json_escape(value: &str) -> String {
         }
     }
     escaped
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 fn path_slash(path: &Path) -> String {

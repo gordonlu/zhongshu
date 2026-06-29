@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { X } from 'lucide-react'
 import type { SettingsConfig } from '../../ipc/events'
 
 type SettingsDialogProps = {
@@ -21,7 +22,7 @@ export function SettingsDialog({ config, onClose, onSave, onDeleteHistory }: Set
         <header className="modal-header">
           <h2>Settings</h2>
           <button type="button" className="icon-button" aria-label="Close settings" onClick={onClose}>
-            x
+            <X size={16} />
           </button>
         </header>
 
@@ -109,7 +110,7 @@ export function SettingsDialog({ config, onClose, onSave, onDeleteHistory }: Set
               checked={draft.auto_evolve ?? false}
               onChange={(event) => setDraft({ ...draft, auto_evolve: event.target.checked })}
             />
-            Auto evolve
+            Self-evolving equipment
           </label>
           <label className="settings-wide">
             Background prompt

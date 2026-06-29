@@ -87,7 +87,11 @@ export function ChangeSetPanel({ changes }: { changes: ChangeState[] }) {
       </div>
 
       {selectedChange ? (
-        <DiffViewer path={selectedChange.path} summary={selectedChange.summary} />
+        <DiffViewer
+          path={selectedChange.path}
+          summary={selectedChange.diff?.unified_diff || selectedChange.summary}
+          stats={selectedChange.diff}
+        />
       ) : null}
     </div>
   )

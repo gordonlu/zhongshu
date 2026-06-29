@@ -1,3 +1,5 @@
+import { X } from 'lucide-react'
+
 type ResourceKind = 'tasks' | 'runbooks' | 'equipment'
 
 type ResourceDialogProps = {
@@ -23,7 +25,7 @@ export function ResourceDialog({
         <header className="modal-header">
           <h2>{titleForKind(kind)}</h2>
           <button type="button" className="icon-button" aria-label="Close panel" onClick={onClose}>
-            x
+            <X size={16} />
           </button>
         </header>
 

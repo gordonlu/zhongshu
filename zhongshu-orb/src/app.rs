@@ -631,12 +631,14 @@ impl AgentController {
                                 path,
                                 operation,
                                 diff_summary,
+                                diff,
                             } => {
                                 eb.publish(Event::Harness(HarnessUiEvent::PatchPreview {
                                     session_id: session_id.clone(),
                                     path: path.clone(),
                                     operation: operation.clone(),
                                     diff_summary: diff_summary.clone(),
+                                    diff: diff.clone(),
                                 }));
                             }
                             zhongshu_core::harness::trace::event::HarnessEvent::PatchApplied {

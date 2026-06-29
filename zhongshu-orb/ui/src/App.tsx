@@ -1,15 +1,18 @@
-import { type MouseEvent, useEffect, useMemo, useReducer, useState } from 'react'
+import { type MouseEvent, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import {
   BookOpen,
   CheckCircle2,
   CircleStop,
   ClipboardList,
   Code2,
+  Moon,
   PanelRight,
   Send,
   Settings,
   ShieldAlert,
+  Sun,
   Wrench,
+  X,
   ZoomIn,
 } from 'lucide-react'
 import { createIpcBridge } from './ipc/bridge'
@@ -24,6 +27,15 @@ import { SettingsDialog } from './components/settings/SettingsDialog'
 import { ResourceDialog } from './components/resources/ResourceDialog'
 
 const bridge = createIpcBridge()
+const iconSize = 16
+
+type Theme = 'dark' | 'light'
+
+function initialTheme(): Theme {
+  const stored = window.localStorage.getItem('zhongshu.theme')
+  if (stored === 'dark' || stored === 'light') return stored
+  return window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
+}
 
 type ResourceDialogState = {
   kind: 'tasks' | 'runbooks' | 'equipment'
@@ -39,11 +51,35 @@ export function App() {
   const [resourceDialog, setResourceDialog] = useState<ResourceDialogState | null>(null)
   const [workbenchOpen, setWorkbenchOpen] = useState(true)
   const [zoomActive, setZoomActive] = useState(false)
+  const [theme, setTheme] = useState<Theme>(initialTheme)
   const [toast, setToast] = useState<string | null>(null)
+  const [showPersonality, setShowPersonality] = useState(false)
   const [composerText, setComposerText] = useState('')
+  const pendingDelta = useRef('')
+  const pendingDeltaFrame = useRef<number | null>(null)
 
   useEffect(() => {
     return bridge.install((event: OverlayToUiEvent) => {
+      if (event.type === 'delta') {
+        pendingDelta.current += event.content
+        if (pendingDeltaFrame.current === null) {
+          pendingDeltaFrame.current = window.requestAnimationFrame(() => {
+            pendingDeltaFrame.current = null
+            if (!pendingDelta.current) return
+            dispatchChat({ type: 'delta', content: pendingDelta.current })
+            pendingDelta.current = ''
+          })
+        }
+        return
+      }
+      if (pendingDelta.current) {
+        if (pendingDeltaFrame.current !== null) {
+          window.cancelAnimationFrame(pendingDeltaFrame.current)
+          pendingDeltaFrame.current = null
+        }
+        dispatchChat({ type: 'delta', content: pendingDelta.current })
+        pendingDelta.current = ''
+      }
       dispatchChat(event)
       dispatchCoding(event)
       if (event.type === 'mode_change') {
@@ -62,12 +98,18 @@ export function App() {
         setToast(event.text)
       } else if (event.type === 'zoom') {
         setZoomActive(event.active)
+      } else if (event.type === 'show_personality') {
+        setShowPersonality(true)
       } else if (event.type === 'clear') {
         setAuthRequest(null)
         setToast(null)
       }
     })
   }, [])
+
+  useEffect(() => {
+    window.localStorage.setItem('zhongshu.theme', theme)
+  }, [theme])
 
   useEffect(() => {
     if (!toast) return undefined
@@ -96,7 +138,7 @@ export function App() {
   }, [authRequest, chatState.runtimeState, codingState.active, codingState.verifications])
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-theme={theme}>
       <header className="titlebar" onMouseDown={startWindowDrag}>
         <div className="brand">
           <div className="brand-mark">Z</div>
@@ -104,6 +146,22 @@ export function App() {
             <div className="brand-title">Zhongshu</div>
             <div className="brand-subtitle">Desktop assistant</div>
           </div>
+        </div>
+        <div className="mode-switch" data-no-drag>
+          <button
+            type="button"
+            className={mode === 'assistant' ? 'active' : undefined}
+            onClick={() => bridge.send({ type: 'save_settings', config: { mode: 'assistant' } })}
+          >
+            Assistant
+          </button>
+          <button
+            type="button"
+            className={mode === 'coding' ? 'active' : undefined}
+            onClick={() => bridge.send({ type: 'save_settings', config: { mode: 'coding' } })}
+          >
+            Coding
+          </button>
         </div>
         <div className="titlebar-status" data-state={statusText}>
           {authRequest ? <ShieldAlert size={14} /> : codingState.active ? <Code2 size={14} /> : <CheckCircle2 size={14} />}
@@ -116,7 +174,7 @@ export function App() {
             aria-label="Toggle coding workbench"
             onClick={() => setWorkbenchOpen((value) => !value)}
           >
-            <PanelRight size={16} />
+            <PanelRight size={iconSize} />
           </button>
           <button
             type="button"
@@ -124,7 +182,7 @@ export function App() {
             aria-label="List tasks"
             onClick={() => bridge.send({ type: 'list_tasks' })}
           >
-            <ClipboardList size={16} />
+            <ClipboardList size={iconSize} />
           </button>
           <button
             type="button"
@@ -132,7 +190,7 @@ export function App() {
             aria-label="List runbooks"
             onClick={() => bridge.send({ type: 'list_runbooks' })}
           >
-            <BookOpen size={16} />
+            <BookOpen size={iconSize} />
           </button>
           <button
             type="button"
@@ -140,7 +198,15 @@ export function App() {
             aria-label="List equipment"
             onClick={() => bridge.send({ type: 'list_equipment' })}
           >
-            <Wrench size={16} />
+            <Wrench size={iconSize} />
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label="Toggle theme"
+            onClick={() => setTheme((value) => (value === 'dark' ? 'light' : 'dark'))}
+          >
+            {theme === 'dark' ? <Sun size={iconSize} /> : <Moon size={iconSize} />}
           </button>
           <button
             type="button"
@@ -148,7 +214,7 @@ export function App() {
             aria-label="Toggle zoom"
             onClick={() => bridge.send({ type: 'toggle_zoom' })}
           >
-            <ZoomIn size={16} />
+            <ZoomIn size={iconSize} />
           </button>
           <button
             type="button"
@@ -156,7 +222,7 @@ export function App() {
             aria-label="Open settings"
             onClick={() => bridge.send({ type: 'open_settings' })}
           >
-            <Settings size={16} />
+            <Settings size={iconSize} />
           </button>
         </div>
       </header>
@@ -168,6 +234,7 @@ export function App() {
           <span>Changes {codingState.changes.length}</span>
           <span>Checks {codingState.verifications.length}</span>
           {codingState.contextPressure !== undefined ? <span>Context {codingState.contextPressure}%</span> : null}
+          {codingState.phase ? <span>{codingState.phase.from} to {codingState.phase.to}</span> : null}
         </section>
       ) : null}
 
@@ -246,6 +313,34 @@ export function App() {
           onCancelTask={(task_id) => bridge.send({ type: 'cancel_task', task_id })}
           onCompleteTask={(task_id) => bridge.send({ type: 'complete_task', task_id })}
         />
+      ) : null}
+
+      {showPersonality ? (
+        <div className="modal-backdrop" role="presentation">
+          <section className="modal-panel personality-panel" role="dialog" aria-modal="true" aria-label="Personality">
+            <header className="modal-header">
+              <h2>Personality</h2>
+              <button type="button" className="icon-button" aria-label="Close personality" onClick={() => setShowPersonality(false)}>
+                <X size={iconSize} />
+              </button>
+            </header>
+            <div className="personality-grid">
+              {['古典', '极客', '温度'].map((personality) => (
+                <button
+                  key={personality}
+                  type="button"
+                  className="personality-option"
+                  onClick={() => {
+                    bridge.send({ type: 'pick_personality', personality })
+                    setShowPersonality(false)
+                  }}
+                >
+                  {personality}
+                </button>
+              ))}
+            </div>
+          </section>
+        </div>
       ) : null}
 
       {toast ? <div className="toast">{toast}</div> : null}

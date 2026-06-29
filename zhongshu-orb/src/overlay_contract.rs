@@ -1,6 +1,33 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PatchDiffPayload {
+    pub summary: String,
+    pub unified_diff: String,
+    pub changed: bool,
+    pub replace_all: bool,
+    pub removed_lines: usize,
+    pub added_lines: usize,
+    pub before_hash: String,
+    pub after_hash: String,
+}
+
+impl From<zhongshu_core::patch::PatchDiffPayload> for PatchDiffPayload {
+    fn from(value: zhongshu_core::patch::PatchDiffPayload) -> Self {
+        Self {
+            summary: value.summary,
+            unified_diff: value.unified_diff,
+            changed: value.changed,
+            replace_all: value.replace_all,
+            removed_lines: value.removed_lines,
+            added_lines: value.added_lines,
+            before_hash: value.before_hash,
+            after_hash: value.after_hash,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolCallEntry {
     pub name: String,
     pub status: ToolStatus,
@@ -65,6 +92,13 @@ pub enum OverlayToUiEvent {
         entries: Vec<ChatEntry>,
         has_more: bool,
     },
+    ToolCall {
+        name: String,
+    },
+    ToolResult {
+        name: String,
+        success: bool,
+    },
     Auth {
         request: AuthRequest,
     },
@@ -94,6 +128,20 @@ pub enum OverlayToUiEvent {
     },
     Coding {
         event: CodingUiEvent,
+    },
+    Verification {
+        command: String,
+        success: bool,
+        exit_code: Option<i32>,
+        step: Option<String>,
+    },
+    RecoveryFeedback {
+        rule_id: String,
+        message: String,
+    },
+    PhaseTransition {
+        from: String,
+        to: String,
     },
 }
 
@@ -138,6 +186,7 @@ pub enum CodingUiEvent {
         path: String,
         operation: String,
         diff_summary: String,
+        diff: Option<PatchDiffPayload>,
     },
     PatchApplied {
         session_id: Option<String>,
@@ -219,6 +268,7 @@ fn chat_coding_smoke_events() -> Vec<OverlayToUiEvent> {
                 path: "src/lib.rs".into(),
                 operation: "update".into(),
                 diff_summary: "1 file changed".into(),
+                diff: None,
             },
         },
         OverlayToUiEvent::Coding {

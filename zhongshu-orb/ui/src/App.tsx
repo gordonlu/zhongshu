@@ -28,9 +28,16 @@ import { CodingWorkbench } from './components/coding/CodingWorkbench'
 import { ApprovalBar } from './components/ApprovalBar'
 import { SettingsDialog } from './components/settings/SettingsDialog'
 import { ResourceDialog } from './components/resources/ResourceDialog'
+import { demoCodingEvents } from './dev/fixtures'
 
 const bridge = createIpcBridge()
 const iconSize = 16
+
+const assistantPrompts = [
+  'Review current changes',
+  'Plan the next coding step',
+  'Explain the failing check',
+]
 
 type Theme = 'dark' | 'light'
 
@@ -59,6 +66,7 @@ export function App() {
   const [toast, setToast] = useState<string | null>(null)
   const [showPersonality, setShowPersonality] = useState(false)
   const [composerText, setComposerText] = useState('')
+  const demoLoaded = useRef(false)
   const pendingDelta = useRef('')
   const pendingDeltaFrame = useRef<number | null>(null)
 
@@ -112,6 +120,22 @@ export function App() {
   }, [])
 
   useEffect(() => {
+    if (!import.meta.env.DEV) return
+    if (demoLoaded.current) return
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('demo') !== 'coding') return
+    demoLoaded.current = true
+    for (const event of demoCodingEvents) {
+      dispatchChat(event)
+      dispatchCoding(event)
+      if (event.type === 'mode_change') {
+        setMode(event.mode)
+        setWorkbenchOpen(true)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
     window.localStorage.setItem('zhongshu.theme', theme)
   }, [theme])
 
@@ -146,10 +170,10 @@ export function App() {
     <div className="app-shell" data-theme={theme} data-layout={isCodingMode ? 'coding' : 'assistant'}>
       <header className="titlebar" onMouseDown={startWindowDrag}>
         <div className="brand">
-          <div className="brand-mark">Z</div>
+          <div className="brand-mark" aria-hidden="true">中书</div>
           <div>
-            <div className="brand-title">Zhongshu</div>
-            <div className="brand-subtitle">Desktop assistant</div>
+            <div className="brand-title">中书</div>
+            <div className="brand-subtitle">Agent workspace</div>
           </div>
         </div>
         <div className="mode-switch" data-no-drag>
@@ -158,7 +182,10 @@ export function App() {
             data-tooltip-dir="below"
             data-tooltip="Assistant mode"
             className={mode === 'assistant' ? 'active' : undefined}
-            onClick={() => bridge.send({ type: 'save_settings', config: { mode: 'assistant' } })}
+            onClick={() => {
+              setMode('assistant')
+              bridge.send({ type: 'save_settings', config: { mode: 'assistant' } })
+            }}
           >
             Assistant
           </button>
@@ -167,7 +194,11 @@ export function App() {
             data-tooltip-dir="below"
             data-tooltip="Coding mode"
             className={mode === 'coding' ? 'active' : undefined}
-            onClick={() => bridge.send({ type: 'save_settings', config: { mode: 'coding' } })}
+            onClick={() => {
+              setMode('coding')
+              setWorkbenchOpen(true)
+              bridge.send({ type: 'save_settings', config: { mode: 'coding' } })
+            }}
           >
             Coding
           </button>
@@ -291,8 +322,8 @@ export function App() {
       {isCodingMode ? (
         <section className="status-strip" aria-label="Coding status">
           <span>Plan {codingState.steps.length}/{codingState.planStepCount || '-'}</span>
-          <span>Workers {codingState.workers.length}</span>
-          <span>Changes {codingState.changes.length}</span>
+          <span>Agents {codingState.workers.length}</span>
+          <span>Review {codingState.changes.length}</span>
           <span>Checks {codingState.verifications.length}</span>
           {codingState.contextPressure !== undefined ? <span>Context {codingState.contextPressure}%</span> : null}
           {codingState.phase ? <span>{codingState.phase.from} to {codingState.phase.to}</span> : null}
@@ -304,6 +335,8 @@ export function App() {
           <ChatStream
             state={chatState}
             onLoadMore={chatState.hasMoreHistory ? () => bridge.send({ type: 'load_more' }) : undefined}
+            onPrompt={(prompt) => setComposerText(prompt)}
+            suggestions={assistantPrompts}
           />
         </section>
         {isCodingMode && workbenchOpen ? (
@@ -337,7 +370,7 @@ export function App() {
         </button>
         <Composer
           value={composerText}
-          placeholder={isCodingMode ? 'Describe the coding task...' : 'Ask Zhongshu...'}
+          placeholder={isCodingMode ? 'Describe the task or review request...' : 'Ask Zhongshu what to do next.'}
           onChange={setComposerText}
           onSubmit={submitComposer}
         />

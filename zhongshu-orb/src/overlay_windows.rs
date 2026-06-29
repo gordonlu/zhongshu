@@ -33,6 +33,9 @@ pub struct OverlayHandle {
     pub pending_toggle_equipment: Arc<Mutex<Option<String>>>,
     pub pending_toggle_zoom: Arc<Mutex<bool>>,
     pub pending_start_drag: Arc<Mutex<bool>>,
+    pub pending_minimize: Arc<Mutex<bool>>,
+    pub pending_maximize_restore: Arc<Mutex<bool>>,
+    pub pending_close_window: Arc<Mutex<bool>>,
     pub pending_cancel_task: Arc<Mutex<Option<String>>>,
     pub pending_complete_task: Arc<Mutex<Option<String>>>,
     #[allow(dead_code)]
@@ -222,10 +225,35 @@ impl OverlayHandle {
         std::mem::take(&mut *self.pending_start_drag.lock().unwrap())
     }
 
+    pub fn take_minimize(&self) -> bool {
+        std::mem::take(&mut *self.pending_minimize.lock().unwrap())
+    }
+
+    pub fn take_maximize_restore(&self) -> bool {
+        std::mem::take(&mut *self.pending_maximize_restore.lock().unwrap())
+    }
+
+    pub fn take_close_window(&self) -> bool {
+        std::mem::take(&mut *self.pending_close_window.lock().unwrap())
+    }
+
     pub fn start_drag_window(&self) {
         if let Err(e) = self.window.drag_window() {
             tracing::warn!("windows overlay drag_window failed: {e}");
         }
+    }
+
+    pub fn minimize_window(&self) {
+        self.window.set_minimized(true);
+    }
+
+    pub fn maximize_restore_window(&self) {
+        self.window.set_maximized(!self.window.is_maximized());
+        self.resize_webview();
+    }
+
+    pub fn close_window(&self) {
+        self.window.set_visible(false);
     }
 
     pub fn take_cancel_task(&self) -> Option<String> {
@@ -271,6 +299,9 @@ pub fn show(event_loop: &ActiveEventLoop, width: f32, height: f32) -> OverlayHan
     let pending_toggle_equipment: Arc<Mutex<Option<String>>> = Default::default();
     let pending_toggle_zoom: Arc<Mutex<bool>> = Default::default();
     let pending_start_drag: Arc<Mutex<bool>> = Default::default();
+    let pending_minimize: Arc<Mutex<bool>> = Default::default();
+    let pending_maximize_restore: Arc<Mutex<bool>> = Default::default();
+    let pending_close_window: Arc<Mutex<bool>> = Default::default();
     let pending_cancel_task: Arc<Mutex<Option<String>>> = Default::default();
     let pending_complete_task: Arc<Mutex<Option<String>>> = Default::default();
 
@@ -309,6 +340,9 @@ pub fn show(event_loop: &ActiveEventLoop, width: f32, height: f32) -> OverlayHan
     let pte = pending_toggle_equipment.clone();
     let ptz = pending_toggle_zoom.clone();
     let psd = pending_start_drag.clone();
+    let pmn = pending_minimize.clone();
+    let pmr = pending_maximize_restore.clone();
+    let pcw = pending_close_window.clone();
     let pct = pending_cancel_task.clone();
     let pcmt = pending_complete_task.clone();
 
@@ -361,6 +395,15 @@ pub fn show(event_loop: &ActiveEventLoop, width: f32, height: f32) -> OverlayHan
             UiToOverlayCommand::StartDrag => {
                 *psd.lock().unwrap() = true;
             }
+            UiToOverlayCommand::Minimize => {
+                *pmn.lock().unwrap() = true;
+            }
+            UiToOverlayCommand::MaximizeRestore => {
+                *pmr.lock().unwrap() = true;
+            }
+            UiToOverlayCommand::CloseWindow => {
+                *pcw.lock().unwrap() = true;
+            }
             UiToOverlayCommand::CancelTask(id) => {
                 *pct.lock().unwrap() = Some(id);
             }
@@ -397,6 +440,9 @@ pub fn show(event_loop: &ActiveEventLoop, width: f32, height: f32) -> OverlayHan
         pending_toggle_equipment,
         pending_toggle_zoom,
         pending_start_drag,
+        pending_minimize,
+        pending_maximize_restore,
+        pending_close_window,
         pending_cancel_task,
         pending_complete_task,
         request_quit: false,

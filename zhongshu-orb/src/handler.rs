@@ -341,6 +341,15 @@ impl ZhongshuApp {
         if ov.take_start_drag() {
             ov.start_drag_window();
         }
+        if ov.take_minimize() {
+            ov.minimize_window();
+        }
+        if ov.take_maximize_restore() {
+            ov.maximize_restore_window();
+        }
+        if ov.take_close_window() {
+            ov.close_window();
+        }
         if ov.take_open_settings() {
             let cfg = crate::config::load();
             ov.show_settings(&crate::overlay::SettingsConfig {

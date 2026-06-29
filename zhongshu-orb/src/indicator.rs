@@ -7,11 +7,11 @@ use zhongshu_core::event::AgentState;
 
 fn state_color(state: AgentState) -> (u8, u8, u8) {
     match state {
-        AgentState::Idle => (100, 140, 255),     // soft indigo
-        AgentState::Thinking => (255, 200, 60),  // warm amber
-        AgentState::Executing => (255, 100, 60), // coral
-        AgentState::Done { success: true } => (60, 200, 100), // green
-        AgentState::Done { success: false } => (220, 60, 60), // red
+        AgentState::Idle => (57, 100, 254),      // Zhongshu primary blue
+        AgentState::Thinking => (68, 152, 255),  // blue-cyan flow
+        AgentState::Executing => (35, 205, 220), // active tool energy
+        AgentState::Done { success: true } => (76, 210, 135),
+        AgentState::Done { success: false } => (235, 76, 86),
     }
 }
 
@@ -37,7 +37,8 @@ mod orb {
             AgentState::Idle => crate::render::OrbMode::Idle,
             AgentState::Thinking => crate::render::OrbMode::Thinking,
             AgentState::Executing => crate::render::OrbMode::Executing,
-            AgentState::Done { .. } => crate::render::OrbMode::Done,
+            AgentState::Done { success: true } => crate::render::OrbMode::DoneSuccess,
+            AgentState::Done { success: false } => crate::render::OrbMode::DoneFailure,
         }
     }
 
@@ -84,8 +85,6 @@ mod orb {
         start_time: Instant,
         /// Visual Done state held at least this long before decaying to Idle.
         done_until: Instant,
-        /// Throttle idle redraws: counter resets on active state.
-        idle_frame: u32,
     }
 
     impl OrbIndicator {
@@ -132,7 +131,6 @@ mod orb {
                 color: ColorLerp::new(c.0, c.1, c.2),
                 start_time: Instant::now(),
                 done_until: Instant::now(),
-                idle_frame: 0,
             }
         }
 
@@ -143,9 +141,8 @@ mod orb {
             self.color.set_target(c.0, c.1, c.2, t);
             // Ensure Done state is visible for at least 900ms.
             if matches!(state, AgentState::Done { .. }) {
-                self.done_until = Instant::now() + std::time::Duration::from_millis(900);
+                self.done_until = Instant::now() + std::time::Duration::from_millis(1100);
             }
-            self.idle_frame = 0;
             self.window.request_redraw();
         }
 
@@ -195,19 +192,7 @@ mod orb {
 
             buf.present().unwrap();
 
-            match effective {
-                AgentState::Idle => {
-                    self.idle_frame += 1;
-                    // Idle: ~8 FPS (every 8th frame at ~60 FPS draw rate).
-                    if self.idle_frame % 8 == 0 {
-                        self.window.request_redraw();
-                    }
-                }
-                _ => {
-                    self.idle_frame = 0;
-                    self.window.request_redraw();
-                }
-            }
+            self.window.request_redraw();
         }
     }
 }

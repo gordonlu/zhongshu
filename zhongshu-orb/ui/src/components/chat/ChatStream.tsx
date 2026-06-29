@@ -6,9 +6,13 @@ const maxRenderedMessages = 220
 export function ChatStream({
   state,
   onLoadMore,
+  onPrompt,
+  suggestions = [],
 }: {
   state: ChatState
   onLoadMore?: () => void
+  onPrompt?: (prompt: string) => void
+  suggestions?: string[]
 }) {
   const empty = state.messages.length === 0 && !state.streamingAssistant
   const hiddenCount = Math.max(0, state.messages.length - maxRenderedMessages)
@@ -25,8 +29,18 @@ export function ChatStream({
       ) : null}
       {empty ? (
         <div className="empty-state">
-          <h1>Zhongshu</h1>
-          <p>Ask from the desktop overlay. Expand the workbench when plan, changes, checks, or replay evidence matters.</p>
+          <div className="empty-mark">中书</div>
+          <h1>Ready for the next task.</h1>
+          <p>Keep the request short. The workbench opens when there is plan, review, or verification state to inspect.</p>
+          {onPrompt && suggestions.length > 0 ? (
+            <div className="empty-suggestions" aria-label="Prompt suggestions">
+              {suggestions.map((suggestion) => (
+                <button key={suggestion} type="button" onClick={() => onPrompt(suggestion)}>
+                  {suggestion}
+                </button>
+              ))}
+            </div>
+          ) : null}
         </div>
       ) : null}
       {hiddenCount > 0 ? (

@@ -267,8 +267,32 @@ impl OverlayHandle {
         false
     }
 
+    pub fn take_minimize(&self) -> bool {
+        false
+    }
+
+    pub fn take_maximize_restore(&self) -> bool {
+        false
+    }
+
+    pub fn take_close_window(&self) -> bool {
+        false
+    }
+
     pub fn start_drag_window(&self) {
         let _ = GTK_TX.send(GtkCommand::StartDrag);
+    }
+
+    pub fn minimize_window(&self) {
+        let _ = GTK_TX.send(GtkCommand::Minimize);
+    }
+
+    pub fn maximize_restore_window(&self) {
+        let _ = GTK_TX.send(GtkCommand::MaximizeRestore);
+    }
+
+    pub fn close_window(&self) {
+        let _ = GTK_TX.send(GtkCommand::CloseWindow);
     }
 
     pub fn take_cancel_task(&self) -> Option<String> {

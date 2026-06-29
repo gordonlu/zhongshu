@@ -17,6 +17,9 @@ export type UiToOverlayCommand =
   | { type: 'toggle_equipment'; id: string }
   | { type: 'toggle_zoom' }
   | { type: 'start_drag' }
+  | { type: 'minimize' }
+  | { type: 'maximize_restore' }
+  | { type: 'close_window' }
   | { type: 'cancel_task'; task_id: string }
   | { type: 'complete_task'; task_id: string }
 

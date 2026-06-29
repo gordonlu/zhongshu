@@ -1551,6 +1551,7 @@ mod tests {
             trace_events: vec![HarnessEvent::FileEdit {
                 path: PathBuf::from("a.rs"),
                 diff_hash: "abc".into(),
+                diff: None,
             }],
         };
         let report_b = Report {
@@ -1563,6 +1564,7 @@ mod tests {
             trace_events: vec![HarnessEvent::FileEdit {
                 path: PathBuf::from("b.rs"),
                 diff_hash: "def".into(),
+                diff: None,
             }],
         };
 
@@ -1583,6 +1585,7 @@ mod tests {
             trace_events: vec![HarnessEvent::FileEdit {
                 path: PathBuf::from("shared.rs"),
                 diff_hash: "abc".into(),
+                diff: None,
             }],
         };
         let report_b = Report {
@@ -1595,6 +1598,7 @@ mod tests {
             trace_events: vec![HarnessEvent::FileEdit {
                 path: PathBuf::from("shared.rs"),
                 diff_hash: "def".into(),
+                diff: None,
             }],
         };
 
@@ -1622,6 +1626,7 @@ mod tests {
             trace_events: vec![HarnessEvent::FileEdit {
                 path: PathBuf::from("src/a.rs"),
                 diff_hash: "abc".into(),
+                diff: None,
             }],
         };
 
@@ -1649,6 +1654,7 @@ mod tests {
             trace_events: vec![HarnessEvent::FileEdit {
                 path: PathBuf::from("src/b.rs"),
                 diff_hash: "abc".into(),
+                diff: None,
             }],
         };
 
@@ -1678,6 +1684,7 @@ mod tests {
             trace_events: vec![HarnessEvent::FileEdit {
                 path: PathBuf::from("src/anything.rs"),
                 diff_hash: "abc".into(),
+                diff: None,
             }],
         };
 
@@ -1699,6 +1706,7 @@ mod tests {
             trace_events: vec![HarnessEvent::FileEdit {
                 path: PathBuf::from("src/a.rs"),
                 diff_hash: "abc".into(),
+                diff: None,
             }],
         };
 

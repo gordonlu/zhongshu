@@ -170,6 +170,8 @@ fn protocol_response(
     http::Response::builder()
         .status(status)
         .header(http::header::CONTENT_TYPE, content_type)
+        .header(http::header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
+        .header(http::header::EXPIRES, "0")
         .body(Cow::Owned(body))
         .unwrap_or_else(|_| http::Response::new(Cow::Borrowed(&b"response build failed"[..])))
 }

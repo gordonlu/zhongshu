@@ -28,6 +28,10 @@ pub(crate) enum GtkCommand {
     Eval(String),
     Show(f32, f32),
     Hide,
+    Minimize,
+    MaximizeRestore,
+    CloseWindow,
+    StartDrag,
 }
 
 pub(crate) static GTK_TX: once_cell::sync::Lazy<crossbeam_channel::Sender<GtkCommand>> =
@@ -39,7 +43,7 @@ pub(crate) static GTK_TX: once_cell::sync::Lazy<crossbeam_channel::Sender<GtkCom
             window.set_title("Zhongshu");
             window.set_default_size(520, 800);
             window.set_default_size(520, 800);
-            window.set_decorated(true);
+            window.set_decorated(false);
             window.set_resizable(true);
             window.connect_delete_event(|w, _| {
                 w.hide();
@@ -86,6 +90,22 @@ pub(crate) static GTK_TX: once_cell::sync::Lazy<crossbeam_channel::Sender<GtkCom
                         }
                         GtkCommand::Hide => {
                             window.hide();
+                        }
+                        GtkCommand::Minimize => {
+                            window.iconify();
+                        }
+                        GtkCommand::MaximizeRestore => {
+                            if window.is_maximized() {
+                                window.unmaximize();
+                            } else {
+                                window.maximize();
+                            }
+                        }
+                        GtkCommand::CloseWindow => {
+                            window.close();
+                        }
+                        GtkCommand::StartDrag => {
+                            window.begin_move_drag(1, 0, 0, 0);
                         }
                     }
                 }
@@ -247,7 +267,9 @@ impl OverlayHandle {
         false
     }
 
-    pub fn start_drag_window(&self) {}
+    pub fn start_drag_window(&self) {
+        let _ = GTK_TX.send(GtkCommand::StartDrag);
+    }
 
     pub fn take_cancel_task(&self) -> Option<String> {
         std::mem::take(&mut *self.pending_cancel_task.lock().unwrap())
@@ -367,7 +389,18 @@ pub fn show(_event_loop: &ActiveEventLoop, width: f32, height: f32) -> OverlayHa
                 UiToOverlayCommand::ToggleZoom => {
                     *ptz.lock().unwrap() = true;
                 }
-                UiToOverlayCommand::StartDrag => {}
+                UiToOverlayCommand::StartDrag => {
+                    let _ = GTK_TX.send(GtkCommand::StartDrag);
+                }
+                UiToOverlayCommand::Minimize => {
+                    let _ = GTK_TX.send(GtkCommand::Minimize);
+                }
+                UiToOverlayCommand::MaximizeRestore => {
+                    let _ = GTK_TX.send(GtkCommand::MaximizeRestore);
+                }
+                UiToOverlayCommand::CloseWindow => {
+                    let _ = GTK_TX.send(GtkCommand::CloseWindow);
+                }
                 UiToOverlayCommand::CancelTask(id) => {
                     *pct.lock().unwrap() = Some(id);
                 }

@@ -236,6 +236,9 @@ pub enum UiToOverlayCommand {
     ToggleEquipment(String),
     ToggleZoom,
     StartDrag,
+    Minimize,
+    MaximizeRestore,
+    CloseWindow,
     CancelTask(String),
     CompleteTask(String),
     Unknown,
@@ -346,6 +349,9 @@ pub fn parse_ui_command(body: &str) -> UiToOverlayCommand {
             .unwrap_or(UiToOverlayCommand::Unknown),
         Some("toggle_zoom") => UiToOverlayCommand::ToggleZoom,
         Some("start_drag") => UiToOverlayCommand::StartDrag,
+        Some("minimize") => UiToOverlayCommand::Minimize,
+        Some("maximize_restore") => UiToOverlayCommand::MaximizeRestore,
+        Some("close_window") => UiToOverlayCommand::CloseWindow,
         Some("cancel_task") => msg["task_id"]
             .as_str()
             .map(|id| UiToOverlayCommand::CancelTask(id.to_string()))

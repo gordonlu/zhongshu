@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use deeplossless::protocol::ReasoningEffortMode;
 use deeplossless::runtime::RuntimePolicyConfig;
 use deeplossless::runtime_coordinator::{CoordinatorConfig, RuntimeCoordinator};
 use serde::{Deserialize, Serialize};
@@ -174,6 +175,10 @@ impl DeeplosslessProxy {
             summarizer_budget: 2000,
             policy_config: RuntimePolicyConfig::default(),
             workspace: None,
+            reasoning_effort: ReasoningEffortMode::Passthrough,
+            dsml_parse: true,
+            dsml_emit: false,
+            quick_instruction: false,
         };
 
         let coordinator = RuntimeCoordinator::build(coord_config).await?;

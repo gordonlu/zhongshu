@@ -17,10 +17,10 @@ export function ApprovalBar({
         <span>{request.command}</span>
       </div>
       <div className="approval-actions">
-        <button type="button" className="secondary-button" onClick={onDeny}>
+        <button type="button" className="secondary-button" data-tooltip="Deny this request" onClick={onDeny}>
           Deny
         </button>
-        <button type="button" className="primary-button" onClick={onApprove}>
+        <button type="button" className="primary-button" data-tooltip="Approve this request" onClick={onApprove}>
           Allow
         </button>
       </div>

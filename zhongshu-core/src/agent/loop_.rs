@@ -574,6 +574,7 @@ pub async fn run_agent(
                                 HarnessEvent::FileEdit {
                                     path: PathBuf::from(path_str),
                                     diff_hash: args_hash.clone(),
+                                    diff: None,
                                 },
                             );
                         }

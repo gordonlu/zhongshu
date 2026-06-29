@@ -99,6 +99,7 @@ pub enum HarnessEvent {
     FileEdit {
         path: PathBuf,
         diff_hash: String,
+        diff: Option<String>,
     },
     Verification {
         command: String,

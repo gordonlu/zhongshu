@@ -5,15 +5,18 @@ import {
   CircleStop,
   ClipboardList,
   Code2,
+  Minus,
   Moon,
   PanelRight,
   Send,
   Settings,
   ShieldAlert,
+  Square,
   Sun,
   Wrench,
   X,
   ZoomIn,
+  ZoomOut,
 } from 'lucide-react'
 import { createIpcBridge } from './ipc/bridge'
 import type { AuthRequest, OverlayToUiEvent, SettingsConfig } from './ipc/events'
@@ -51,6 +54,7 @@ export function App() {
   const [resourceDialog, setResourceDialog] = useState<ResourceDialogState | null>(null)
   const [workbenchOpen, setWorkbenchOpen] = useState(true)
   const [zoomActive, setZoomActive] = useState(false)
+  const [isMaximized, setIsMaximized] = useState(false)
   const [theme, setTheme] = useState<Theme>(initialTheme)
   const [toast, setToast] = useState<string | null>(null)
   const [showPersonality, setShowPersonality] = useState(false)
@@ -138,7 +142,8 @@ export function App() {
   }, [authRequest, chatState.runtimeState, codingState.active, codingState.verifications])
 
   return (
-    <div className="app-shell" data-theme={theme}>
+  <>
+    <div className="app-shell" data-theme={theme} data-layout={isCodingMode ? 'coding' : 'assistant'}>
       <header className="titlebar" onMouseDown={startWindowDrag}>
         <div className="brand">
           <div className="brand-mark">Z</div>
@@ -150,6 +155,8 @@ export function App() {
         <div className="mode-switch" data-no-drag>
           <button
             type="button"
+            data-tooltip-dir="below"
+            data-tooltip="Assistant mode"
             className={mode === 'assistant' ? 'active' : undefined}
             onClick={() => bridge.send({ type: 'save_settings', config: { mode: 'assistant' } })}
           >
@@ -157,45 +164,58 @@ export function App() {
           </button>
           <button
             type="button"
+            data-tooltip-dir="below"
+            data-tooltip="Coding mode"
             className={mode === 'coding' ? 'active' : undefined}
             onClick={() => bridge.send({ type: 'save_settings', config: { mode: 'coding' } })}
           >
             Coding
           </button>
         </div>
+        <div className="titlebar-right">
         <div className="titlebar-status" data-state={statusText}>
           {authRequest ? <ShieldAlert size={14} /> : codingState.active ? <Code2 size={14} /> : <CheckCircle2 size={14} />}
           <span>{statusText}</span>
         </div>
         <div className="titlebar-actions">
+          {isCodingMode ? (
+            <button
+              type="button"
+              className="icon-button optional-title-action"
+              aria-label="Toggle coding workbench"
+              data-tooltip-dir="below"
+              data-tooltip="Coding workbench"
+              onClick={() => setWorkbenchOpen((value) => !value)}
+            >
+              <PanelRight size={iconSize} />
+            </button>
+          ) : null}
           <button
             type="button"
-            className="icon-button"
-            aria-label="Toggle coding workbench"
-            onClick={() => setWorkbenchOpen((value) => !value)}
-          >
-            <PanelRight size={iconSize} />
-          </button>
-          <button
-            type="button"
-            className="icon-button"
+            className="icon-button optional-title-action"
             aria-label="List tasks"
+            data-tooltip-dir="below"
+            data-tooltip="Tasks"
             onClick={() => bridge.send({ type: 'list_tasks' })}
           >
             <ClipboardList size={iconSize} />
           </button>
           <button
             type="button"
-            className="icon-button"
+            className="icon-button optional-title-action"
             aria-label="List runbooks"
+            data-tooltip-dir="below"
+            data-tooltip="Runbooks"
             onClick={() => bridge.send({ type: 'list_runbooks' })}
           >
             <BookOpen size={iconSize} />
           </button>
           <button
             type="button"
-            className="icon-button"
+            className="icon-button optional-title-action"
             aria-label="List equipment"
+            data-tooltip-dir="below"
+            data-tooltip="Equipment"
             onClick={() => bridge.send({ type: 'list_equipment' })}
           >
             <Wrench size={iconSize} />
@@ -204,6 +224,8 @@ export function App() {
             type="button"
             className="icon-button"
             aria-label="Toggle theme"
+            data-tooltip-dir="below"
+            data-tooltip={theme === 'dark' ? 'Light mode' : 'Dark mode'}
             onClick={() => setTheme((value) => (value === 'dark' ? 'light' : 'dark'))}
           >
             {theme === 'dark' ? <Sun size={iconSize} /> : <Moon size={iconSize} />}
@@ -211,19 +233,58 @@ export function App() {
           <button
             type="button"
             className={zoomActive ? 'icon-button active' : 'icon-button'}
-            aria-label="Toggle zoom"
+            aria-label={zoomActive ? 'Zoom out' : 'Zoom in'}
+            data-tooltip-dir="below"
+            data-tooltip={zoomActive ? 'Zoom out' : 'Zoom in'}
             onClick={() => bridge.send({ type: 'toggle_zoom' })}
           >
-            <ZoomIn size={iconSize} />
+            {zoomActive ? <ZoomOut size={iconSize} /> : <ZoomIn size={iconSize} />}
           </button>
           <button
             type="button"
             className="icon-button"
             aria-label="Open settings"
+            data-tooltip-dir="below"
+            data-tooltip="Settings"
             onClick={() => bridge.send({ type: 'open_settings' })}
           >
             <Settings size={iconSize} />
           </button>
+          <span className="titlebar-separator" />
+          <button
+            type="button"
+            className="win-button"
+            aria-label="Minimize"
+            data-tooltip-dir="below"
+            data-tooltip="Minimize"
+            onClick={() => bridge.send({ type: 'minimize' })}
+          >
+            <Minus size={14} />
+          </button>
+          <button
+            type="button"
+            className="win-button"
+            aria-label={isMaximized ? 'Restore' : 'Maximize'}
+            data-tooltip-dir="below"
+            data-tooltip={isMaximized ? 'Restore' : 'Maximize'}
+            onClick={() => {
+              setIsMaximized((v) => !v)
+              bridge.send({ type: 'maximize_restore' })
+            }}
+          >
+            <Square size={12} />
+          </button>
+          <button
+            type="button"
+            className="win-button win-close"
+            aria-label="Close"
+            data-tooltip-dir="below"
+            data-tooltip="Close"
+            onClick={() => bridge.send({ type: 'close_window' })}
+          >
+            <X size={14} />
+          </button>
+        </div>
         </div>
       </header>
 
@@ -269,6 +330,7 @@ export function App() {
           type="button"
           className="stop-button"
           aria-label="Stop"
+          data-tooltip="Stop"
           onClick={() => bridge.send({ type: 'stop' })}
         >
           <CircleStop size={16} />
@@ -283,6 +345,7 @@ export function App() {
           type="button"
           className="send-button"
           aria-label="Send"
+          data-tooltip="Send"
           onClick={submitComposer}
         >
           <Send size={16} />
@@ -343,7 +406,8 @@ export function App() {
         </div>
       ) : null}
 
-      {toast ? <div className="toast">{toast}</div> : null}
     </div>
-  )
+    <div className="window-border" />
+    {toast ? <div className="toast">{toast}</div> : null}
+  </>)
 }

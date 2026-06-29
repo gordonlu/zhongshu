@@ -284,6 +284,7 @@ pub fn first_wave_replay_fixtures() -> Vec<ReplayFixtureEvidence> {
                 HarnessEvent::FileEdit {
                     path: PathBuf::from("src/lib.rs"),
                     diff_hash: "fix-failing-unit".into(),
+                    diff: None,
                 },
                 HarnessEvent::Verification {
                     command: "cargo test failing_unit".into(),
@@ -327,10 +328,12 @@ pub fn first_wave_replay_fixtures() -> Vec<ReplayFixtureEvidence> {
                 HarnessEvent::FileEdit {
                     path: PathBuf::from("src/api.rs"),
                     diff_hash: "api-signature".into(),
+                    diff: None,
                 },
                 HarnessEvent::FileEdit {
                     path: PathBuf::from("src/app.rs"),
                     diff_hash: "api-consumer".into(),
+                    diff: None,
                 },
                 HarnessEvent::ToolCall {
                     step: 3,
@@ -385,6 +388,7 @@ pub fn first_wave_replay_fixtures() -> Vec<ReplayFixtureEvidence> {
                 HarnessEvent::FileEdit {
                     path: PathBuf::from("src/slug.rs"),
                     diff_hash: "slug-fix".into(),
+                    diff: None,
                 },
                 HarnessEvent::Verification {
                     command: "cargo test slug_recovery".into(),
@@ -610,7 +614,7 @@ fn normalized_event_line(event: &HarnessEvent) -> String {
             tool_name, success, ..
         } => format!("tool|{tool_name}|success={success}"),
         HarnessEvent::FileRead { path } => format!("read|{}", normalize_path(path)),
-        HarnessEvent::FileEdit { path, diff_hash } => {
+        HarnessEvent::FileEdit { path, diff_hash, .. } => {
             format!("edit|{}|{diff_hash}", normalize_path(path))
         }
         HarnessEvent::PatchPreview { path, operation, diff_summary, .. } => {
@@ -760,6 +764,7 @@ mod tests {
                 HarnessEvent::FileEdit {
                     path: PathBuf::from("src/lib.rs"),
                     diff_hash: "x".into(),
+                    diff: None,
                 },
                 HarnessEvent::RunCompleted {
                     timestamp: 1,

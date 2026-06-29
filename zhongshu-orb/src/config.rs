@@ -386,7 +386,7 @@ fn default_orb_size() -> u32 {
     64
 }
 fn default_overlay_width() -> f32 {
-    520.0
+    600.0
 }
 fn default_overlay_height() -> f32 {
     800.0
@@ -883,7 +883,7 @@ pub fn load() -> AppConfig {
     }
 
     // Ensure UI minimums (config file may have old defaults baked in).
-    cfg.ui.overlay_width = cfg.ui.overlay_width.max(520.0);
+    cfg.ui.overlay_width = cfg.ui.overlay_width.max(600.0);
     cfg.ui.overlay_height = cfg.ui.overlay_height.max(800.0);
     if cfg.deeplossless.proxy_port == 0 {
         cfg.deeplossless.proxy_port = 8081;

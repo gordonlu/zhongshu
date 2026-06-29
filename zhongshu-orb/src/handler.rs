@@ -294,10 +294,7 @@ impl ZhongshuApp {
             if let Some(ref mode) = settings.mode {
                 cfg.agent.mode = mode.clone();
                 self.controller.set_mode(mode.clone());
-                // Resize window and notify frontend.
                 if let Some(ref ov) = self.overlay {
-                    let (w, h) = self.overlay_size();
-                    ov.show_window(w, h);
                     ov.send(&serde_json::json!({"type":"mode_change","mode":mode}));
                 }
             }
@@ -337,10 +334,8 @@ impl ZhongshuApp {
         if ov.take_toggle_zoom() {
             self.overlay_zoomed = !self.overlay_zoomed;
             let scale = if self.overlay_zoomed { 2.0 } else { 1.0 };
-            ov.show_window(
-                self.config.ui.overlay_width * scale,
-                self.config.ui.overlay_height * scale,
-            );
+            let (w, h) = self.overlay_size();
+            ov.show_window(w * scale, h * scale);
             ov.send(&serde_json::json!({"type":"zoom","active": self.overlay_zoomed}));
         }
         if ov.take_start_drag() {

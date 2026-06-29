@@ -482,6 +482,45 @@ pub async fn run_agent(
                         ));
                 if is_mutation {
                     runtime.harness_state.verification.last_edit_step = harness_step;
+
+                    // Capture diff for mutation tools
+                    let root = std::env::current_dir().unwrap_or_default();
+
+                    let path_from_args: Option<std::path::PathBuf> =
+                        serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                            .ok()
+                            .and_then(|val| {
+                                val.get("file_path")
+                                    .or_else(|| val.get("path"))
+                                    .and_then(|v| v.as_str())
+                                    .map(std::path::PathBuf::from)
+                            });
+
+                    let diff: Option<String> = if let Some(ref path) = path_from_args {
+                        Some(crate::harness::tool::transaction::safe_capture_diff(
+                            &root,
+                            path,
+                        ))
+                    } else if tc.function.name == "shell" {
+                        crate::harness::tool::transaction::capture_all_diff(&root)
+                    } else {
+                        None
+                    };
+
+                    record_trace(
+                        runtime,
+                        HarnessEvent::FileEdit {
+                            path: path_from_args.unwrap_or_default(),
+                            diff_hash: diff.as_ref().map(|d| {
+                                use std::hash::{Hash, Hasher};
+                                let mut hasher =
+                                    std::collections::hash_map::DefaultHasher::new();
+                                d.hash(&mut hasher);
+                                hasher.finish().to_string()
+                            }).unwrap_or_default(),
+                            diff,
+                        },
+                    );
                 }
 
                 // Save previous phase before inference (for next pre_turn)
@@ -560,26 +599,6 @@ pub async fn run_agent(
 
                 // Architecture: re-index + rule evaluation on mutation
                 if is_mutation {
-                    // Trace: record FileEdit from tool args if possible
-                    if let Ok(val) =
-                        serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
-                    {
-                        if let Some(path_str) = val
-                            .get("file_path")
-                            .and_then(|v| v.as_str())
-                            .or_else(|| val.get("path").and_then(|v| v.as_str()))
-                        {
-                            record_trace(
-                                runtime,
-                                HarnessEvent::FileEdit {
-                                    path: PathBuf::from(path_str),
-                                    diff_hash: args_hash.clone(),
-                                    diff: None,
-                                },
-                            );
-                        }
-                    }
-
                     // Lazy-build the project index on first mutation
                     let root = std::env::current_dir().unwrap_or_default();
                     if runtime.harness_state.architecture.index.is_none() {

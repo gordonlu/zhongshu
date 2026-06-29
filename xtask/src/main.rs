@@ -377,6 +377,21 @@ fn proof_check_specs() -> Vec<CheckSpec> {
             skip_reason: None,
         },
         CheckSpec {
+            id: "capability-replay-fixtures",
+            title: "Capability replay fixtures",
+            command: vec![
+                "cargo",
+                "test",
+                "-p",
+                "zhongshu-core",
+                "harness::verification::proof::tests::first_wave_replay_fixtures_pass_expected_assertions",
+            ],
+            areas: &[ProofArea::CoreRuntime, ProofArea::Harness, ProofArea::ProofRunner],
+            modes: &[ProofMode::Local, ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
+            requires_loopback_bind: false,
+            skip_reason: None,
+        },
+        CheckSpec {
             id: "capability-metadata",
             title: "Capability case metadata",
             command: vec![
@@ -387,7 +402,7 @@ fn proof_check_specs() -> Vec<CheckSpec> {
                 "harness::verification::proof::tests::capability_cases_cover_first_wave",
             ],
             areas: &[ProofArea::CoreRuntime, ProofArea::Harness, ProofArea::ProofRunner],
-            modes: &[ProofMode::Local, ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
+            modes: &[ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
             requires_loopback_bind: false,
             skip_reason: None,
         },

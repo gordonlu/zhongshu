@@ -276,6 +276,14 @@ impl PatchOperation {
             PatchOperation::WriteFile(request) => &request.path,
         }
     }
+
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            PatchOperation::Replace(_) => "replace",
+            PatchOperation::MultiReplace(_) => "multi_replace",
+            PatchOperation::WriteFile(_) => "write_file",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -559,6 +567,19 @@ impl PatchDiffPayload {
             added_lines: preview.diff.added_lines,
             before_hash: preview.diff.before_hash.clone(),
             after_hash: preview.diff.after_hash.clone(),
+        }
+    }
+
+    pub fn from_diff(diff: &PatchDiff, summary: impl Into<String>) -> Self {
+        Self {
+            summary: summary.into(),
+            unified_diff: String::new(),
+            changed: diff.changed,
+            replace_all: diff.replace_all,
+            removed_lines: diff.removed_lines,
+            added_lines: diff.added_lines,
+            before_hash: diff.before_hash.clone(),
+            after_hash: diff.after_hash.clone(),
         }
     }
 

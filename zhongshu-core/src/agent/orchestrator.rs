@@ -741,6 +741,8 @@ impl Orchestrator {
         &self,
         engine: &mut PatchEngine,
         review: &WorkerMergeReview,
+        session_id: Option<String>,
+        trace_events: &mut Vec<HarnessEvent>,
     ) -> WorkerPatchApplyReport {
         if review.status != WorkerMergeStatus::Approved
             || review.decisions.iter().any(|decision| !decision.approved)
@@ -779,7 +781,21 @@ impl Orchestrator {
                 }
 
                 match engine.apply_operation(operation.clone()) {
-                    Ok(result) => applied.push(result),
+                    Ok(result) => {
+                        trace_events.push(patch_preview_event(
+                            session_id.clone(),
+                            operation.path(),
+                            operation.kind_name(),
+                            &result,
+                        ));
+                        trace_events.push(patch_applied_event(
+                            session_id.clone(),
+                            operation.path(),
+                            operation.kind_name(),
+                            true,
+                        ));
+                        applied.push(result);
+                    }
                     Err(failure) => {
                         failures.push(apply_failure_from_patch(&decision.proposal.worker, failure))
                     }
@@ -854,7 +870,7 @@ impl Orchestrator {
         proposals: Vec<WorkerPatchProposal>,
         engine: &mut PatchEngine,
     ) -> anyhow::Result<WorkerPatchPipelineReport> {
-        let execution = self
+        let mut execution = self
             .execute_with_file_claims_mode(
                 assignments.clone(),
                 coordinator,
@@ -866,7 +882,7 @@ impl Orchestrator {
             .await?;
         let merge_review = self.review_worker_patch_proposals(&assignments, &execution, proposals);
         let apply_report = if merge_review.status == WorkerMergeStatus::Approved {
-            self.apply_worker_patch_review(engine, &merge_review)
+            self.apply_worker_patch_review(engine, &merge_review, session_id.clone(), &mut execution.trace_events)
         } else {
             WorkerPatchApplyReport {
                 applied: Vec::new(),
@@ -1164,6 +1180,35 @@ fn worker_completed_event(
         task_id: worker_task_id(assignment),
         success,
         trace_event_count,
+    }
+}
+
+fn patch_preview_event(
+    session_id: Option<String>,
+    path: &std::path::Path,
+    operation: &str,
+    diff_result: &PatchResult,
+) -> HarnessEvent {
+    HarnessEvent::PatchPreview {
+        session_id,
+        path: path.to_path_buf(),
+        operation: operation.to_string(),
+        diff_summary: format!("+{} -{}", diff_result.diff.added_lines, diff_result.diff.removed_lines),
+        diff: Some(crate::patch::PatchDiffPayload::from_diff(&diff_result.diff, format!("+{} -{}", diff_result.diff.added_lines, diff_result.diff.removed_lines))),
+    }
+}
+
+fn patch_applied_event(
+    session_id: Option<String>,
+    path: &std::path::Path,
+    operation: &str,
+    changed: bool,
+) -> HarnessEvent {
+    HarnessEvent::PatchApplied {
+        session_id,
+        path: path.to_path_buf(),
+        operation: operation.to_string(),
+        changed,
     }
 }
 
@@ -1857,7 +1902,7 @@ mod tests {
             vec![proposal],
         );
 
-        let report = orch.apply_worker_patch_review(&mut engine, &review);
+        let report = orch.apply_worker_patch_review(&mut engine, &review, None, &mut vec![]);
 
         assert!(report.passed());
         assert_eq!(report.applied.len(), 1);
@@ -1879,7 +1924,7 @@ mod tests {
             blockers: Vec::new(),
         };
 
-        let report = orch.apply_worker_patch_review(&mut engine, &review);
+        let report = orch.apply_worker_patch_review(&mut engine, &review, None, &mut vec![]);
 
         assert!(!report.passed());
         assert_eq!(report.failures.len(), 1);

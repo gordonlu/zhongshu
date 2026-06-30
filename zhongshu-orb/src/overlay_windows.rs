@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 
 use serde_json::json;
@@ -10,7 +11,10 @@ use wry::Rect;
 
 use crate::overlay_assets::select_overlay_asset;
 use crate::overlay_contract::{parse_ui_command, UiToOverlayCommand};
-use crate::overlay_host::{log_selected_asset, webview_builder_for_asset};
+use crate::overlay_host::{
+    log_selected_asset, webview_builder_for_asset, OverlayHostCommand, OverlayHostCommandQueue,
+    OverlayHostDiagnostics,
+};
 
 #[allow(unused_imports)]
 pub use crate::overlay_contract::{
@@ -32,18 +36,16 @@ pub struct OverlayHandle {
     pub pending_list_equipment: Arc<Mutex<bool>>,
     pub pending_toggle_equipment: Arc<Mutex<Option<String>>>,
     pub pending_toggle_zoom: Arc<Mutex<bool>>,
-    pub pending_start_drag: Arc<Mutex<bool>>,
-    pub pending_minimize: Arc<Mutex<bool>>,
-    pub pending_maximize_restore: Arc<Mutex<bool>>,
-    pub pending_close_window: Arc<Mutex<bool>>,
+    pub host_commands: OverlayHostCommandQueue,
     pub pending_cancel_task: Arc<Mutex<Option<String>>>,
     pub pending_complete_task: Arc<Mutex<Option<String>>>,
     #[allow(dead_code)]
     pub request_quit: bool,
     #[allow(dead_code)]
     pub personality_selected: bool,
-    window: Window,
+    window: Arc<Window>,
     webview: Option<wry::WebView>,
+    fallback_surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
     startup_error: Option<String>,
 }
 
@@ -135,7 +137,15 @@ impl OverlayHandle {
         Some(self.window.id())
     }
 
-    pub fn handle_window_event(&self, event: &WindowEvent) -> bool {
+    pub fn host_diagnostics(&self) -> OverlayHostDiagnostics {
+        OverlayHostDiagnostics {
+            platform: "windows".to_string(),
+            webview_available: self.webview.is_some(),
+            startup_error: self.startup_error.clone(),
+        }
+    }
+
+    pub fn handle_window_event(&mut self, event: &WindowEvent) -> bool {
         match event {
             WindowEvent::CloseRequested => {
                 self.window.set_visible(false);
@@ -143,6 +153,11 @@ impl OverlayHandle {
             }
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
                 self.resize_webview();
+                self.window.request_redraw();
+                true
+            }
+            WindowEvent::RedrawRequested if self.startup_error.is_some() => {
+                self.render_startup_error();
                 true
             }
             _ => false,
@@ -222,19 +237,19 @@ impl OverlayHandle {
     }
 
     pub fn take_start_drag(&self) -> bool {
-        std::mem::take(&mut *self.pending_start_drag.lock().unwrap())
+        self.host_commands.take(OverlayHostCommand::StartDrag)
     }
 
     pub fn take_minimize(&self) -> bool {
-        std::mem::take(&mut *self.pending_minimize.lock().unwrap())
+        self.host_commands.take(OverlayHostCommand::Minimize)
     }
 
     pub fn take_maximize_restore(&self) -> bool {
-        std::mem::take(&mut *self.pending_maximize_restore.lock().unwrap())
+        self.host_commands.take(OverlayHostCommand::MaximizeRestore)
     }
 
     pub fn take_close_window(&self) -> bool {
-        std::mem::take(&mut *self.pending_close_window.lock().unwrap())
+        self.host_commands.take(OverlayHostCommand::CloseWindow)
     }
 
     pub fn start_drag_window(&self) {
@@ -254,6 +269,35 @@ impl OverlayHandle {
 
     pub fn close_window(&self) {
         self.window.set_visible(false);
+    }
+
+    fn render_startup_error(&mut self) {
+        let Some(surface) = self.fallback_surface.as_mut() else {
+            return;
+        };
+        let Some(error) = self.startup_error.as_deref() else {
+            return;
+        };
+        let size = self.window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
+        let Some(width) = NonZeroU32::new(size.width) else {
+            return;
+        };
+        let Some(height) = NonZeroU32::new(size.height) else {
+            return;
+        };
+        if surface.resize(width, height).is_err() {
+            return;
+        }
+        let Ok(mut buffer) = surface.buffer_mut() else {
+            return;
+        };
+        draw_startup_error(&mut buffer, size.width, size.height, error);
+        if let Err(e) = buffer.present() {
+            tracing::warn!("windows startup error fallback present failed: {e}");
+        }
     }
 
     pub fn take_cancel_task(&self) -> Option<String> {
@@ -298,10 +342,7 @@ pub fn show(event_loop: &ActiveEventLoop, width: f32, height: f32) -> OverlayHan
     let pending_list_equipment: Arc<Mutex<bool>> = Default::default();
     let pending_toggle_equipment: Arc<Mutex<Option<String>>> = Default::default();
     let pending_toggle_zoom: Arc<Mutex<bool>> = Default::default();
-    let pending_start_drag: Arc<Mutex<bool>> = Default::default();
-    let pending_minimize: Arc<Mutex<bool>> = Default::default();
-    let pending_maximize_restore: Arc<Mutex<bool>> = Default::default();
-    let pending_close_window: Arc<Mutex<bool>> = Default::default();
+    let host_commands = OverlayHostCommandQueue::default();
     let pending_cancel_task: Arc<Mutex<Option<String>>> = Default::default();
     let pending_complete_task: Arc<Mutex<Option<String>>> = Default::default();
 
@@ -317,9 +358,11 @@ pub fn show(event_loop: &ActiveEventLoop, width: f32, height: f32) -> OverlayHan
         .with_visible(false)
         .with_window_level(WindowLevel::AlwaysOnTop);
 
-    let window = event_loop
-        .create_window(attrs)
-        .expect("windows overlay window creation failed");
+    let window = Arc::new(
+        event_loop
+            .create_window(attrs)
+            .expect("windows overlay window creation failed"),
+    );
 
     let asset = select_overlay_asset();
     log_selected_asset("windows", &asset);
@@ -339,15 +382,15 @@ pub fn show(event_loop: &ActiveEventLoop, width: f32, height: f32) -> OverlayHan
     let ple = pending_list_equipment.clone();
     let pte = pending_toggle_equipment.clone();
     let ptz = pending_toggle_zoom.clone();
-    let psd = pending_start_drag.clone();
-    let pmn = pending_minimize.clone();
-    let pmr = pending_maximize_restore.clone();
-    let pcw = pending_close_window.clone();
+    let host_commands_for_ipc = host_commands.clone();
     let pct = pending_cancel_task.clone();
     let pcmt = pending_complete_task.clone();
 
     let mut startup_error = None;
-    let webview = match builder
+    let force_startup_error = std::env::var("ZHONGSHU_ORB_FORCE_WEBVIEW2_ERROR")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let builder = builder
         .with_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Zhongshu/1.0")
         .with_ipc_handler(move |request: http::Request<String>| match parse_ui_command(request.body()) {
             UiToOverlayCommand::Submit(text) => {
@@ -393,16 +436,16 @@ pub fn show(event_loop: &ActiveEventLoop, width: f32, height: f32) -> OverlayHan
                 *ptz.lock().unwrap() = true;
             }
             UiToOverlayCommand::StartDrag => {
-                *psd.lock().unwrap() = true;
+                host_commands_for_ipc.push(OverlayHostCommand::StartDrag);
             }
             UiToOverlayCommand::Minimize => {
-                *pmn.lock().unwrap() = true;
+                host_commands_for_ipc.push(OverlayHostCommand::Minimize);
             }
             UiToOverlayCommand::MaximizeRestore => {
-                *pmr.lock().unwrap() = true;
+                host_commands_for_ipc.push(OverlayHostCommand::MaximizeRestore);
             }
             UiToOverlayCommand::CloseWindow => {
-                *pcw.lock().unwrap() = true;
+                host_commands_for_ipc.push(OverlayHostCommand::CloseWindow);
             }
             UiToOverlayCommand::CancelTask(id) => {
                 *pct.lock().unwrap() = Some(id);
@@ -411,16 +454,26 @@ pub fn show(event_loop: &ActiveEventLoop, width: f32, height: f32) -> OverlayHan
                 *pcmt.lock().unwrap() = Some(id);
             }
             UiToOverlayCommand::Unknown => {}
-        })
-        .build_as_child(&window)
-    {
-        Ok(webview) => Some(webview),
-        Err(e) => {
-            let message = format!("WebView2 unavailable: {e}");
-            tracing::error!("{message}");
-            window.set_title(&format!("Zhongshu - {message}"));
-            startup_error = Some(message);
-            None
+        });
+
+    let (webview, fallback_surface) = if force_startup_error {
+        let message = "WebView2 unavailable: forced startup smoke".to_string();
+        tracing::error!("{message}");
+        window.set_title(&format!("Zhongshu - {message}"));
+        startup_error = Some(message);
+        window.request_redraw();
+        (None, create_startup_error_surface(&window))
+    } else {
+        match builder.build_as_child(window.as_ref()) {
+            Ok(webview) => (Some(webview), None),
+            Err(e) => {
+                let message = format!("WebView2 unavailable: {e}");
+                tracing::error!("{message}");
+                window.set_title(&format!("Zhongshu - {message}"));
+                startup_error = Some(message);
+                window.request_redraw();
+                (None, create_startup_error_surface(&window))
+            }
         }
     };
 
@@ -439,18 +492,277 @@ pub fn show(event_loop: &ActiveEventLoop, width: f32, height: f32) -> OverlayHan
         pending_list_equipment,
         pending_toggle_equipment,
         pending_toggle_zoom,
-        pending_start_drag,
-        pending_minimize,
-        pending_maximize_restore,
-        pending_close_window,
+        host_commands,
         pending_cancel_task,
         pending_complete_task,
         request_quit: false,
         personality_selected: false,
         window,
         webview,
+        fallback_surface,
         startup_error,
     };
     handle.show_window(width, height);
     handle
+}
+
+fn create_startup_error_surface(
+    window: &Arc<Window>,
+) -> Option<softbuffer::Surface<Arc<Window>, Arc<Window>>> {
+    match softbuffer::Context::new(window.clone())
+        .and_then(|ctx| softbuffer::Surface::new(&ctx, window.clone()))
+    {
+        Ok(surface) => Some(surface),
+        Err(surface_error) => {
+            tracing::warn!("windows startup error fallback unavailable: {surface_error}");
+            None
+        }
+    }
+}
+
+fn draw_startup_error(buffer: &mut [u32], width: u32, height: u32, error: &str) {
+    let width = width as usize;
+    let height = height as usize;
+    buffer.fill(argb(255, 10, 16, 28));
+    fill_rect(
+        buffer,
+        width,
+        height,
+        0,
+        0,
+        width,
+        56,
+        argb(255, 15, 24, 40),
+    );
+    fill_rect(
+        buffer,
+        width,
+        height,
+        0,
+        55,
+        width,
+        1,
+        argb(255, 43, 58, 83),
+    );
+
+    let panel_x = 36;
+    let panel_y = 92;
+    let panel_w = width.saturating_sub(72).max(1);
+    fill_rect(
+        buffer,
+        width,
+        height,
+        panel_x,
+        panel_y,
+        panel_w,
+        220,
+        argb(255, 17, 24, 39),
+    );
+    fill_rect(
+        buffer,
+        width,
+        height,
+        panel_x,
+        panel_y,
+        6,
+        220,
+        argb(255, 248, 113, 113),
+    );
+
+    draw_text(
+        buffer,
+        width,
+        height,
+        38,
+        20,
+        "ZHONGSHU",
+        3,
+        argb(255, 238, 245, 255),
+    );
+    draw_text(
+        buffer,
+        width,
+        height,
+        panel_x + 26,
+        panel_y + 30,
+        "STARTUP ERROR",
+        3,
+        argb(255, 248, 113, 113),
+    );
+    draw_text(
+        buffer,
+        width,
+        height,
+        panel_x + 26,
+        panel_y + 76,
+        "WEBVIEW2 IS UNAVAILABLE",
+        2,
+        argb(255, 238, 245, 255),
+    );
+    draw_text(
+        buffer,
+        width,
+        height,
+        panel_x + 26,
+        panel_y + 112,
+        "INSTALL MICROSOFT EDGE WEBVIEW2 RUNTIME",
+        2,
+        argb(255, 166, 184, 212),
+    );
+    draw_text(
+        buffer,
+        width,
+        height,
+        panel_x + 26,
+        panel_y + 140,
+        "THEN RESTART ZHONGSHU",
+        2,
+        argb(255, 166, 184, 212),
+    );
+    let detail: String = error
+        .chars()
+        .map(|ch| if ch.is_ascii() { ch } else { '?' })
+        .take(96)
+        .collect();
+    draw_text(
+        buffer,
+        width,
+        height,
+        panel_x + 26,
+        panel_y + 178,
+        &detail.to_uppercase(),
+        1,
+        argb(255, 113, 131, 160),
+    );
+}
+
+fn argb(a: u8, r: u8, g: u8, b: u8) -> u32 {
+    ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fill_rect(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    color: u32,
+) {
+    let end_y = (y + h).min(height);
+    let end_x = (x + w).min(width);
+    for row in y.min(height)..end_y {
+        let offset = row * width;
+        for col in x.min(width)..end_x {
+            buffer[offset + col] = color;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_text(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    text: &str,
+    scale: usize,
+    color: u32,
+) {
+    let mut cursor_x = x;
+    let scale = scale.max(1);
+    for ch in text.chars() {
+        draw_glyph(buffer, width, height, cursor_x, y, ch, scale, color);
+        cursor_x += 6 * scale;
+        if cursor_x >= width.saturating_sub(6 * scale) {
+            break;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_glyph(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    ch: char,
+    scale: usize,
+    color: u32,
+) {
+    let glyph = glyph_rows(ch);
+    for (row, bits) in glyph.iter().enumerate() {
+        for col in 0..5 {
+            if bits & (1 << (4 - col)) == 0 {
+                continue;
+            }
+            fill_rect(
+                buffer,
+                width,
+                height,
+                x + col * scale,
+                y + row * scale,
+                scale,
+                scale,
+                color,
+            );
+        }
+    }
+}
+
+fn glyph_rows(ch: char) -> [u8; 7] {
+    match ch {
+        'A' => [0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
+        'B' => [0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E],
+        'C' => [0x0F, 0x10, 0x10, 0x10, 0x10, 0x10, 0x0F],
+        'D' => [0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E],
+        'E' => [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F],
+        'F' => [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10],
+        'G' => [0x0F, 0x10, 0x10, 0x13, 0x11, 0x11, 0x0F],
+        'H' => [0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
+        'I' => [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1F],
+        'J' => [0x01, 0x01, 0x01, 0x01, 0x11, 0x11, 0x0E],
+        'K' => [0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11],
+        'L' => [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F],
+        'M' => [0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11],
+        'N' => [0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11],
+        'O' => [0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
+        'P' => [0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10],
+        'Q' => [0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D],
+        'R' => [0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11],
+        'S' => [0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E],
+        'T' => [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
+        'U' => [0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
+        'V' => [0x11, 0x11, 0x11, 0x11, 0x0A, 0x0A, 0x04],
+        'W' => [0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11],
+        'X' => [0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11],
+        'Y' => [0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04],
+        'Z' => [0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F],
+        '0' => [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
+        '1' => [0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E],
+        '2' => [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F],
+        '3' => [0x1E, 0x01, 0x01, 0x0E, 0x01, 0x01, 0x1E],
+        '4' => [0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02],
+        '5' => [0x1F, 0x10, 0x10, 0x1E, 0x01, 0x01, 0x1E],
+        '6' => [0x0E, 0x10, 0x10, 0x1E, 0x11, 0x11, 0x0E],
+        '7' => [0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08],
+        '8' => [0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E],
+        '9' => [0x0E, 0x11, 0x11, 0x0F, 0x01, 0x01, 0x0E],
+        ':' => [0x00, 0x04, 0x04, 0x00, 0x04, 0x04, 0x00],
+        '-' => [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00],
+        '_' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F],
+        '.' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C],
+        '/' => [0x01, 0x01, 0x02, 0x04, 0x08, 0x10, 0x10],
+        '(' => [0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02],
+        ')' => [0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08],
+        '[' => [0x0E, 0x08, 0x08, 0x08, 0x08, 0x08, 0x0E],
+        ']' => [0x0E, 0x02, 0x02, 0x02, 0x02, 0x02, 0x0E],
+        '?' => [0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04],
+        ' ' => [0; 7],
+        _ => [0x0E, 0x11, 0x01, 0x02, 0x04, 0x00, 0x04],
+    }
 }

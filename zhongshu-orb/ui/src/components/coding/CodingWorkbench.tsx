@@ -1,9 +1,18 @@
 import type { CodingState } from '../../state/codingReducer'
 import { ChangeSetPanel } from './ChangeSetPanel'
+import { RunSummary } from './RunSummary'
+
+export const WORKBENCH_RENDER_LIMIT = 80
 
 export function CodingWorkbench({ state }: { state: CodingState }) {
   const failedChecks = state.verifications.filter((verification) => !verification.success).length
   const activeWorkers = state.workers.filter((worker) => worker.status === 'running').length
+  const visibleSteps = latestItems(state.steps)
+  const visibleWorkers = latestItems(state.workers)
+  const visibleContext = latestItems(state.contextIncluded)
+  const visibleChanges = latestItems(state.changes)
+  const visibleVerifications = latestItems(state.verifications)
+  const visibleRecovery = latestItems(state.recoveryMessages)
 
   return (
     <aside className="workbench" aria-label="Coding workbench">
@@ -19,13 +28,16 @@ export function CodingWorkbench({ state }: { state: CodingState }) {
         </div>
       </header>
 
+      <RunSummary state={state} />
+
       <section className="workbench-section">
         <div className="section-heading">
           <h2>Plan</h2>
           <span>{state.steps.length}</span>
         </div>
+        <HiddenItemCount hidden={hiddenCount(state.steps)} />
         {state.steps.length === 0 ? <p className="muted">Waiting for plan events.</p> : null}
-        {state.steps.map((step) => (
+        {visibleSteps.map((step) => (
           <div key={step.id} className="workbench-row">
             <span>{step.title}</span>
             <strong>{step.status}</strong>
@@ -38,8 +50,9 @@ export function CodingWorkbench({ state }: { state: CodingState }) {
           <h2>Agents</h2>
           <span>{state.workers.length}</span>
         </div>
+        <HiddenItemCount hidden={hiddenCount(state.workers)} />
         {state.workers.length === 0 ? <p className="muted">No delegated agent activity.</p> : null}
-        {state.workers.map((worker) => (
+        {visibleWorkers.map((worker) => (
           <div key={worker.taskId} className={`workbench-row ${worker.status}`}>
             <span title={worker.reason ?? worker.ownedFiles.join(', ')}>
               {worker.worker}
@@ -65,7 +78,8 @@ export function CodingWorkbench({ state }: { state: CodingState }) {
         {state.droppedEvidence || state.droppedRecent ? (
           <p className="muted">Dropped evidence {state.droppedEvidence ?? 0}, recent {state.droppedRecent ?? 0}</p>
         ) : null}
-        {state.contextIncluded.map((item, index) => (
+        <HiddenItemCount hidden={hiddenCount(state.contextIncluded)} />
+        {visibleContext.map((item, index) => (
           <div key={`${item.description}-${index}`} className="workbench-row">
             <span>{item.description}</span>
             <strong>{item.estimatedTokens}</strong>
@@ -78,7 +92,8 @@ export function CodingWorkbench({ state }: { state: CodingState }) {
           <h2>Review</h2>
           <span>{state.changes.length}</span>
         </div>
-        <ChangeSetPanel changes={state.changes} />
+        <HiddenItemCount hidden={hiddenCount(state.changes)} />
+        <ChangeSetPanel changes={visibleChanges} />
       </section>
 
       <section className="workbench-section">
@@ -86,8 +101,9 @@ export function CodingWorkbench({ state }: { state: CodingState }) {
           <h2>Verification</h2>
           <span>{state.verifications.length}</span>
         </div>
+        <HiddenItemCount hidden={hiddenCount(state.verifications)} />
         {state.verifications.length === 0 ? <p className="muted">No checks.</p> : null}
-        {state.verifications.map((verification, index) => (
+        {visibleVerifications.map((verification, index) => (
           <div key={`${verification.command}-${index}`} className={verification.success ? 'check-pass' : 'check-fail'}>
             <span>{verification.success ? 'pass' : 'fail'}</span>
             <code>{verification.command}</code>
@@ -100,8 +116,9 @@ export function CodingWorkbench({ state }: { state: CodingState }) {
           <h2>Recovery</h2>
           <span>{state.recoveryMessages.length}</span>
         </div>
+        <HiddenItemCount hidden={hiddenCount(state.recoveryMessages)} />
         {state.recoveryMessages.length === 0 ? <p className="muted">No recovery feedback.</p> : null}
-        {state.recoveryMessages.map((message, index) => (
+        {visibleRecovery.map((message, index) => (
           <div key={`${message}-${index}`} className="workbench-row conflict">
             <span>{message}</span>
             <strong>attention</strong>
@@ -121,4 +138,18 @@ export function CodingWorkbench({ state }: { state: CodingState }) {
       ) : null}
     </aside>
   )
+}
+
+function latestItems<T>(items: T[], limit = WORKBENCH_RENDER_LIMIT): T[] {
+  if (items.length <= limit) return items
+  return items.slice(-limit)
+}
+
+function hiddenCount(items: unknown[], limit = WORKBENCH_RENDER_LIMIT): number {
+  return Math.max(0, items.length - limit)
+}
+
+function HiddenItemCount({ hidden }: { hidden: number }) {
+  if (hidden === 0) return null
+  return <p className="muted compact-note">{hidden} older items hidden</p>
 }

@@ -66,31 +66,42 @@ export function App() {
   const [toast, setToast] = useState<string | null>(null)
   const [showPersonality, setShowPersonality] = useState(false)
   const [composerText, setComposerText] = useState('')
+  const composerRef = useRef<HTMLTextAreaElement>(null)
   const demoLoaded = useRef(false)
   const pendingDelta = useRef('')
   const pendingDeltaFrame = useRef<number | null>(null)
 
+  const focusComposer = () => {
+    composerRef.current?.focus({ preventScroll: true })
+  }
+
   useEffect(() => {
-    return bridge.install((event: OverlayToUiEvent) => {
+    const flushPendingDelta = () => {
+      if (!pendingDelta.current) return
+      dispatchChat({ type: 'delta', content: pendingDelta.current })
+      pendingDelta.current = ''
+    }
+
+    const cancelPendingDeltaFrame = () => {
+      if (pendingDeltaFrame.current === null) return
+      window.cancelAnimationFrame(pendingDeltaFrame.current)
+      pendingDeltaFrame.current = null
+    }
+
+    const uninstall = bridge.install((event: OverlayToUiEvent) => {
       if (event.type === 'delta') {
         pendingDelta.current += event.content
         if (pendingDeltaFrame.current === null) {
           pendingDeltaFrame.current = window.requestAnimationFrame(() => {
             pendingDeltaFrame.current = null
-            if (!pendingDelta.current) return
-            dispatchChat({ type: 'delta', content: pendingDelta.current })
-            pendingDelta.current = ''
+            flushPendingDelta()
           })
         }
         return
       }
       if (pendingDelta.current) {
-        if (pendingDeltaFrame.current !== null) {
-          window.cancelAnimationFrame(pendingDeltaFrame.current)
-          pendingDeltaFrame.current = null
-        }
-        dispatchChat({ type: 'delta', content: pendingDelta.current })
-        pendingDelta.current = ''
+        cancelPendingDeltaFrame()
+        flushPendingDelta()
       }
       dispatchChat(event)
       dispatchCoding(event)
@@ -117,6 +128,12 @@ export function App() {
         setToast(null)
       }
     })
+
+    return () => {
+      cancelPendingDeltaFrame()
+      pendingDelta.current = ''
+      uninstall()
+    }
   }, [])
 
   useEffect(() => {
@@ -145,12 +162,42 @@ export function App() {
     return () => window.clearTimeout(timer)
   }, [toast])
 
+  useEffect(() => {
+    focusComposer()
+  }, [])
+
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing) return
+      if (settingsConfig) {
+        setSettingsConfig(null)
+        focusComposer()
+        return
+      }
+      if (resourceDialog) {
+        setResourceDialog(null)
+        focusComposer()
+        return
+      }
+      if (showPersonality) {
+        setShowPersonality(false)
+        focusComposer()
+        return
+      }
+      bridge.send({ type: 'close_window' })
+    }
+
+    document.addEventListener('keydown', handleEscape)
+    return () => document.removeEventListener('keydown', handleEscape)
+  }, [resourceDialog, settingsConfig, showPersonality])
+
   const isCodingMode = mode === 'coding' || codingState.active
   const submitComposer = () => {
     const text = composerText.trim()
     if (!text) return
     bridge.send({ type: 'submit', text })
     setComposerText('')
+    focusComposer()
   }
   const startWindowDrag = (event: MouseEvent<HTMLElement>) => {
     if (event.button !== 0) return
@@ -335,7 +382,10 @@ export function App() {
           <ChatStream
             state={chatState}
             onLoadMore={chatState.hasMoreHistory ? () => bridge.send({ type: 'load_more' }) : undefined}
-            onPrompt={(prompt) => setComposerText(prompt)}
+            onPrompt={(prompt) => {
+              setComposerText(prompt)
+              focusComposer()
+            }}
             suggestions={assistantPrompts}
           />
         </section>
@@ -369,6 +419,7 @@ export function App() {
           <CircleStop size={16} />
         </button>
         <Composer
+          ref={composerRef}
           value={composerText}
           placeholder={isCodingMode ? 'Describe the task or review request...' : 'Ask Zhongshu what to do next.'}
           onChange={setComposerText}

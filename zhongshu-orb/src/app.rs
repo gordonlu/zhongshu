@@ -24,8 +24,19 @@ use zhongshu_core::event::{
 };
 use zhongshu_core::harness::trace::runbook::events_to_runbook;
 use zhongshu_core::integration::DeeplosslessProxy;
+use zhongshu_core::patch::PatchDiffPayload;
 use zhongshu_core::task::TaskQueue;
 use zhongshu_core::tool::ToolRegistry;
+
+fn file_edit_patch_payload(diff: Option<&String>) -> Option<PatchDiffPayload> {
+    diff.map(|diff| {
+        if diff.starts_with('<') && diff.ends_with('>') {
+            PatchDiffPayload::from_summary(diff.clone())
+        } else {
+            PatchDiffPayload::from_unified_diff(diff.clone())
+        }
+    })
+}
 
 // ── Session persistence ─────────────────────────────────────────────
 
@@ -654,6 +665,30 @@ impl AgentController {
                                     changed: *changed,
                                 }));
                             }
+                            zhongshu_core::harness::trace::event::HarnessEvent::FileEdit {
+                                path,
+                                diff,
+                                ..
+                            } => {
+                                let display_path = if path.as_os_str().is_empty() {
+                                    PathBuf::from("workspace")
+                                } else {
+                                    path.clone()
+                                };
+                                eb.publish(Event::Harness(HarnessUiEvent::PatchPreview {
+                                    session_id: None,
+                                    path: display_path,
+                                    operation: "file_edit".into(),
+                                    diff_summary: diff
+                                        .as_deref()
+                                        .unwrap_or("mutation without captured diff")
+                                        .lines()
+                                        .next()
+                                        .unwrap_or("mutation without captured diff")
+                                        .to_string(),
+                                    diff: file_edit_patch_payload(diff.as_ref()),
+                                }));
+                            }
                             zhongshu_core::harness::trace::event::HarnessEvent::ContextIncluded {
                                 description,
                                 estimated_tokens,
@@ -1021,6 +1056,25 @@ pub(crate) fn compress_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_edit_patch_payload_preserves_unified_diff() {
+        let diff = "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string();
+        let payload = file_edit_patch_payload(Some(&diff)).expect("payload");
+
+        assert_eq!(payload.removed_lines, 1);
+        assert_eq!(payload.added_lines, 1);
+        assert!(payload.unified_diff.contains("+new"));
+    }
+
+    #[test]
+    fn file_edit_patch_payload_keeps_placeholder_explicit() {
+        let diff = "<binary>".to_string();
+        let payload = file_edit_patch_payload(Some(&diff)).expect("payload");
+
+        assert_eq!(payload.summary, "<binary>");
+        assert!(payload.unified_diff.is_empty());
+    }
 
     #[test]
     fn compress_empty_history() {

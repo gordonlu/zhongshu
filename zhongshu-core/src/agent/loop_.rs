@@ -498,8 +498,7 @@ pub async fn run_agent(
 
                     let diff: Option<String> = if let Some(ref path) = path_from_args {
                         Some(crate::harness::tool::transaction::safe_capture_diff(
-                            &root,
-                            path,
+                            &root, path,
                         ))
                     } else if tc.function.name == "shell" {
                         crate::harness::tool::transaction::capture_all_diff(&root)
@@ -511,13 +510,16 @@ pub async fn run_agent(
                         runtime,
                         HarnessEvent::FileEdit {
                             path: path_from_args.unwrap_or_default(),
-                            diff_hash: diff.as_ref().map(|d| {
-                                use std::hash::{Hash, Hasher};
-                                let mut hasher =
-                                    std::collections::hash_map::DefaultHasher::new();
-                                d.hash(&mut hasher);
-                                hasher.finish().to_string()
-                            }).unwrap_or_default(),
+                            diff_hash: diff
+                                .as_ref()
+                                .map(|d| {
+                                    use std::hash::{Hash, Hasher};
+                                    let mut hasher =
+                                        std::collections::hash_map::DefaultHasher::new();
+                                    d.hash(&mut hasher);
+                                    hasher.finish().to_string()
+                                })
+                                .unwrap_or_default(),
                             diff,
                         },
                     );

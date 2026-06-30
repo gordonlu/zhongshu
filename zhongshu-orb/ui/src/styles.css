@@ -626,6 +626,79 @@ textarea:focus-visible {
   white-space: nowrap;
 }
 
+.run-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin-bottom: 14px;
+}
+
+.run-summary-item {
+  display: grid;
+  min-width: 0;
+  min-height: 72px;
+  align-content: start;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  padding: 8px;
+}
+
+.run-summary-item span {
+  color: var(--quiet);
+  font-size: 10px;
+  font-weight: 760;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.run-summary-item strong,
+.run-summary-item small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-summary-item strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.run-summary-item small {
+  color: var(--quiet);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.run-summary-item.good {
+  border-color: rgba(91, 209, 144, 0.25);
+  background: color-mix(in srgb, var(--green-soft) 84%, var(--surface));
+}
+
+.run-summary-item.good strong {
+  color: var(--green);
+}
+
+.run-summary-item.warn {
+  border-color: rgba(240, 179, 90, 0.28);
+  background: color-mix(in srgb, var(--amber-soft) 84%, var(--surface));
+}
+
+.run-summary-item.warn strong {
+  color: var(--amber);
+}
+
+.run-summary-item.bad {
+  border-color: rgba(240, 108, 108, 0.3);
+  background: color-mix(in srgb, var(--red-soft) 84%, var(--surface));
+}
+
+.run-summary-item.bad strong {
+  color: var(--red);
+}
+
 .workbench-section {
   display: grid;
   gap: 7px;
@@ -660,6 +733,11 @@ textarea:focus-visible {
   color: var(--quiet);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.compact-note {
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .workbench-row,

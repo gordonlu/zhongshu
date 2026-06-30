@@ -1,63 +1,18 @@
-// Windows stub: no-op overlay (no GTK/WebView available)
-// Provides the same public API as overlay.rs so handler.rs compiles unchanged.
 #![allow(dead_code)]
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use serde::{Deserialize, Serialize};
+use winit::event::WindowEvent;
+use winit::event_loop::ActiveEventLoop;
+use winit::window::WindowId;
 
 use crate::overlay_host::{OverlayHostCommand, OverlayHostCommandQueue, OverlayHostDiagnostics};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCallEntry {
-    pub name: String,
-    pub status: ToolStatus,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ToolStatus {
-    Running,
-    Done { success: bool },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChatEntry {
-    pub role: EntryRole,
-    pub content: String,
-    pub tool_calls: Vec<ToolCallEntry>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EntryRole {
-    User,
-    Assistant,
-    System,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthRequest {
-    pub request_id: String,
-    pub source: String,
-    pub tool: String,
-    pub command: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SettingsConfig {
-    pub api_key: String,
-    pub api_key_saved: bool,
-    pub api_base: String,
-    pub model: String,
-    pub personality: String,
-    pub proxy_port: Option<String>,
-    pub bg_enabled: Option<bool>,
-    pub bg_interval: Option<String>,
-    pub bg_prompt: Option<String>,
-    pub auto_evolve: Option<bool>,
-    pub max_context_tokens: Option<u32>,
-    pub mode: Option<String>,
-}
+#[allow(unused_imports)]
+pub use crate::overlay_contract::{
+    AuthRequest, ChatEntry, EntryRole, OverlayToUiEvent, SettingsConfig, ToolCallEntry, ToolStatus,
+};
 
 pub struct OverlayHandle {
     pub pending_input: Arc<Mutex<VecDeque<String>>>,
@@ -96,46 +51,46 @@ impl OverlayHandle {
     pub fn set_state(&self, _state: &str) {}
     pub fn show_window(&self, _width: f32, _height: f32) {}
     pub fn take_input(&self) -> Option<String> {
-        None
+        self.pending_input.lock().unwrap().pop_front()
     }
     pub fn take_approve(&self) -> Option<String> {
-        None
+        self.pending_approve.lock().unwrap().take()
     }
     pub fn take_deny(&self) -> Option<String> {
-        None
+        self.pending_deny.lock().unwrap().take()
     }
     pub fn take_personality(&self) -> Option<String> {
-        None
+        self.pending_personality.lock().unwrap().take()
     }
     pub fn take_settings(&self) -> Option<SettingsConfig> {
-        None
+        self.pending_settings.lock().unwrap().take()
     }
     pub fn take_new_conversation(&self) -> bool {
-        false
+        std::mem::take(&mut *self.request_new_conversation.lock().unwrap())
     }
     pub fn take_stop(&self) -> bool {
-        false
+        std::mem::take(&mut *self.request_stop.lock().unwrap())
     }
     pub fn take_open_settings(&self) -> bool {
-        false
+        std::mem::take(&mut *self.pending_open_settings.lock().unwrap())
     }
     pub fn take_load_more(&self) -> bool {
-        false
+        std::mem::take(&mut *self.pending_load_more.lock().unwrap())
     }
     pub fn take_list_tasks(&self) -> bool {
-        false
+        std::mem::take(&mut *self.pending_list_tasks.lock().unwrap())
     }
     pub fn take_list_runbooks(&self) -> bool {
-        false
+        std::mem::take(&mut *self.pending_list_runbooks.lock().unwrap())
     }
     pub fn take_list_equipment(&self) -> bool {
-        false
+        std::mem::take(&mut *self.pending_list_equipment.lock().unwrap())
     }
     pub fn take_toggle_equipment(&self) -> Option<String> {
-        None
+        self.pending_toggle_equipment.lock().unwrap().take()
     }
     pub fn take_toggle_zoom(&self) -> bool {
-        false
+        std::mem::take(&mut *self.pending_toggle_zoom.lock().unwrap())
     }
     pub fn take_start_drag(&self) -> bool {
         self.host_commands.take(OverlayHostCommand::StartDrag)
@@ -154,25 +109,31 @@ impl OverlayHandle {
     pub fn maximize_restore_window(&self) {}
     pub fn close_window(&self) {}
     pub fn take_cancel_task(&self) -> Option<String> {
-        None
+        self.pending_cancel_task.lock().unwrap().take()
     }
     pub fn take_complete_task(&self) -> Option<String> {
-        None
+        self.pending_complete_task.lock().unwrap().take()
     }
     pub fn show_tasks(&self, _tasks: &[serde_json::Value]) {}
     pub fn show_runbooks(&self, _runbooks: &[serde_json::Value]) {}
     pub fn show_equipment(&self, _items: &[serde_json::Value]) {}
+    pub fn window_id(&self) -> Option<WindowId> {
+        None
+    }
+    pub fn handle_window_event(&self, _event: &WindowEvent) -> bool {
+        false
+    }
     pub fn host_diagnostics(&self) -> OverlayHostDiagnostics {
         OverlayHostDiagnostics {
-            platform: "stub".to_string(),
+            platform: "macos".to_string(),
             webview_available: false,
-            startup_error: Some("overlay host unavailable".to_string()),
+            startup_error: Some("macOS overlay host not implemented yet".to_string()),
         }
     }
 }
 
-pub fn show(_width: f32, _height: f32) -> OverlayHandle {
-    tracing::info!("overlay stub: overlay not available on Windows");
+pub fn show(_event_loop: &ActiveEventLoop, _width: f32, _height: f32) -> OverlayHandle {
+    tracing::warn!("macOS overlay host shape exists but is not implemented yet");
     OverlayHandle {
         pending_input: Default::default(),
         pending_approve: Default::default(),

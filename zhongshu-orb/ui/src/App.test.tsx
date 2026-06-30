@@ -123,6 +123,88 @@ describe('App IPC interactions', () => {
       personality: '极客',
     })
   })
+
+  it('keeps Enter composition-safe and restores composer focus', async () => {
+    const postMessage = installWebViewHost()
+    const { App } = await import('./App')
+
+    render(<App />)
+
+    const composer = screen.getByPlaceholderText('Ask Zhongshu what to do next.')
+    expect(composer).toHaveFocus()
+
+    fireEvent.change(composer, { target: { value: '中文输入' } })
+    fireEvent.compositionStart(composer)
+    fireEvent.keyDown(composer, { key: 'Enter' })
+    expect(postMessage).not.toHaveBeenCalled()
+
+    fireEvent.compositionEnd(composer)
+    fireEvent.keyDown(composer, { key: 'Enter' })
+    expect(JSON.parse(postMessage.mock.calls.at(-1)?.[0] ?? '{}')).toEqual({
+      type: 'submit',
+      text: '中文输入',
+    })
+    expect(composer).toHaveFocus()
+  })
+
+  it('closes modal surfaces before hiding the overlay on Escape', async () => {
+    const postMessage = installWebViewHost()
+    const { App } = await import('./App')
+
+    render(<App />)
+
+    act(() => {
+      window.handleIpc?.({ type: 'settings', config: settingsConfig })
+    })
+    expect(screen.getByRole('dialog', { name: 'Settings' })).toBeInTheDocument()
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: 'Settings' })).not.toBeInTheDocument()
+    expect(postMessage).not.toHaveBeenCalled()
+    expect(screen.getByPlaceholderText('Ask Zhongshu what to do next.')).toHaveFocus()
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(JSON.parse(postMessage.mock.calls.at(-1)?.[0] ?? '{}')).toEqual({
+      type: 'close_window',
+    })
+  })
+
+  it('batches streaming deltas into an animation frame and flushes before completion', async () => {
+    installWebViewHost()
+    let animationFrame: FrameRequestCallback | null = null
+    const requestAnimationFrame = vi
+      .spyOn(window, 'requestAnimationFrame')
+      .mockImplementation((callback: FrameRequestCallback) => {
+        animationFrame = callback
+        return 7
+      })
+    const cancelAnimationFrame = vi.spyOn(window, 'cancelAnimationFrame')
+    const { App } = await import('./App')
+
+    render(<App />)
+
+    act(() => {
+      window.handleIpc?.({ type: 'delta', content: 'hel' })
+      window.handleIpc?.({ type: 'delta', content: 'lo' })
+    })
+
+    expect(requestAnimationFrame).toHaveBeenCalledTimes(1)
+    expect(screen.queryByText('hello')).not.toBeInTheDocument()
+
+    act(() => {
+      animationFrame?.(0)
+    })
+
+    expect(screen.getByText('hello')).toBeInTheDocument()
+
+    act(() => {
+      window.handleIpc?.({ type: 'delta', content: '!' })
+      window.handleIpc?.({ type: 'complete' })
+    })
+
+    expect(cancelAnimationFrame).toHaveBeenCalledWith(7)
+    expect(screen.getByText('hello!')).toBeInTheDocument()
+  })
 })
 
 function installWebViewHost() {

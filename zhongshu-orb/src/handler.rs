@@ -21,12 +21,20 @@ use crate::config::AppConfig;
 use crate::hotkey::HotkeyManager;
 use crate::indicator::Indicator;
 use crate::overlay::{AuthRequest, OverlayHandle};
-use crate::overlay_contract::{CodingUiEvent, OverlayToUiEvent};
+use crate::overlay_contract::{
+    chat_coding_smoke_commands, chat_coding_smoke_events, CodingUiEvent, OverlayToUiEvent,
+};
 use zhongshu_core::equipment::{EquipmentObserver, EquipmentRegistry};
 use zhongshu_core::tool::ToolRegistry;
 
 fn send_coding_event(overlay: &OverlayHandle, event: CodingUiEvent) {
     overlay.send(&serde_json::to_value(OverlayToUiEvent::Coding { event }).unwrap_or_default());
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 // ── App state ────────────────────────────────────────────────────────
@@ -144,6 +152,12 @@ impl ZhongshuApp {
         };
 
         if let Some(text) = ov.take_input() {
+            if env_flag("ZHONGSHU_ORB_SMOKE_INTERACTION") {
+                tracing::info!(
+                    text_len = text.len(),
+                    "webview2 interaction smoke submit ipc received"
+                );
+            }
             self.observer.lock().unwrap().record_user_message(&text);
             self.inbox.submit(text);
         }
@@ -337,6 +351,12 @@ impl ZhongshuApp {
             let (w, h) = self.overlay_size();
             ov.show_window(w * scale, h * scale);
             ov.send(&serde_json::json!({"type":"zoom","active": self.overlay_zoomed}));
+            if env_flag("ZHONGSHU_ORB_SMOKE_INTERACTION") {
+                tracing::info!(
+                    zoomed = self.overlay_zoomed,
+                    "webview2 interaction smoke zoom ipc received"
+                );
+            }
         }
         if ov.take_start_drag() {
             ov.start_drag_window();
@@ -894,8 +914,44 @@ impl ZhongshuApp {
         if !entries.is_empty() {
             ov.set_history(&entries, has_more);
         }
-        if let Some(ref ov) = self.overlay.as_ref() {
-            ov.send(&serde_json::json!({"type":"mode_change","mode":self.config.agent.mode}));
+        let diagnostics = ov.host_diagnostics();
+        tracing::info!(
+            platform = %diagnostics.platform,
+            webview_available = diagnostics.webview_available,
+            startup_error = diagnostics.startup_error.as_deref().unwrap_or(""),
+            "overlay host diagnostics"
+        );
+        ov.send(&serde_json::json!({"type":"mode_change","mode":self.config.agent.mode}));
+        if env_flag("ZHONGSHU_ORB_SMOKE_CODING") {
+            tracing::info!("sending overlay coding smoke events");
+            let events_json =
+                serde_json::to_string(&chat_coding_smoke_events()).unwrap_or_default();
+            ov.eval(&format!(
+                r#"(function zhongshuSmokeDeliver() {{
+                    const events = {events_json};
+                    if (window.handleIpc) {{
+                        events.forEach((event) => window.handleIpc(event));
+                    }} else {{
+                        setTimeout(zhongshuSmokeDeliver, 200);
+                    }}
+                }})();"#
+            ));
+        }
+        if env_flag("ZHONGSHU_ORB_SMOKE_INTERACTION") {
+            tracing::info!("sending webview2 interaction smoke commands");
+            let commands_json =
+                serde_json::to_string(&chat_coding_smoke_commands()).unwrap_or_default();
+            ov.eval(&format!(
+                r#"(function zhongshuInteractionSmokeDeliver() {{
+                    const commands = {commands_json};
+                    const bridge = window.chrome && window.chrome.webview;
+                    if (bridge && bridge.postMessage) {{
+                        commands.forEach((command) => bridge.postMessage(command));
+                    }} else {{
+                        setTimeout(zhongshuInteractionSmokeDeliver, 200);
+                    }}
+                }})();"#
+            ));
         }
         self.overlay = Some(ov);
     }
@@ -910,10 +966,7 @@ impl ZhongshuApp {
 impl ApplicationHandler for ZhongshuApp {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         self.indicator = Some(Indicator::create(el, self.config.ui.orb_size));
-        if std::env::var("ZHONGSHU_ORB_OPEN_ON_START")
-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-        {
+        if env_flag("ZHONGSHU_ORB_OPEN_ON_START") {
             self.try_open_overlay(el);
         }
     }
@@ -924,7 +977,7 @@ impl ApplicationHandler for ZhongshuApp {
         if overlay_id == Some(id)
             && self
                 .overlay
-                .as_ref()
+                .as_mut()
                 .map(|ov| ov.handle_window_event(&event))
                 .unwrap_or(false)
         {

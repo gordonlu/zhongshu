@@ -68,6 +68,10 @@ impl ProofArea {
 }
 
 impl ProofMode {
+    fn all() -> &'static [ProofMode] {
+        &[Self::Local, Self::Pr, Self::Baseline, Self::Release]
+    }
+
     fn parse(value: &str) -> Result<Self, String> {
         match value {
             "local" => Ok(Self::Local),
@@ -84,6 +88,15 @@ impl ProofMode {
             Self::Pr => "pr",
             Self::Baseline => "baseline",
             Self::Release => "release",
+        }
+    }
+
+    fn policy(self) -> &'static str {
+        match self {
+            Self::Local => "fast routed checks for changed areas",
+            Self::Pr => "routed checks plus full attack matrix",
+            Self::Baseline => "PR checks plus capability regressions",
+            Self::Release => "full proof plus manual desktop evidence status",
         }
     }
 }
@@ -260,8 +273,13 @@ fn classify_changed_areas(files: &[String]) -> BTreeSet<ProofArea> {
             areas.insert(ProofArea::ProofRunner);
         } else if file.starts_with(".roadmap/") || file.ends_with(".md") {
             areas.insert(ProofArea::DocsRoadmap);
-        } else if file.starts_with("zhongshu-core/src/harness/") {
+        } else if file.starts_with("zhongshu-core/src/harness/")
+            || file.starts_with("zhongshu-core/tests/harness_attack")
+        {
             areas.insert(ProofArea::Harness);
+            if file.starts_with("zhongshu-core/tests/harness_attack_equipment") {
+                areas.insert(ProofArea::EquipmentMcp);
+            }
         } else if file.starts_with("zhongshu-core/src/equipment/") {
             areas.insert(ProofArea::EquipmentMcp);
         } else if file.starts_with("zhongshu-core/src/integration/")
@@ -352,7 +370,12 @@ fn proof_check_specs() -> Vec<CheckSpec> {
         CheckSpec {
             id: "ui-typecheck",
             title: "UI TypeScript typecheck",
-            command: vec!["corepack", "pnpm", "--dir", "zhongshu-orb/ui", "typecheck"],
+            command: vec![
+                "node",
+                "zhongshu-orb/ui/node_modules/typescript/bin/tsc",
+                "-b",
+                "zhongshu-orb/ui/tsconfig.json",
+            ],
             areas: &[ProofArea::DesktopUi, ProofArea::ProofRunner],
             modes: &[ProofMode::Local, ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
             requires_loopback_bind: false,
@@ -361,7 +384,13 @@ fn proof_check_specs() -> Vec<CheckSpec> {
         CheckSpec {
             id: "ui-tests",
             title: "UI tests",
-            command: vec!["corepack", "pnpm", "--dir", "zhongshu-orb/ui", "test"],
+            command: vec![
+                "node",
+                "zhongshu-orb/ui/node_modules/vitest/vitest.mjs",
+                "run",
+                "--root",
+                "zhongshu-orb/ui",
+            ],
             areas: &[ProofArea::DesktopUi, ProofArea::ProofRunner],
             modes: &[ProofMode::Local, ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
             requires_loopback_bind: false,
@@ -370,7 +399,14 @@ fn proof_check_specs() -> Vec<CheckSpec> {
         CheckSpec {
             id: "ui-build",
             title: "UI production build",
-            command: vec!["corepack", "pnpm", "--dir", "zhongshu-orb/ui", "build"],
+            command: vec![
+                "node",
+                "zhongshu-orb/ui/node_modules/vite/bin/vite.js",
+                "build",
+                "zhongshu-orb/ui",
+                "--config",
+                "zhongshu-orb/ui/vite.config.ts",
+            ],
             areas: &[ProofArea::DesktopUi, ProofArea::ProofRunner],
             modes: &[ProofMode::Local, ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
             requires_loopback_bind: false,
@@ -408,9 +444,110 @@ fn proof_check_specs() -> Vec<CheckSpec> {
         },
         CheckSpec {
             id: "harness-attack",
-            title: "Harness attack matrix",
+            title: "Harness core attack matrix",
             command: vec!["cargo", "test", "-p", "zhongshu-core", "--test", "harness_attack"],
             areas: &[ProofArea::CoreRuntime, ProofArea::Harness, ProofArea::ProofRunner],
+            modes: &[ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
+            requires_loopback_bind: false,
+            skip_reason: None,
+        },
+        CheckSpec {
+            id: "harness-attack-shell",
+            title: "Harness shell attack matrix",
+            command: vec![
+                "cargo",
+                "test",
+                "-p",
+                "zhongshu-core",
+                "--test",
+                "harness_attack_shell",
+            ],
+            areas: &[ProofArea::CoreRuntime, ProofArea::Harness, ProofArea::ProofRunner],
+            modes: &[ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
+            requires_loopback_bind: false,
+            skip_reason: None,
+        },
+        CheckSpec {
+            id: "harness-attack-filesystem",
+            title: "Harness filesystem attack matrix",
+            command: vec![
+                "cargo",
+                "test",
+                "-p",
+                "zhongshu-core",
+                "--test",
+                "harness_attack_filesystem",
+            ],
+            areas: &[ProofArea::CoreRuntime, ProofArea::Harness, ProofArea::ProofRunner],
+            modes: &[ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
+            requires_loopback_bind: false,
+            skip_reason: None,
+        },
+        CheckSpec {
+            id: "harness-attack-edit",
+            title: "Harness edit attack matrix",
+            command: vec![
+                "cargo",
+                "test",
+                "-p",
+                "zhongshu-core",
+                "--test",
+                "harness_attack_edit",
+            ],
+            areas: &[ProofArea::CoreRuntime, ProofArea::Harness, ProofArea::ProofRunner],
+            modes: &[ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
+            requires_loopback_bind: false,
+            skip_reason: None,
+        },
+        CheckSpec {
+            id: "harness-attack-verify",
+            title: "Harness verification attack matrix",
+            command: vec![
+                "cargo",
+                "test",
+                "-p",
+                "zhongshu-core",
+                "--test",
+                "harness_attack_verify",
+            ],
+            areas: &[ProofArea::CoreRuntime, ProofArea::Harness, ProofArea::ProofRunner],
+            modes: &[ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
+            requires_loopback_bind: false,
+            skip_reason: None,
+        },
+        CheckSpec {
+            id: "harness-attack-browser",
+            title: "Harness browser automation attack matrix",
+            command: vec![
+                "cargo",
+                "test",
+                "-p",
+                "zhongshu-core",
+                "--test",
+                "harness_attack_browser",
+            ],
+            areas: &[ProofArea::CoreRuntime, ProofArea::Harness, ProofArea::ProofRunner],
+            modes: &[ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
+            requires_loopback_bind: false,
+            skip_reason: None,
+        },
+        CheckSpec {
+            id: "harness-attack-equipment",
+            title: "Harness equipment and MCP attack matrix",
+            command: vec![
+                "cargo",
+                "test",
+                "-p",
+                "zhongshu-core",
+                "--test",
+                "harness_attack_equipment",
+            ],
+            areas: &[
+                ProofArea::CoreRuntime,
+                ProofArea::Harness,
+                ProofArea::EquipmentMcp,
+                ProofArea::ProofRunner,
+            ],
             modes: &[ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
             requires_loopback_bind: false,
             skip_reason: None,
@@ -456,6 +593,10 @@ fn run_check(
     mode: ProofMode,
     selection: &ProofSelection,
 ) -> Result<CheckResult, String> {
+    if let Some(result) = run_manual_evidence_check(run_dir, spec)? {
+        return Ok(result);
+    }
+
     if let Some(reason) = skip_reason_for_spec(spec, mode, selection) {
         println!("skip {}: {}", spec.id, reason);
         return Ok(CheckResult {
@@ -498,6 +639,75 @@ fn run_check(
         log_path: Some(relative_log_path),
         skip_reason: None,
     })
+}
+
+fn run_manual_evidence_check(
+    run_dir: &Path,
+    spec: &CheckSpec,
+) -> Result<Option<CheckResult>, String> {
+    let Some(env_name) = manual_evidence_env(spec.id) else {
+        return Ok(None);
+    };
+    let Some(raw_path) = env::var_os(env_name).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    let evidence_path = PathBuf::from(raw_path);
+    let exists = evidence_path.exists();
+    let status = if exists {
+        CheckStatus::Passed
+    } else {
+        CheckStatus::Failed
+    };
+    let log_path = run_dir.join("logs").join(format!("{}.log", spec.id));
+    write_manual_evidence_log(&log_path, spec, env_name, &evidence_path, exists)?;
+    let relative_log_path =
+        path_slash(log_path.strip_prefix(run_dir).unwrap_or(log_path.as_path()));
+
+    Ok(Some(CheckResult {
+        id: spec.id.into(),
+        title: spec.title.into(),
+        status,
+        command: Vec::new(),
+        duration_ms: Some(0),
+        exit_code: if exists { Some(0) } else { Some(1) },
+        log_path: Some(relative_log_path),
+        skip_reason: None,
+    }))
+}
+
+fn manual_evidence_env(spec_id: &str) -> Option<&'static str> {
+    match spec_id {
+        "windows-webview2-visual" => Some("ZHONGSHU_WEBVIEW2_EVIDENCE"),
+        "ubuntu-gtk-visual" => Some("ZHONGSHU_GTK_EVIDENCE"),
+        _ => None,
+    }
+}
+
+fn write_manual_evidence_log(
+    path: &Path,
+    spec: &CheckSpec,
+    env_name: &str,
+    evidence_path: &Path,
+    exists: bool,
+) -> Result<(), String> {
+    let mut text = String::new();
+    writeln!(&mut text, "manual evidence check: {}", spec.id).unwrap();
+    writeln!(&mut text, "title: {}", spec.title).unwrap();
+    writeln!(&mut text, "env: {env_name}").unwrap();
+    writeln!(&mut text, "evidence_path: {}", evidence_path.display()).unwrap();
+    writeln!(&mut text, "exists: {exists}").unwrap();
+    if exists {
+        let kind = if evidence_path.is_dir() {
+            "directory"
+        } else {
+            "file"
+        };
+        writeln!(&mut text, "kind: {kind}").unwrap();
+    } else {
+        writeln!(&mut text, "error: configured evidence path does not exist").unwrap();
+    }
+    fs::write(path, text).map_err(|err| format!("cannot write {}: {err}", path.display()))
 }
 
 fn skip_reason_for_spec(
@@ -621,6 +831,12 @@ fn write_report_json(
     writeln!(&mut json, "{{").unwrap();
     writeln!(&mut json, "  \"schema_version\": 1,").unwrap();
     writeln!(&mut json, "  \"mode\": \"{}\",", mode.as_str()).unwrap();
+    writeln!(
+        &mut json,
+        "  \"mode_policy\": \"{}\",",
+        json_escape(mode.policy())
+    )
+    .unwrap();
     writeln!(&mut json, "  \"generated_at_unix_secs\": {generated_at},").unwrap();
     writeln!(
         &mut json,
@@ -652,6 +868,22 @@ fn write_report_json(
         summary.passed, summary.failed, summary.skipped
     )
     .unwrap();
+    writeln!(&mut json, "  \"mode_matrix\": [").unwrap();
+    for (index, proof_mode) in ProofMode::all().iter().enumerate() {
+        let comma = if index + 1 == ProofMode::all().len() {
+            ""
+        } else {
+            ","
+        };
+        writeln!(
+            &mut json,
+            "    {{ \"mode\": \"{}\", \"policy\": \"{}\" }}{comma}",
+            proof_mode.as_str(),
+            json_escape(proof_mode.policy())
+        )
+        .unwrap();
+    }
+    writeln!(&mut json, "  ],").unwrap();
     writeln!(&mut json, "  \"checks\": [").unwrap();
     for (index, result) in results.iter().enumerate() {
         let comma = if index + 1 == results.len() { "" } else { "," };
@@ -703,6 +935,7 @@ fn write_report_markdown(
     writeln!(&mut markdown, "# Zhongshu Proof Report").unwrap();
     writeln!(&mut markdown).unwrap();
     writeln!(&mut markdown, "- Mode: `{}`", mode.as_str()).unwrap();
+    writeln!(&mut markdown, "- Mode policy: {}", mode.policy()).unwrap();
     writeln!(&mut markdown, "- Generated: `{generated_at}`").unwrap();
     writeln!(
         &mut markdown,
@@ -725,6 +958,22 @@ fn write_report_markdown(
     writeln!(&mut markdown, "- Passed: `{}`", summary.passed).unwrap();
     writeln!(&mut markdown, "- Failed: `{}`", summary.failed).unwrap();
     writeln!(&mut markdown, "- Skipped: `{}`", summary.skipped).unwrap();
+    writeln!(&mut markdown).unwrap();
+    writeln!(&mut markdown, "## Mode Matrix").unwrap();
+    writeln!(&mut markdown).unwrap();
+    writeln!(&mut markdown, "| Mode | Policy |").unwrap();
+    writeln!(&mut markdown, "| --- | --- |").unwrap();
+    for proof_mode in ProofMode::all() {
+        writeln!(
+            &mut markdown,
+            "| `{}` | {} |",
+            proof_mode.as_str(),
+            proof_mode.policy()
+        )
+        .unwrap();
+    }
+    writeln!(&mut markdown).unwrap();
+    writeln!(&mut markdown, "## Checks").unwrap();
     writeln!(&mut markdown).unwrap();
     writeln!(&mut markdown, "| Check | Status | Command | Log / Reason |").unwrap();
     writeln!(&mut markdown, "| --- | --- | --- | --- |").unwrap();
@@ -916,6 +1165,93 @@ mod tests {
         assert_eq!(summary.passed, 1);
         assert_eq!(summary.failed, 1);
         assert_eq!(summary.skipped, 1);
+    }
+
+    #[test]
+    fn attack_matrix_specs_cover_split_attack_files_in_pr_modes() {
+        let specs = proof_check_specs();
+        for id in [
+            "harness-attack",
+            "harness-attack-shell",
+            "harness-attack-filesystem",
+            "harness-attack-edit",
+            "harness-attack-verify",
+            "harness-attack-browser",
+            "harness-attack-equipment",
+        ] {
+            let spec = specs.iter().find(|spec| spec.id == id).unwrap_or_else(|| {
+                panic!("missing attack proof spec {id}");
+            });
+            assert!(
+                spec.modes.contains(&ProofMode::Pr),
+                "{id} should run in PR mode"
+            );
+            assert!(
+                spec.areas.contains(&ProofArea::Harness),
+                "{id} should be routed by harness changes"
+            );
+        }
+    }
+
+    #[test]
+    fn harness_attack_test_files_classify_as_harness_area() {
+        let areas = classify_changed_areas(&[
+            "zhongshu-core/tests/harness_attack_shell.rs".into(),
+            "zhongshu-core/tests/harness_attack_edit.rs".into(),
+            "zhongshu-core/tests/harness_attack_equipment.rs".into(),
+        ]);
+
+        assert!(areas.contains(&ProofArea::Harness));
+        assert!(areas.contains(&ProofArea::EquipmentMcp));
+    }
+
+    #[test]
+    fn markdown_report_includes_mode_matrix() {
+        let temp_dir = env::temp_dir().join(format!("zhongshu-proof-test-{}", unix_secs()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let report_path = temp_dir.join("report.md");
+        let mut changed_areas = BTreeSet::new();
+        changed_areas.insert(ProofArea::ProofRunner);
+        let selection = ProofSelection {
+            changed_files: vec!["xtask/src/main.rs".into()],
+            changed_areas,
+            loopback_bind_available: true,
+        };
+        let results = vec![check_result("fmt", CheckStatus::Passed)];
+
+        write_report_markdown(&report_path, ProofMode::Pr, 1, &selection, &results).unwrap();
+
+        let report = fs::read_to_string(report_path).unwrap();
+        assert!(report.contains("## Mode Matrix"));
+        assert!(report.contains("`pr` | routed checks plus full attack matrix"));
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn manual_webview2_evidence_path_marks_visual_check_passed() {
+        let temp_dir =
+            env::temp_dir().join(format!("zhongshu-proof-evidence-test-{}", unix_secs()));
+        let logs_dir = temp_dir.join("logs");
+        fs::create_dir_all(&logs_dir).unwrap();
+        let evidence_path = temp_dir.join("webview2-smoke.txt");
+        fs::write(&evidence_path, "visible window, close hides").unwrap();
+        env::set_var("ZHONGSHU_WEBVIEW2_EVIDENCE", &evidence_path);
+        let spec = proof_check_specs()
+            .into_iter()
+            .find(|spec| spec.id == "windows-webview2-visual")
+            .unwrap();
+
+        let result = run_manual_evidence_check(&temp_dir, &spec)
+            .unwrap()
+            .expect("manual evidence result");
+
+        assert_eq!(result.status, CheckStatus::Passed);
+        let log_path = temp_dir.join(result.log_path.unwrap());
+        let log = fs::read_to_string(log_path).unwrap();
+        assert!(log.contains("ZHONGSHU_WEBVIEW2_EVIDENCE"));
+        assert!(log.contains("exists: true"));
+        env::remove_var("ZHONGSHU_WEBVIEW2_EVIDENCE");
+        let _ = fs::remove_dir_all(temp_dir);
     }
 
     #[test]

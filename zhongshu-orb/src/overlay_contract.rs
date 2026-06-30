@@ -244,9 +244,11 @@ pub enum UiToOverlayCommand {
     Unknown,
 }
 
-#[cfg(test)]
-fn chat_coding_smoke_events() -> Vec<OverlayToUiEvent> {
+pub fn chat_coding_smoke_events() -> Vec<OverlayToUiEvent> {
     vec![
+        OverlayToUiEvent::ModeChange {
+            mode: "coding".into(),
+        },
         OverlayToUiEvent::Delta {
             content: "offline proof: running safe self-test".into(),
         },
@@ -288,18 +290,19 @@ fn chat_coding_smoke_events() -> Vec<OverlayToUiEvent> {
                 dropped_recent: 0,
             },
         },
-        OverlayToUiEvent::Coding {
-            event: CodingUiEvent::ReplayAvailable {
-                conversation_id: Some(42),
-                replay_execution_id: Some("replay-smoke".into()),
-            },
-        },
         OverlayToUiEvent::Complete,
     ]
 }
 
+pub fn chat_coding_smoke_commands() -> Vec<&'static str> {
+    vec![
+        r#"{"type":"submit","text":"run offline proof"}"#,
+        r#"{"type":"toggle_zoom"}"#,
+    ]
+}
+
 #[cfg(test)]
-fn chat_coding_smoke_commands() -> Vec<&'static str> {
+fn chat_coding_smoke_command_fixtures() -> Vec<&'static str> {
     vec![
         r#"{"type":"submit","text":"run offline proof"}"#,
         r#"{"type":"stop"}"#,
@@ -467,7 +470,7 @@ mod tests {
 
     #[test]
     fn chat_coding_smoke_commands_parse_from_webview2_ipc() {
-        let commands: Vec<_> = chat_coding_smoke_commands()
+        let commands: Vec<_> = chat_coding_smoke_command_fixtures()
             .into_iter()
             .map(parse_ui_command)
             .collect();

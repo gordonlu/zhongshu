@@ -85,6 +85,31 @@ export const demoCodingEvents: OverlayToUiEvent[] = [
   },
   {
     type: 'coding',
+    event: {
+      kind: 'patch_applied',
+      session_id: 'demo-ui',
+      path: 'zhongshu-orb/ui/src/styles.css',
+      operation: 'modify',
+      changed: true,
+    },
+  },
+  {
+    type: 'coding',
+    event: {
+      kind: 'worker_completed',
+      session_id: 'demo-ui',
+      worker: 'deepseek-worker',
+      task_id: 'ui-css-pass',
+      success: true,
+    },
+  },
+  { type: 'phase_transition', from: 'implementation', to: 'verification' },
+  {
+    type: 'coding',
     event: { kind: 'verification', command: 'pnpm --dir zhongshu-orb/ui test', success: true, exit_code: 0 },
+  },
+  {
+    type: 'coding',
+    event: { kind: 'replay_available', conversation_id: 42, replay_execution_id: 'demo-replay' },
   },
 ]

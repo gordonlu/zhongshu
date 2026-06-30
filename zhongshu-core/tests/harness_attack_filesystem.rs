@@ -8,7 +8,9 @@ use std::path::PathBuf;
 
 use zhongshu_core::authority::{self, Risk};
 use zhongshu_core::harness::state::VerificationState;
-use zhongshu_core::harness::tool::effect::{classify_effects, risk_from_effects, EffectRisk, ToolEffect};
+use zhongshu_core::harness::tool::effect::{
+    classify_effects, risk_from_effects, EffectRisk, ToolEffect,
+};
 use zhongshu_core::harness::trace::event::HarnessEvent;
 use zhongshu_core::tool::shell_semantics::{ShellCommandClass, ShellSemantics};
 
@@ -87,16 +89,14 @@ fn symlink_traversal_detected() {
 
 #[test]
 fn parent_traversal_blocks() {
-    let cmd = authority::parse_command("rm /safe/path/../../../etc/shadow")
-        .expect("should parse");
+    let cmd = authority::parse_command("rm /safe/path/../../../etc/shadow").expect("should parse");
     assert_eq!(
         authority::classify(&cmd),
         Risk::Blocked,
         "parent traversal to /etc/shadow must be Blocked"
     );
 
-    let cmd2 = authority::parse_command("rm /a/b/c/d/../../../../etc/hosts")
-        .expect("should parse");
+    let cmd2 = authority::parse_command("rm /a/b/c/d/../../../../etc/hosts").expect("should parse");
     assert_eq!(
         authority::classify(&cmd2),
         Risk::Blocked,
@@ -144,10 +144,9 @@ fn recursive_delete_recorded() {
         "destructive edit must increment last_edit_step"
     );
     assert!(
-        trace_events.iter().any(|e| matches!(
-            e,
-            HarnessEvent::FileEdit { .. }
-        )),
+        trace_events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::FileEdit { .. })),
         "destructive edit must produce a FileEdit trace event"
     );
 }

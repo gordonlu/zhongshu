@@ -4,7 +4,10 @@ mod config;
 mod handler;
 mod hotkey;
 mod indicator;
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+mod overlay;
+#[cfg(target_os = "macos")]
+#[path = "overlay_macos.rs"]
 mod overlay;
 #[cfg(windows)]
 #[path = "overlay_windows.rs"]

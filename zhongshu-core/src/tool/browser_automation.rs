@@ -120,7 +120,7 @@ impl Tool for BrowserAutomationTool {
 
         match result {
             Ok(mut v) => {
-                v["risk"] = json!(action_risk(action));
+                v["risk"] = json!(classify_browser_action_risk(action));
                 ToolOutput::success(v)
             }
             Err(e) => ToolOutput::error(format!("浏览器自动化失败: {e}")),
@@ -735,7 +735,11 @@ mod tests {
 }
 
 /// Classify browser action risk level.
-fn action_risk(action: &str) -> &'static str {
+///
+/// This is intentionally action-level instead of tool-level: browser automation
+/// includes read-like observation, navigation, interaction, and arbitrary JS
+/// execution in the same tool surface.
+pub fn classify_browser_action_risk(action: &str) -> &'static str {
     match action {
         "open" | "snapshot" | "console" | "wait" | "scroll" | "screenshot" => "read",
         "eval" => "dangerous",

@@ -13,7 +13,10 @@ use wry::WebViewBuilderExtUnix;
 
 use crate::overlay_assets::select_overlay_asset;
 use crate::overlay_contract::{parse_ui_command, UiToOverlayCommand};
-use crate::overlay_host::{log_selected_asset, webview_builder_for_asset};
+use crate::overlay_host::{
+    log_selected_asset, webview_builder_for_asset, OverlayHostCommand, OverlayHostCommandQueue,
+    OverlayHostDiagnostics,
+};
 
 #[allow(unused_imports)]
 pub use crate::overlay_contract::{
@@ -139,6 +142,7 @@ pub struct OverlayHandle {
     pub pending_list_equipment: Arc<Mutex<bool>>,
     pub pending_toggle_equipment: Arc<Mutex<Option<String>>>,
     pub pending_toggle_zoom: Arc<Mutex<bool>>,
+    pub host_commands: OverlayHostCommandQueue,
     pub pending_cancel_task: Arc<Mutex<Option<String>>>,
     pub pending_complete_task: Arc<Mutex<Option<String>>>,
     #[allow(dead_code)]
@@ -264,19 +268,19 @@ impl OverlayHandle {
     }
 
     pub fn take_start_drag(&self) -> bool {
-        false
+        self.host_commands.take(OverlayHostCommand::StartDrag)
     }
 
     pub fn take_minimize(&self) -> bool {
-        false
+        self.host_commands.take(OverlayHostCommand::Minimize)
     }
 
     pub fn take_maximize_restore(&self) -> bool {
-        false
+        self.host_commands.take(OverlayHostCommand::MaximizeRestore)
     }
 
     pub fn take_close_window(&self) -> bool {
-        false
+        self.host_commands.take(OverlayHostCommand::CloseWindow)
     }
 
     pub fn start_drag_window(&self) {
@@ -317,6 +321,14 @@ impl OverlayHandle {
         None
     }
 
+    pub fn host_diagnostics(&self) -> OverlayHostDiagnostics {
+        OverlayHostDiagnostics {
+            platform: "gtk".to_string(),
+            webview_available: true,
+            startup_error: None,
+        }
+    }
+
     pub fn handle_window_event(&self, _event: &WindowEvent) -> bool {
         false
     }
@@ -347,6 +359,7 @@ pub fn show(_event_loop: &ActiveEventLoop, width: f32, height: f32) -> OverlayHa
     let pending_list_equipment: Arc<Mutex<bool>> = Default::default();
     let pending_toggle_equipment: Arc<Mutex<Option<String>>> = Default::default();
     let pending_toggle_zoom: Arc<Mutex<bool>> = Default::default();
+    let host_commands = OverlayHostCommandQueue::default();
     let pending_cancel_task: Arc<Mutex<Option<String>>> = Default::default();
     let pending_complete_task: Arc<Mutex<Option<String>>> = Default::default();
 
@@ -364,6 +377,7 @@ pub fn show(_event_loop: &ActiveEventLoop, width: f32, height: f32) -> OverlayHa
     let ple = pending_list_equipment.clone();
     let pte = pending_toggle_equipment.clone();
     let ptz = pending_toggle_zoom.clone();
+    let host_commands_for_ipc = host_commands.clone();
     let pct = pending_cancel_task.clone();
     let pcmt = pending_complete_task.clone();
 
@@ -414,16 +428,16 @@ pub fn show(_event_loop: &ActiveEventLoop, width: f32, height: f32) -> OverlayHa
                     *ptz.lock().unwrap() = true;
                 }
                 UiToOverlayCommand::StartDrag => {
-                    let _ = GTK_TX.send(GtkCommand::StartDrag);
+                    host_commands_for_ipc.push(OverlayHostCommand::StartDrag);
                 }
                 UiToOverlayCommand::Minimize => {
-                    let _ = GTK_TX.send(GtkCommand::Minimize);
+                    host_commands_for_ipc.push(OverlayHostCommand::Minimize);
                 }
                 UiToOverlayCommand::MaximizeRestore => {
-                    let _ = GTK_TX.send(GtkCommand::MaximizeRestore);
+                    host_commands_for_ipc.push(OverlayHostCommand::MaximizeRestore);
                 }
                 UiToOverlayCommand::CloseWindow => {
-                    let _ = GTK_TX.send(GtkCommand::CloseWindow);
+                    host_commands_for_ipc.push(OverlayHostCommand::CloseWindow);
                 }
                 UiToOverlayCommand::CancelTask(id) => {
                     *pct.lock().unwrap() = Some(id);
@@ -452,6 +466,7 @@ pub fn show(_event_loop: &ActiveEventLoop, width: f32, height: f32) -> OverlayHa
         pending_list_equipment,
         pending_toggle_equipment,
         pending_toggle_zoom,
+        host_commands,
         pending_cancel_task,
         pending_complete_task,
         request_quit: false,

@@ -16,9 +16,7 @@ use zhongshu_core::agent::llm::{
 };
 use zhongshu_core::agent::llm_registry::LlmRegistry;
 use zhongshu_core::agent::loop_::AgentBudget;
-use zhongshu_core::agent::orchestrator::{
-    Orchestrator, WorkerAssignment,
-};
+use zhongshu_core::agent::orchestrator::{Orchestrator, WorkerAssignment};
 use zhongshu_core::agent::report::Report;
 use zhongshu_core::agent::runtime::AgentRuntime;
 use zhongshu_core::agent::AttentionLevel;
@@ -96,9 +94,7 @@ fn edit_without_read_is_blocked() {
 
     let err = engine
         .apply_operation(PatchOperation::Replace(ReplaceRequest::once(
-            "a.txt",
-            "hello",
-            "hi",
+            "a.txt", "hello", "hi",
         )))
         .unwrap_err();
 

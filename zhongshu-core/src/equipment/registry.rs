@@ -49,7 +49,10 @@ impl EquipmentRegistry {
         manifest.permissions.shell.allowed
             || !manifest.permissions.shell.allowed_commands.is_empty()
             || manifest.permissions.network.allowed
+            || !manifest.permissions.network.allowed_hosts.is_empty()
             || manifest.permissions.filesystem.allowed
+            || !manifest.permissions.filesystem.allowed_paths.is_empty()
+            || manifest.permissions.filesystem.write_allowed
             || manifest.permissions.browser.allowed
             || !manifest.mcp_servers.is_empty()
     }

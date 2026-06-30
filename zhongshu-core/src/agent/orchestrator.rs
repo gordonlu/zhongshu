@@ -882,7 +882,12 @@ impl Orchestrator {
             .await?;
         let merge_review = self.review_worker_patch_proposals(&assignments, &execution, proposals);
         let apply_report = if merge_review.status == WorkerMergeStatus::Approved {
-            self.apply_worker_patch_review(engine, &merge_review, session_id.clone(), &mut execution.trace_events)
+            self.apply_worker_patch_review(
+                engine,
+                &merge_review,
+                session_id.clone(),
+                &mut execution.trace_events,
+            )
         } else {
             WorkerPatchApplyReport {
                 applied: Vec::new(),
@@ -1193,8 +1198,17 @@ fn patch_preview_event(
         session_id,
         path: path.to_path_buf(),
         operation: operation.to_string(),
-        diff_summary: format!("+{} -{}", diff_result.diff.added_lines, diff_result.diff.removed_lines),
-        diff: Some(crate::patch::PatchDiffPayload::from_diff(&diff_result.diff, format!("+{} -{}", diff_result.diff.added_lines, diff_result.diff.removed_lines))),
+        diff_summary: format!(
+            "+{} -{}",
+            diff_result.diff.added_lines, diff_result.diff.removed_lines
+        ),
+        diff: Some(crate::patch::PatchDiffPayload::from_diff(
+            &diff_result.diff,
+            format!(
+                "+{} -{}",
+                diff_result.diff.added_lines, diff_result.diff.removed_lines
+            ),
+        )),
     }
 }
 

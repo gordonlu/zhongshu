@@ -158,10 +158,11 @@ impl ToolResultSummary {
 
 fn infer_effect(name: &str) -> ToolEffect {
     match name {
-        "read" | "grep" | "glob" | "search_files" | "system_info" | "self_test" => ToolEffect::Read,
-        "fs" | "memory" => ToolEffect::Write,
+        "read" | "read_file" | "list_dir" | "grep" | "glob" | "search_files" | "system_info"
+        | "self_test" => ToolEffect::Read,
+        "fs" | "write_file" | "edit" | "memory" => ToolEffect::Write,
         "shell" => ToolEffect::Process,
-        "webfetch" | "search" => ToolEffect::Network,
+        "webfetch" | "search" | "web_search" => ToolEffect::Network,
         "browser" | "browser_automation" | "browser_session" | "screenshot" => ToolEffect::Browser,
         "automation" => ToolEffect::System,
         _ => ToolEffect::Unknown,
@@ -175,8 +176,11 @@ fn infer_read_only(name: &str, effect: ToolEffect) -> bool {
             | "grep"
             | "glob"
             | "search"
+            | "web_search"
             | "search_files"
             | "webfetch"
+            | "read_file"
+            | "list_dir"
             | "screenshot"
             | "system_info"
             | "self_test"
@@ -184,12 +188,17 @@ fn infer_read_only(name: &str, effect: ToolEffect) -> bool {
 }
 
 fn infer_destructive(name: &str, effect: ToolEffect) -> bool {
-    matches!(name, "shell" | "automation") || matches!(effect, ToolEffect::System)
+    matches!(name, "shell" | "automation" | "write_file" | "edit" | "fs")
+        || matches!(effect, ToolEffect::System)
 }
 
 fn infer_workspace_scope(name: &str, effect: ToolEffect) -> WorkspaceScope {
     match (name, effect) {
-        ("read" | "grep" | "glob" | "search_files" | "fs", _) => WorkspaceScope::WorkspaceOnly,
+        (
+            "read" | "read_file" | "list_dir" | "grep" | "glob" | "search_files" | "fs"
+            | "write_file" | "edit",
+            _,
+        ) => WorkspaceScope::WorkspaceOnly,
         ("shell", _) => WorkspaceScope::CurrentDirectoryOnly,
         (_, ToolEffect::Network | ToolEffect::Browser) => WorkspaceScope::External,
         _ => WorkspaceScope::Unrestricted,

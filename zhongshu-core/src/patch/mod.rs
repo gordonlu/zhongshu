@@ -589,6 +589,37 @@ impl PatchDiffPayload {
             ..Self::default()
         }
     }
+
+    pub fn from_unified_diff(diff: impl Into<String>) -> Self {
+        let unified_diff = diff.into();
+        let removed_lines = unified_diff
+            .lines()
+            .filter(|line| line.starts_with('-') && !line.starts_with("---"))
+            .count();
+        let added_lines = unified_diff
+            .lines()
+            .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
+            .count();
+        let changed = removed_lines > 0 || added_lines > 0 || !unified_diff.trim().is_empty();
+        let summary = if changed {
+            format!("{removed_lines} removed, {added_lines} added")
+        } else {
+            "no text diff captured".to_string()
+        };
+
+        let diff_hash = stable_hash(&unified_diff);
+
+        Self {
+            summary,
+            unified_diff,
+            changed,
+            replace_all: false,
+            removed_lines,
+            added_lines,
+            before_hash: String::new(),
+            after_hash: diff_hash,
+        }
+    }
 }
 
 impl PatchDiff {
@@ -1137,6 +1168,21 @@ mod tests {
         assert!(payload.unified_diff.contains("--- a/"));
         assert!(payload.unified_diff.contains("-two"));
         assert!(payload.unified_diff.contains("+2"));
+    }
+
+    #[test]
+    fn raw_unified_diff_payload_keeps_reviewable_diff_and_stats() {
+        let payload = PatchDiffPayload::from_unified_diff(
+            "--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n-old\n keep\n+new\n",
+        );
+
+        assert!(payload.changed);
+        assert_eq!(payload.removed_lines, 1);
+        assert_eq!(payload.added_lines, 1);
+        assert_eq!(payload.summary, "1 removed, 1 added");
+        assert!(payload.unified_diff.contains("-old"));
+        assert!(payload.unified_diff.contains("+new"));
+        assert!(!payload.after_hash.is_empty());
     }
 
     #[test]

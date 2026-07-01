@@ -95,8 +95,8 @@ impl ProofMode {
         match self {
             Self::Local => "fast routed checks for changed areas",
             Self::Pr => "routed checks plus full attack matrix",
-            Self::Baseline => "PR checks plus capability regressions",
-            Self::Release => "full proof plus manual desktop evidence status",
+            Self::Baseline => "PR checks plus workspace build regression",
+            Self::Release => "full proof including all tests, workspace build, and required desktop evidence",
         }
     }
 }
@@ -421,6 +421,46 @@ fn proof_check_specs() -> Vec<CheckSpec> {
                 "-p",
                 "zhongshu-core",
                 "harness::verification::proof::tests::first_wave_replay_fixtures_pass_expected_assertions",
+                "harness::verification::proof::tests::fixture_files_are_valid_json",
+                "harness::verification::proof::tests::fixture_files_deserialize_with_schema_v1",
+                "harness::verification::proof::tests::fixture_files_roundtrip_with_expected_assertions",
+            ],
+            areas: &[ProofArea::CoreRuntime, ProofArea::Harness, ProofArea::ProofRunner],
+            modes: &[ProofMode::Local, ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
+            requires_loopback_bind: false,
+            skip_reason: None,
+        },
+        CheckSpec {
+            id: "capability-replay-converter",
+            title: "Capability replay deeplossless converter",
+            command: vec![
+                "cargo",
+                "test",
+                "-p",
+                "zhongshu-core",
+                "harness::verification::proof::tests::replay_to_harness_converts_tool_call_start",
+                "harness::verification::proof::tests::replay_to_harness_detects_error_outcome",
+                "harness::verification::proof::tests::replay_to_harness_detects_verification_failure",
+                "harness::verification::proof::tests::replay_to_harness_empty_events_falls_back",
+                "harness::verification::proof::tests::replay_to_harness_injects_final_run_completed",
+            ],
+            areas: &[ProofArea::CoreRuntime, ProofArea::Harness, ProofArea::ProofRunner],
+            modes: &[ProofMode::Local, ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
+            requires_loopback_bind: false,
+            skip_reason: None,
+        },
+        CheckSpec {
+            id: "capability-replay-source-loader",
+            title: "Capability replay source loader",
+            command: vec![
+                "cargo",
+                "test",
+                "-p",
+                "zhongshu-core",
+                "harness::verification::proof::tests::replay_source_file_loads_evidence",
+                "harness::verification::proof::tests::replay_source_missing_case_returns_none",
+                "harness::verification::proof::tests::replay_source_deeplossless_returns_none_when_unavailable",
+                "--test-threads=1",
             ],
             areas: &[ProofArea::CoreRuntime, ProofArea::Harness, ProofArea::ProofRunner],
             modes: &[ProofMode::Local, ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
@@ -553,6 +593,24 @@ fn proof_check_specs() -> Vec<CheckSpec> {
             skip_reason: None,
         },
         CheckSpec {
+            id: "workspace-build",
+            title: "Workspace build (baseline+ regression)",
+            command: vec!["cargo", "build", "--workspace"],
+            areas: &[],
+            modes: &[ProofMode::Baseline, ProofMode::Release],
+            requires_loopback_bind: false,
+            skip_reason: None,
+        },
+        CheckSpec {
+            id: "workspace-all-tests",
+            title: "Workspace all tests (release regression)",
+            command: vec!["cargo", "test", "--workspace"],
+            areas: &[],
+            modes: &[ProofMode::Release],
+            requires_loopback_bind: false,
+            skip_reason: None,
+        },
+        CheckSpec {
             id: "git-diff-check",
             title: "Git whitespace check",
             command: vec!["git", "diff", "--check"],
@@ -593,7 +651,7 @@ fn run_check(
     mode: ProofMode,
     selection: &ProofSelection,
 ) -> Result<CheckResult, String> {
-    if let Some(result) = run_manual_evidence_check(run_dir, spec)? {
+    if let Some(result) = run_manual_evidence_check(run_dir, spec, mode)? {
         return Ok(result);
     }
 
@@ -644,11 +702,26 @@ fn run_check(
 fn run_manual_evidence_check(
     run_dir: &Path,
     spec: &CheckSpec,
+    mode: ProofMode,
 ) -> Result<Option<CheckResult>, String> {
     let Some(env_name) = manual_evidence_env(spec.id) else {
         return Ok(None);
     };
     let Some(raw_path) = env::var_os(env_name).filter(|value| !value.is_empty()) else {
+        if mode == ProofMode::Release {
+            return Ok(Some(CheckResult {
+                id: spec.id.into(),
+                title: spec.title.into(),
+                status: CheckStatus::Failed,
+                command: Vec::new(),
+                duration_ms: Some(0),
+                exit_code: Some(1),
+                log_path: None,
+                skip_reason: Some(format!(
+                    "required desktop evidence not provided; set {env_name}"
+                )),
+            }));
+        }
         return Ok(None);
     };
 
@@ -1241,7 +1314,7 @@ mod tests {
             .find(|spec| spec.id == "windows-webview2-visual")
             .unwrap();
 
-        let result = run_manual_evidence_check(&temp_dir, &spec)
+        let result = run_manual_evidence_check(&temp_dir, &spec, ProofMode::Local)
             .unwrap()
             .expect("manual evidence result");
 

@@ -329,6 +329,7 @@ pub trait OverlayHandleExt {
         self.send(&json!({ "type": "settings", "config": config }));
     }
 
+    #[allow(dead_code)] // only called from macOS test (not compiled on Linux)
     fn show_personality_picker(&self) {
         self.send(&json!({ "type": "show_personality" }));
     }

@@ -267,7 +267,7 @@ fn main() {
     let suggestion_tool = SuggestionTool::new(suggestion_engine.clone()).with_event_bus(eb.clone());
     let memory_policy = MemoryPolicy::new(Database::new(core_db_path.clone()));
     let memory_candidate_store = MemoryCandidateStore::new(Database::new(core_db_path.clone()));
-    let provider = cfg.llm.build_provider(&base_url);
+    let provider = cfg.llm.build_provider(&cfg.llm.api_base);
 
     let memory_query_tool =
         MemoryQueryTool::new(memory_policy.clone(), memory_candidate_store.clone())

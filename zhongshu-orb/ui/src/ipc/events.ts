@@ -64,6 +64,7 @@ export type CodingUiEvent =
   | { kind: 'replay_available'; conversation_id?: number; replay_execution_id?: string }
 
 export type OverlayToUiEvent =
+  | { type: 'user_message'; content: string }
   | { type: 'delta'; content: string }
   | { type: 'complete' }
   | { type: 'history'; entries: ChatEntry[]; has_more: boolean }

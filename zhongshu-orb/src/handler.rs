@@ -159,6 +159,7 @@ impl ZhongshuApp {
                     "webview2 interaction smoke submit ipc received"
                 );
             }
+            ov.send(&serde_json::json!({"type": "user_message", "content": text}));
             self.observer.lock().unwrap().record_user_message(&text);
             self.inbox.submit(text);
         }

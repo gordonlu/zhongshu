@@ -33,6 +33,19 @@ export const initialChatState: ChatState = {
 
 export function chatReducer(state: ChatState, event: OverlayToUiEvent): ChatState {
   switch (event.type) {
+    case 'user_message':
+      return {
+        ...state,
+        messages: [
+          ...state.messages,
+          {
+            id: nextMessageId('user'),
+            role: 'user',
+            content: event.content,
+            toolCalls: [],
+          },
+        ],
+      }
     case 'delta':
       return {
         ...state,

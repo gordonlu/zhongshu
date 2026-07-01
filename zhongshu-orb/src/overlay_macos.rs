@@ -234,7 +234,9 @@ mod tests {
         event_loop.run_app(&mut ctx).expect("event loop failed");
         ctx.result
             .expect("TestContext never called resumed")
-            .expect("show() panicked during test — check for missing display server or macOS-only APIs")
+            .expect(
+                "show() panicked during test — check for missing display server or macOS-only APIs",
+            )
     }
 
     #[test]
@@ -248,14 +250,21 @@ mod tests {
     fn host_diagnostics_reports_webview_available() {
         let handle = create_handle();
         let diag = handle.host_diagnostics();
-        assert!(diag.webview_available, "webview should be available on macOS");
+        assert!(
+            diag.webview_available,
+            "webview should be available on macOS"
+        );
         assert!(diag.startup_error.is_none(), "no startup error expected");
     }
 
     #[test]
     fn take_input_happy_path() {
         let handle = create_handle();
-        handle.pending_input.lock().unwrap().push_back("hello".into());
+        handle
+            .pending_input
+            .lock()
+            .unwrap()
+            .push_back("hello".into());
         assert_eq!(handle.take_input(), Some("hello".into()));
         assert_eq!(handle.take_input(), None);
     }
@@ -450,7 +459,9 @@ mod tests {
     fn host_commands_maximize_restore() {
         let handle = create_handle();
         assert!(!handle.take_maximize_restore());
-        handle.host_commands.push(OverlayHostCommand::MaximizeRestore);
+        handle
+            .host_commands
+            .push(OverlayHostCommand::MaximizeRestore);
         assert!(handle.take_maximize_restore());
         assert!(!handle.take_maximize_restore());
     }
@@ -680,9 +691,11 @@ mod tests {
     fn handle_window_event_resized_returns_true() {
         let handle = create_handle();
         // Use a dummy size — the actual resize happens in the event loop
-        assert!(handle.handle_window_event(&WindowEvent::Resized(
-            winit::dpi::PhysicalSize::new(800, 600)
-        )));
+        assert!(
+            handle.handle_window_event(&WindowEvent::Resized(winit::dpi::PhysicalSize::new(
+                800, 600
+            )))
+        );
     }
 
     #[test]
@@ -695,10 +708,12 @@ mod tests {
     #[test]
     fn handle_window_event_scale_factor_changed_returns_true() {
         let handle = create_handle();
-        assert!(handle.handle_window_event(&WindowEvent::ScaleFactorChanged {
-            scale_factor: 2.0,
-            inner_size: &mut winit::dpi::PhysicalSize::new(800, 600),
-        }));
+        assert!(
+            handle.handle_window_event(&WindowEvent::ScaleFactorChanged {
+                scale_factor: 2.0,
+                inner_size: &mut winit::dpi::PhysicalSize::new(800, 600),
+            })
+        );
     }
 
     #[test]

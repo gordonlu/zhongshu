@@ -220,8 +220,7 @@ fn save_fixture_file(case_id: &str, fixture: &ReplayFixtureFile) -> Result<(), S
     }
     let content = serde_json::to_string_pretty(fixture)
         .map_err(|e| format!("failed to serialize fixture: {e}"))?;
-    std::fs::write(&path, content)
-        .map_err(|e| format!("failed to write fixture: {e}"))?;
+    std::fs::write(&path, content).map_err(|e| format!("failed to write fixture: {e}"))?;
     Ok(())
 }
 
@@ -298,7 +297,10 @@ pub async fn load_replay_evidence(
     }
 }
 
-async fn load_deeplossless_evidence(base_url: &str, case_id: &str) -> Option<ReplayFixtureEvidence> {
+async fn load_deeplossless_evidence(
+    base_url: &str,
+    case_id: &str,
+) -> Option<ReplayFixtureEvidence> {
     let file = load_fixture_file(case_id)?;
     let exec_id = file.deeplossless_replay_execution_id.as_ref()?;
 
@@ -385,11 +387,14 @@ pub fn replay_to_harness_events(
                     saw_error = true;
                 }
 
-                if name.contains("test") || name.contains("verify") || arguments.contains("self_test") || arguments.contains("test") {
+                if name.contains("test")
+                    || name.contains("verify")
+                    || arguments.contains("self_test")
+                    || arguments.contains("test")
+                {
                     let has_error_marker = name.contains("fail")
                         || arguments.contains("fail")
-                        || arguments.contains("exit_code")
-                        && arguments.contains("101");
+                        || arguments.contains("exit_code") && arguments.contains("101");
                     events.push(HarnessEvent::Verification {
                         command: format!("deeplossless:{name}"),
                         success: !is_error && !has_error_marker,
@@ -400,11 +405,12 @@ pub fn replay_to_harness_events(
                         },
                         step: step_counter,
                     });
-
                 }
             }
             "done" => {
-                let finish_reason = stream_event["finish_reason"].as_str().unwrap_or("completed");
+                let finish_reason = stream_event["finish_reason"]
+                    .as_str()
+                    .unwrap_or("completed");
                 let incomplete = stream_event["incomplete"].as_bool().unwrap_or(false);
                 let outcome = if incomplete || saw_error {
                     "blocked"
@@ -435,11 +441,18 @@ pub fn replay_to_harness_events(
         }
     }
 
-    if !events.iter().any(|e| matches!(e, HarnessEvent::RunCompleted { .. })) {
+    if !events
+        .iter()
+        .any(|e| matches!(e, HarnessEvent::RunCompleted { .. }))
+    {
         events.push(HarnessEvent::RunCompleted {
             timestamp: 0,
             total_steps: step_counter,
-            outcome: if saw_error { "blocked".into() } else { "completed".into() },
+            outcome: if saw_error {
+                "blocked".into()
+            } else {
+                "completed".into()
+            },
         });
     }
 
@@ -719,7 +732,9 @@ fn inline_first_wave_evidence() -> Vec<ReplayFixtureEvidence> {
                     timestamp: 1,
                     session_id: "session-workspace-search-edit".into(),
                     trace_id: "trace-workspace-search-edit".into(),
-                    repo_root: PathBuf::from("/workspace/fixtures/capability/workspace-search-edit"),
+                    repo_root: PathBuf::from(
+                        "/workspace/fixtures/capability/workspace-search-edit",
+                    ),
                     intent: "Find the right implementation before making the edit.".into(),
                     model: "scripted".into(),
                     source: "offline-scripted-provider".into(),
@@ -802,7 +817,9 @@ fn inline_first_wave_evidence() -> Vec<ReplayFixtureEvidence> {
                     timestamp: 1,
                     session_id: "session-cross-module-refactor".into(),
                     trace_id: "trace-cross-module-refactor".into(),
-                    repo_root: PathBuf::from("/workspace/fixtures/capability/cross-module-refactor"),
+                    repo_root: PathBuf::from(
+                        "/workspace/fixtures/capability/cross-module-refactor",
+                    ),
                     intent: "Refactor across owned modules without touching unrelated files."
                         .into(),
                     model: "scripted".into(),
@@ -1018,9 +1035,11 @@ pub fn evaluate_first_wave_replay_fixtures() -> Vec<CapabilityReplayProof> {
             .collect()
     } else {
         let inline = first_wave_replay_fixtures();
-        cases.iter().zip(inline.iter()).map(|(case, evidence)| {
-            evaluate_capability_replay(case, evidence)
-        }).collect()
+        cases
+            .iter()
+            .zip(inline.iter())
+            .map(|(case, evidence)| evaluate_capability_replay(case, evidence))
+            .collect()
     }
 }
 
@@ -1044,7 +1063,10 @@ fn evaluate_capability_replay_inner(
         }
     }
     for expected_file in &expected.expected_changed_files {
-        if !observed_changed_files.iter().any(|path| path == expected_file) {
+        if !observed_changed_files
+            .iter()
+            .any(|path| path == expected_file)
+        {
             missing_evidence.push(format!("changed file '{expected_file}'"));
         }
     }
@@ -1344,7 +1366,11 @@ mod tests {
     fn first_wave_replay_fixtures_pass_expected_assertions() {
         let results = evaluate_first_wave_replay_fixtures();
 
-        assert_eq!(results.len(), 8, "all 8 capability cases pass expected assertions");
+        assert_eq!(
+            results.len(),
+            8,
+            "all 8 capability cases pass expected assertions"
+        );
         for result in results {
             assert!(
                 result.passed,
@@ -1522,11 +1548,18 @@ mod tests {
         let events = replay_to_harness_events(&replay_json, &file).expect("convert");
         assert!(events.len() >= 3);
 
-        assert!(matches!(events[0], HarnessEvent::CodingSessionStarted { .. }));
+        assert!(matches!(
+            events[0],
+            HarnessEvent::CodingSessionStarted { .. }
+        ));
 
-        assert!(matches!(&events[1], HarnessEvent::ToolCall { tool_name, .. } if tool_name == "self_test"));
+        assert!(
+            matches!(&events[1], HarnessEvent::ToolCall { tool_name, .. } if tool_name == "self_test")
+        );
 
-        let has_completed = events.iter().any(|e| matches!(e, HarnessEvent::RunCompleted { outcome, .. } if outcome == "completed"));
+        let has_completed = events.iter().any(
+            |e| matches!(e, HarnessEvent::RunCompleted { outcome, .. } if outcome == "completed"),
+        );
         assert!(has_completed);
     }
 
@@ -1578,7 +1611,9 @@ mod tests {
         });
 
         let events = replay_to_harness_events(&replay_json, &file).expect("convert");
-        let has_failed_verify = events.iter().any(|e| matches!(e, HarnessEvent::Verification { success: false, .. }));
+        let has_failed_verify = events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::Verification { success: false, .. }));
         assert!(has_failed_verify);
     }
 
@@ -1594,8 +1629,13 @@ mod tests {
 
         let events = replay_to_harness_events(&replay_json, &file).expect("convert");
         assert_eq!(events.len(), 2);
-        assert!(matches!(events[0], HarnessEvent::CodingSessionStarted { .. }));
-        assert!(matches!(&events[1], HarnessEvent::RunCompleted { outcome, .. } if outcome == "completed"));
+        assert!(matches!(
+            events[0],
+            HarnessEvent::CodingSessionStarted { .. }
+        ));
+        assert!(
+            matches!(&events[1], HarnessEvent::RunCompleted { outcome, .. } if outcome == "completed")
+        );
     }
 
     #[test]
@@ -1614,7 +1654,9 @@ mod tests {
         });
 
         let events = replay_to_harness_events(&replay_json, &file).expect("convert");
-        let has_completed = events.iter().any(|e| matches!(e, HarnessEvent::RunCompleted { .. }));
+        let has_completed = events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::RunCompleted { .. }));
         assert!(has_completed);
     }
 
@@ -1623,7 +1665,10 @@ mod tests {
         let source = ReplaySource::File;
         let rt = tokio::runtime::Runtime::new().unwrap();
         let evidence = rt.block_on(load_replay_evidence(&source, "failing-unit"));
-        assert!(evidence.is_some(), "file source should load failing-unit fixture");
+        assert!(
+            evidence.is_some(),
+            "file source should load failing-unit fixture"
+        );
         let evidence = evidence.unwrap();
         assert_eq!(evidence.id, "replay-failing-unit");
         assert!(!evidence.events.is_empty());
@@ -1636,7 +1681,10 @@ mod tests {
         };
         let rt = tokio::runtime::Runtime::new().unwrap();
         let evidence = rt.block_on(load_replay_evidence(&source, "failing-unit"));
-        assert!(evidence.is_none(), "deeplossless on port 1 should be unavailable");
+        assert!(
+            evidence.is_none(),
+            "deeplossless on port 1 should be unavailable"
+        );
     }
 
     #[test]

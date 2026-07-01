@@ -96,7 +96,9 @@ impl ProofMode {
             Self::Local => "fast routed checks for changed areas",
             Self::Pr => "routed checks plus full attack matrix",
             Self::Baseline => "PR checks plus workspace build regression",
-            Self::Release => "full proof including all tests, workspace build, and required desktop evidence",
+            Self::Release => {
+                "full proof including all tests, workspace build, and required desktop evidence"
+            }
         }
     }
 }

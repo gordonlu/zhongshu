@@ -84,7 +84,11 @@ impl OverlayHandle {
     }
 
     pub fn host_diagnostics(&self) -> OverlayHostDiagnostics {
-        overlay_diagnostics("windows", self.webview.is_some(), self.startup_error.clone())
+        overlay_diagnostics(
+            "windows",
+            self.webview.is_some(),
+            self.startup_error.clone(),
+        )
     }
 
     pub fn handle_window_event(&mut self, event: &WindowEvent) -> bool {

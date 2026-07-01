@@ -21,6 +21,7 @@ use crate::config::AppConfig;
 use crate::hotkey::HotkeyManager;
 use crate::indicator::Indicator;
 use crate::overlay::{AuthRequest, OverlayHandle};
+use crate::overlay_host::OverlayHandleExt;
 use crate::overlay_contract::{
     chat_coding_smoke_commands, chat_coding_smoke_events, CodingUiEvent, OverlayToUiEvent,
 };

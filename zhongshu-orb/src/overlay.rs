@@ -1,21 +1,18 @@
-use std::collections::VecDeque;
-use std::sync::Arc;
+use std::ops::Deref;
 use std::sync::Mutex;
 
 use glib;
 use gtk::gdk::prelude::MonitorExt;
 use gtk::prelude::*;
-use serde_json::json;
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::WindowId;
 use wry::WebViewBuilderExtUnix;
 
 use crate::overlay_assets::select_overlay_asset;
-use crate::overlay_contract::{parse_ui_command, UiToOverlayCommand};
 use crate::overlay_host::{
-    log_selected_asset, webview_builder_for_asset, OverlayHostCommand, OverlayHostCommandQueue,
-    OverlayHostDiagnostics,
+    log_selected_asset, make_ipc_handler, overlay_diagnostics, webview_builder_for_asset,
+    OverlayHandleExt, OverlayHostCommand, OverlayHostDiagnostics, OverlayState,
 };
 
 #[allow(unused_imports)]
@@ -128,159 +125,43 @@ static IPC_HANDLER: once_cell::sync::Lazy<
 // ── Overlay handle ───────────────────────────────────────────────────
 
 pub struct OverlayHandle {
-    pub pending_input: Arc<Mutex<VecDeque<String>>>,
-    pub pending_approve: Arc<Mutex<Option<String>>>,
-    pub pending_deny: Arc<Mutex<Option<String>>>,
-    pub pending_personality: Arc<Mutex<Option<String>>>,
-    pub pending_settings: Arc<Mutex<Option<SettingsConfig>>>,
-    pub request_new_conversation: Arc<Mutex<bool>>,
-    pub request_stop: Arc<Mutex<bool>>,
-    pub pending_open_settings: Arc<Mutex<bool>>,
-    pub pending_load_more: Arc<Mutex<bool>>,
-    pub pending_list_tasks: Arc<Mutex<bool>>,
-    pub pending_list_runbooks: Arc<Mutex<bool>>,
-    pub pending_list_equipment: Arc<Mutex<bool>>,
-    pub pending_toggle_equipment: Arc<Mutex<Option<String>>>,
-    pub pending_toggle_zoom: Arc<Mutex<bool>>,
-    pub host_commands: OverlayHostCommandQueue,
-    pub pending_cancel_task: Arc<Mutex<Option<String>>>,
-    pub pending_complete_task: Arc<Mutex<Option<String>>>,
-    #[allow(dead_code)]
-    pub request_quit: bool,
-    #[allow(dead_code)]
-    pub personality_selected: bool,
+    pub state: OverlayState,
 }
 
-impl OverlayHandle {
-    pub fn eval(&self, js: &str) {
+impl Deref for OverlayHandle {
+    type Target = OverlayState;
+    fn deref(&self) -> &OverlayState {
+        &self.state
+    }
+}
+
+impl OverlayHandleExt for OverlayHandle {
+    fn webview_eval(&self, js: &str) {
         if let Err(e) = GTK_TX.send(GtkCommand::Eval(js.to_string())) {
             tracing::warn!("gtk tx send error: {e}");
         }
     }
+}
 
-    pub fn send(&self, msg: &serde_json::Value) {
-        // Build: window.handleIpc({"type":"delta","content":"..."})
-        // serde_json::to_string gives {"type":"delta","content":"..."} which is valid JS object literal
-        let js = format!(
-            "window.handleIpc({})",
-            serde_json::to_string(msg).unwrap_or_default()
-        );
-        self.eval(&js);
+impl OverlayHandle {
+    pub fn eval(&self, js: &str) {
+        self.webview_eval(js);
     }
 
-    pub fn push_delta(&self, content: &str) {
-        self.send(&json!({ "type": "delta", "content": content }));
-    }
-
-    pub fn complete_message(&self) {
-        self.send(&json!({ "type": "complete" }));
-    }
-
-    pub fn set_history(&self, entries: &[ChatEntry], has_more: bool) {
-        self.send(&json!({ "type": "history", "entries": entries, "has_more": has_more }));
-    }
-
-    pub fn prepend_history(&self, entries: &[ChatEntry], has_more: bool) {
-        self.send(&json!({ "type": "prepend_history", "entries": entries, "has_more": has_more }));
-    }
-
-    pub fn show_auth(&self, req: &AuthRequest) {
-        self.send(&json!({ "type": "auth", "request": req }));
-    }
-
-    #[allow(dead_code)]
-    pub fn show_settings(&self, config: &SettingsConfig) {
-        self.send(&json!({ "type": "settings", "config": config }));
-    }
-
-    #[allow(dead_code)]
-    pub fn show_personality_picker(&self) {
-        self.send(&json!({ "type": "show_personality" }));
-    }
-
-    pub fn clear_chat(&self) {
-        self.send(&json!({ "type": "clear" }));
-    }
-
-    pub fn toast(&self, text: &str) {
-        self.send(&json!({ "type": "toast", "text": text }));
-    }
-
-    pub fn set_state(&self, state: &str) {
-        self.send(&json!({ "type": "state_change", "state": state }));
-    }
-
-    /// Show the window if it's hidden (re-opens from tray/notification).
     pub fn show_window(&self, width: f32, height: f32) {
         let _ = GTK_TX.send(GtkCommand::Show(width, height));
     }
 
-    pub fn take_input(&self) -> Option<String> {
-        self.pending_input.lock().unwrap().pop_front()
+    pub fn window_id(&self) -> Option<WindowId> {
+        None
     }
 
-    pub fn take_approve(&self) -> Option<String> {
-        self.pending_approve.lock().unwrap().take()
+    pub fn host_diagnostics(&self) -> OverlayHostDiagnostics {
+        overlay_diagnostics("gtk", true, None)
     }
 
-    pub fn take_deny(&self) -> Option<String> {
-        self.pending_deny.lock().unwrap().take()
-    }
-
-    pub fn take_personality(&self) -> Option<String> {
-        self.pending_personality.lock().unwrap().take()
-    }
-
-    pub fn take_settings(&self) -> Option<SettingsConfig> {
-        self.pending_settings.lock().unwrap().take()
-    }
-
-    pub fn take_new_conversation(&self) -> bool {
-        std::mem::take(&mut *self.request_new_conversation.lock().unwrap())
-    }
-
-    pub fn take_stop(&self) -> bool {
-        std::mem::take(&mut *self.request_stop.lock().unwrap())
-    }
-
-    pub fn take_open_settings(&self) -> bool {
-        std::mem::take(&mut *self.pending_open_settings.lock().unwrap())
-    }
-
-    pub fn take_load_more(&self) -> bool {
-        std::mem::take(&mut *self.pending_load_more.lock().unwrap())
-    }
-
-    pub fn take_list_tasks(&self) -> bool {
-        std::mem::take(&mut *self.pending_list_tasks.lock().unwrap())
-    }
-    pub fn take_list_runbooks(&self) -> bool {
-        std::mem::take(&mut *self.pending_list_runbooks.lock().unwrap())
-    }
-    pub fn take_list_equipment(&self) -> bool {
-        std::mem::take(&mut *self.pending_list_equipment.lock().unwrap())
-    }
-    pub fn take_toggle_equipment(&self) -> Option<String> {
-        self.pending_toggle_equipment.lock().unwrap().take()
-    }
-    pub fn take_toggle_zoom(&self) -> bool {
-        std::mem::take(&mut *self.pending_toggle_zoom.lock().unwrap())
-    }
-
-    pub fn take_start_drag(&self) -> bool {
-        self.host_commands.take(OverlayHostCommand::StartDrag)
-    }
-
-    pub fn take_minimize(&self) -> bool {
-        self.host_commands.take(OverlayHostCommand::Minimize)
-    }
-
-    pub fn take_maximize_restore(&self) -> bool {
-        self.host_commands.take(OverlayHostCommand::MaximizeRestore)
-    }
-
-    pub fn take_close_window(&self) -> bool {
-        self.host_commands.take(OverlayHostCommand::CloseWindow)
+    pub fn handle_window_event(&self, _event: &WindowEvent) -> bool {
+        false
     }
 
     pub fn start_drag_window(&self) {
@@ -299,38 +180,20 @@ impl OverlayHandle {
         let _ = GTK_TX.send(GtkCommand::CloseWindow);
     }
 
-    pub fn take_cancel_task(&self) -> Option<String> {
-        std::mem::take(&mut *self.pending_cancel_task.lock().unwrap())
+    pub fn take_start_drag(&self) -> bool {
+        self.host_commands.take(OverlayHostCommand::StartDrag)
     }
 
-    pub fn take_complete_task(&self) -> Option<String> {
-        std::mem::take(&mut *self.pending_complete_task.lock().unwrap())
+    pub fn take_minimize(&self) -> bool {
+        self.host_commands.take(OverlayHostCommand::Minimize)
     }
 
-    pub fn show_tasks(&self, tasks: &[serde_json::Value]) {
-        self.send(&json!({ "type": "tasks", "tasks": tasks }));
-    }
-    pub fn show_runbooks(&self, runbooks: &[serde_json::Value]) {
-        self.send(&json!({ "type": "runbooks", "runbooks": runbooks }));
-    }
-    pub fn show_equipment(&self, items: &[serde_json::Value]) {
-        self.send(&json!({ "type": "equipment", "items": items }));
+    pub fn take_maximize_restore(&self) -> bool {
+        self.host_commands.take(OverlayHostCommand::MaximizeRestore)
     }
 
-    pub fn window_id(&self) -> Option<WindowId> {
-        None
-    }
-
-    pub fn host_diagnostics(&self) -> OverlayHostDiagnostics {
-        OverlayHostDiagnostics {
-            platform: "gtk".to_string(),
-            webview_available: true,
-            startup_error: None,
-        }
-    }
-
-    pub fn handle_window_event(&self, _event: &WindowEvent) -> bool {
-        false
+    pub fn take_close_window(&self) -> bool {
+        self.host_commands.take(OverlayHostCommand::CloseWindow)
     }
 }
 
@@ -342,134 +205,14 @@ impl Drop for OverlayHandle {
 
 /// Show the overlay window and return a handle for IPC.
 pub fn show(_event_loop: &ActiveEventLoop, width: f32, height: f32) -> OverlayHandle {
-    // Initialize GTK thread (on first call only)
     let _ = *GTK_TX;
 
-    let pending_input: Arc<Mutex<VecDeque<String>>> = Default::default();
-    let pending_approve: Arc<Mutex<Option<String>>> = Default::default();
-    let pending_deny: Arc<Mutex<Option<String>>> = Default::default();
-    let pending_personality: Arc<Mutex<Option<String>>> = Default::default();
-    let pending_settings: Arc<Mutex<Option<SettingsConfig>>> = Default::default();
-    let request_new_conversation: Arc<Mutex<bool>> = Default::default();
-    let request_stop: Arc<Mutex<bool>> = Default::default();
-    let pending_open_settings: Arc<Mutex<bool>> = Default::default();
-    let pending_load_more: Arc<Mutex<bool>> = Default::default();
-    let pending_list_tasks: Arc<Mutex<bool>> = Default::default();
-    let pending_list_runbooks: Arc<Mutex<bool>> = Default::default();
-    let pending_list_equipment: Arc<Mutex<bool>> = Default::default();
-    let pending_toggle_equipment: Arc<Mutex<Option<String>>> = Default::default();
-    let pending_toggle_zoom: Arc<Mutex<bool>> = Default::default();
-    let host_commands = OverlayHostCommandQueue::default();
-    let pending_cancel_task: Arc<Mutex<Option<String>>> = Default::default();
-    let pending_complete_task: Arc<Mutex<Option<String>>> = Default::default();
+    let state = OverlayState::new();
+    let clones = state.clone_for_ipc();
 
-    let pi = pending_input.clone();
-    let pa = pending_approve.clone();
-    let pd = pending_deny.clone();
-    let pp = pending_personality.clone();
-    let ps = pending_settings.clone();
-    let rnc = request_new_conversation.clone();
-    let rs = request_stop.clone();
-    let pos = pending_open_settings.clone();
-    let plm = pending_load_more.clone();
-    let plt = pending_list_tasks.clone();
-    let plr = pending_list_runbooks.clone();
-    let ple = pending_list_equipment.clone();
-    let pte = pending_toggle_equipment.clone();
-    let ptz = pending_toggle_zoom.clone();
-    let host_commands_for_ipc = host_commands.clone();
-    let pct = pending_cancel_task.clone();
-    let pcmt = pending_complete_task.clone();
-
-    // Install IPC handler that writes to these shared queues
-    *IPC_HANDLER.lock().unwrap() =
-        Some(Box::new(
-            move |request: http::Request<String>| match parse_ui_command(request.body()) {
-                UiToOverlayCommand::Submit(text) => {
-                    pi.lock().unwrap().push_back(text);
-                }
-                UiToOverlayCommand::Stop => {
-                    *rs.lock().unwrap() = true;
-                }
-                UiToOverlayCommand::NewConversation | UiToOverlayCommand::DeleteHistory => {
-                    *rnc.lock().unwrap() = true;
-                }
-                UiToOverlayCommand::Approve(rid) => {
-                    *pa.lock().unwrap() = Some(rid);
-                }
-                UiToOverlayCommand::Deny(rid) => {
-                    *pd.lock().unwrap() = Some(rid);
-                }
-                UiToOverlayCommand::PickPersonality(personality) => {
-                    *pp.lock().unwrap() = Some(personality);
-                }
-                UiToOverlayCommand::SaveSettings(settings) => {
-                    *ps.lock().unwrap() = Some(settings);
-                }
-                UiToOverlayCommand::OpenSettings => {
-                    *pos.lock().unwrap() = true;
-                }
-                UiToOverlayCommand::LoadMore => {
-                    *plm.lock().unwrap() = true;
-                }
-                UiToOverlayCommand::ListTasks => {
-                    *plt.lock().unwrap() = true;
-                }
-                UiToOverlayCommand::ListRunbooks => {
-                    *plr.lock().unwrap() = true;
-                }
-                UiToOverlayCommand::ListEquipment => {
-                    *ple.lock().unwrap() = true;
-                }
-                UiToOverlayCommand::ToggleEquipment(id) => {
-                    *pte.lock().unwrap() = Some(id);
-                }
-                UiToOverlayCommand::ToggleZoom => {
-                    *ptz.lock().unwrap() = true;
-                }
-                UiToOverlayCommand::StartDrag => {
-                    host_commands_for_ipc.push(OverlayHostCommand::StartDrag);
-                }
-                UiToOverlayCommand::Minimize => {
-                    host_commands_for_ipc.push(OverlayHostCommand::Minimize);
-                }
-                UiToOverlayCommand::MaximizeRestore => {
-                    host_commands_for_ipc.push(OverlayHostCommand::MaximizeRestore);
-                }
-                UiToOverlayCommand::CloseWindow => {
-                    host_commands_for_ipc.push(OverlayHostCommand::CloseWindow);
-                }
-                UiToOverlayCommand::CancelTask(id) => {
-                    *pct.lock().unwrap() = Some(id);
-                }
-                UiToOverlayCommand::CompleteTask(id) => {
-                    *pcmt.lock().unwrap() = Some(id);
-                }
-                UiToOverlayCommand::Unknown => {}
-            },
-        ));
+    *IPC_HANDLER.lock().unwrap() = Some(Box::new(make_ipc_handler(clones)));
 
     let _ = GTK_TX.send(GtkCommand::Show(width, height));
 
-    OverlayHandle {
-        pending_input,
-        pending_approve,
-        pending_deny,
-        pending_personality,
-        pending_settings,
-        request_new_conversation,
-        request_stop,
-        pending_open_settings,
-        pending_load_more,
-        pending_list_tasks,
-        pending_list_runbooks,
-        pending_list_equipment,
-        pending_toggle_equipment,
-        pending_toggle_zoom,
-        host_commands,
-        pending_cancel_task,
-        pending_complete_task,
-        request_quit: false,
-        personality_selected: false,
-    }
+    OverlayHandle { state }
 }

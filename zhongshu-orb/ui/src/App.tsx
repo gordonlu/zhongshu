@@ -68,6 +68,7 @@ export function App() {
   const [composerText, setComposerText] = useState('')
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const demoLoaded = useRef(false)
+  const optimisticUserMessages = useRef<string[]>([])
   const pendingDelta = useRef('')
   const pendingDeltaFrame = useRef<number | null>(null)
 
@@ -102,6 +103,9 @@ export function App() {
       if (pendingDelta.current) {
         cancelPendingDeltaFrame()
         flushPendingDelta()
+      }
+      if (event.type === 'user_message' && consumeOptimisticEcho(optimisticUserMessages.current, event.content)) {
+        return
       }
       dispatchChat(event)
       dispatchCoding(event)
@@ -195,6 +199,8 @@ export function App() {
   const submitComposer = () => {
     const text = composerText.trim()
     if (!text) return
+    optimisticUserMessages.current.push(text)
+    dispatchChat({ type: 'user_message', content: text })
     bridge.send({ type: 'submit', text })
     setComposerText('')
     focusComposer()
@@ -494,4 +500,11 @@ export function App() {
     <div className="window-border" />
     {toast ? <div className="toast">{toast}</div> : null}
   </>)
+}
+
+function consumeOptimisticEcho(pendingMessages: string[], content: string): boolean {
+  const index = pendingMessages.findIndex((message) => message === content)
+  if (index < 0) return false
+  pendingMessages.splice(index, 1)
+  return true
 }

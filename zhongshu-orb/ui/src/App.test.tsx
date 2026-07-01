@@ -147,6 +147,29 @@ describe('App IPC interactions', () => {
     expect(composer).toHaveFocus()
   })
 
+  it('shows submitted user text immediately and ignores the native echo', async () => {
+    const postMessage = installWebViewHost()
+    const { App } = await import('./App')
+
+    render(<App />)
+
+    const composer = screen.getByPlaceholderText('Ask Zhongshu what to do next.')
+    fireEvent.change(composer, { target: { value: 'show me instantly' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+
+    expect(JSON.parse(postMessage.mock.calls.at(-1)?.[0] ?? '{}')).toEqual({
+      type: 'submit',
+      text: 'show me instantly',
+    })
+    expect(screen.getByText('show me instantly')).toBeInTheDocument()
+
+    act(() => {
+      window.handleIpc?.({ type: 'user_message', content: 'show me instantly' })
+    })
+
+    expect(screen.getAllByText('show me instantly')).toHaveLength(1)
+  })
+
   it('closes modal surfaces before hiding the overlay on Escape', async () => {
     const postMessage = installWebViewHost()
     const { App } = await import('./App')

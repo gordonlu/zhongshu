@@ -52,7 +52,7 @@ export function chatReducer(state: ChatState, event: OverlayToUiEvent): ChatStat
         streamingAssistant: state.streamingAssistant + event.content,
       }
     case 'complete': {
-      if (!state.streamingAssistant.trim()) return state
+      if (!state.streamingAssistant.trim() && state.toolActivities.length === 0) return state
       return {
         ...state,
         messages: [
@@ -61,10 +61,11 @@ export function chatReducer(state: ChatState, event: OverlayToUiEvent): ChatStat
             id: nextMessageId('assistant'),
             role: 'assistant',
             content: state.streamingAssistant,
-            toolCalls: [],
+            toolCalls: state.toolActivities.map(toolActivityToEntry),
           },
         ],
         streamingAssistant: '',
+        toolActivities: [],
       }
     }
     case 'history':
@@ -119,6 +120,15 @@ export function chatReducer(state: ChatState, event: OverlayToUiEvent): ChatStat
       return { ...state, toast: event.text }
     default:
       return state
+  }
+}
+
+function toolActivityToEntry(activity: ToolActivity): ToolCallEntry {
+  return {
+    name: activity.name,
+    status: activity.status === 'done'
+      ? { Done: { success: activity.success ?? false } }
+      : 'Running',
   }
 }
 

@@ -38,4 +38,25 @@ describe('chatReducer', () => {
       },
     ])
   })
+
+  it('pins live tool activity onto the completed assistant message', () => {
+    const started = chatReducer(initialChatState, { type: 'tool_call', name: 'webfetch' })
+    const toolDone = chatReducer(started, { type: 'tool_result', name: 'webfetch', success: true })
+    const streamed = chatReducer(toolDone, { type: 'delta', content: 'done' })
+    const completed = chatReducer(streamed, { type: 'complete' })
+
+    expect(completed.toolActivities).toEqual([])
+    expect(completed.messages).toMatchObject([
+      {
+        role: 'assistant',
+        content: 'done',
+        toolCalls: [
+          {
+            name: 'webfetch',
+            status: { Done: { success: true } },
+          },
+        ],
+      },
+    ])
+  })
 })

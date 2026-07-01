@@ -155,14 +155,7 @@ pub async fn run_agent(
                 messages.push(Message::system(text));
             }
 
-            let hints = crate::harness::architecture::feedback::generate_hints(
-                &crate::harness::architecture::config::default_rules(),
-                &crate::harness::architecture::layer::LayerGraph::default(),
-            );
-            for fb in hints {
-                let text = crate::harness::render::render_feedback(&fb);
-                messages.push(Message::system(text));
-            }
+
         }
 
         let current_tokens = estimate_total_tokens(&messages);

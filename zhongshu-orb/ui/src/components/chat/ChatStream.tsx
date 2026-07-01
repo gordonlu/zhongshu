@@ -51,15 +51,21 @@ export function ChatStream({
       {visibleMessages.map((message) => (
         <article key={message.id} className={`message ${message.role}`}>
           <div className="message-role">{roleLabel(message.role)}</div>
-          <div className="message-content">{message.content}</div>
-          <ToolCallGroup entries={message.toolCalls} />
+          {message.role === 'assistant' ? <ToolCallGroup entries={message.toolCalls} /> : null}
+          {message.content ? <div className="message-content">{message.content}</div> : null}
+          {message.role !== 'assistant' ? <ToolCallGroup entries={message.toolCalls} /> : null}
         </article>
       ))}
-      <ToolCallGroup activities={state.toolActivities} />
       {state.streamingAssistant ? (
         <article className="message assistant streaming">
           <div className="message-role">Zhongshu</div>
+          <ToolCallGroup activities={state.toolActivities} />
           <div className="message-content">{state.streamingAssistant}</div>
+        </article>
+      ) : state.toolActivities.length > 0 ? (
+        <article className="message assistant streaming">
+          <div className="message-role">Zhongshu</div>
+          <ToolCallGroup activities={state.toolActivities} />
         </article>
       ) : null}
     </div>

@@ -553,6 +553,7 @@ impl DeeplosslessProxy {
                 Err(e) => tracing::warn!("error reading message row: {e}"),
             }
         }
+        tracing::info!("loaded {} turns from {}", turns.len(), expanded);
         turns
     }
 

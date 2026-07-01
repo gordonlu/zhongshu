@@ -21,7 +21,7 @@
 - **自我进化装备** — Agent 观察你的使用模式，自动提议并安装可复用的 skill 装备
 - **Chrome 自动化** — 托管 Chrome profile，16+ DOM/Js eval/console/click/input 原语，kill-on-drop 生命周期
 - **安全模型** — 工具按风险分级，危险操作请求用户确认，网页内容不可信处理
-- **Deeplossless 集成** — 流式上下文压缩，本地代理服务
+- **[Deeplossless](https://github.com/gordonlu/deeplossless) 集成** — 流式上下文压缩，本地代理服务
 - **工具集** — Web 搜索、网页抓取、浏览器辅助、Shell、文件编辑、代码搜索
 
 ## 快速开始

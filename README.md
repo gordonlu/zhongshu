@@ -13,7 +13,7 @@
 ## 功能
 
 - **桌面悬浮窗口** — GTK/Linux、WebView2/Windows、WKWebView/macOS 原生的无边框沉浸式窗口，可拖拽、缩放、深色/浅色主题
-- **多 LLM 路由** — 内置 DeepSeek Flash（流式）和 Pro（深度推理）自动路由，支持 OpenAI-compatible API
+- **多 LLM 路由** — 内置 DeepSeek Flash（快速响应）和 Pro（深度推理）自动路由，支持 OpenAI-compatible API
 - **Coding Agent** — 面向代码修改的专用 Agent 模式，带架构分析、工作区文件所有权、worker 冲突检测、分步计划、验证门禁
 - **上下文管理** — 500K-1M token 长上下文，证据评分与压缩，保留因果链
 - **记忆系统** — 候选记忆 → 策略评估 → 长期记忆 → 语义检索

@@ -171,18 +171,18 @@ impl LlmConfig {
         reg
     }
 
-    /// Resolved API key: env var takes priority, then OS keyring.
+    /// Resolved API key: OS keyring (UI-set) takes priority, then env var.
     /// The key is intentionally never read from or written to config.json.
     pub fn api_key(&self) -> String {
         if self.offline_enabled() {
             return String::new();
         }
-        if let Ok(key) = std::env::var(&self.api_key_env) {
+        if let Some(key) = load_stored_api_key() {
             if !key.is_empty() {
                 return key;
             }
         }
-        load_stored_api_key().unwrap_or_default()
+        std::env::var(&self.api_key_env).unwrap_or_default()
     }
 
     pub fn offline_enabled(&self) -> bool {

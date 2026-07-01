@@ -45,7 +45,10 @@ export function chatReducer(state: ChatState, event: OverlayToUiEvent): ChatStat
             toolCalls: [],
           },
         ],
+        streamingAssistant: '',
       }
+    case 'stop':
+      return { ...state, streamingAssistant: '' }
     case 'delta':
       return {
         ...state,

@@ -65,6 +65,7 @@ export type CodingUiEvent =
 
 export type OverlayToUiEvent =
   | { type: 'user_message'; content: string }
+  | { type: 'stop' }
   | { type: 'delta'; content: string }
   | { type: 'complete' }
   | { type: 'history'; entries: ChatEntry[]; has_more: boolean }

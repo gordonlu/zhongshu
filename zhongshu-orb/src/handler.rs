@@ -345,6 +345,7 @@ impl ZhongshuApp {
             self.delete_all_history();
         }
         if ov.take_stop() {
+            ov.send(&serde_json::json!({"type": "stop"}));
             self.controller.cancel();
         }
         if ov.take_toggle_zoom() {

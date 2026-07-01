@@ -725,7 +725,7 @@ fn default_token_limit() -> u32 {
     128_000
 }
 fn default_streaming_timeout_secs() -> u64 {
-    180
+    300
 }
 fn default_response_capacity() -> usize {
     512

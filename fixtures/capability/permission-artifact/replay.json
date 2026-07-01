@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "capability_case_id": "permission-artifact",
+  "fixture_id": "replay-permission-artifact",
+  "deeplossless_conversation_id": 2002,
+  "deeplossless_replay_execution_id": "replay-permission-artifact",
+  "normalization": {
+    "normalize_workspace_root": true,
+    "normalize_home_dir": true,
+    "normalize_timestamps": true,
+    "normalize_uuids": true,
+    "normalize_durations": true,
+    "normalize_provider_request_ids": true,
+    "normalize_token_and_cost_counters": true
+  },
+  "expected_tool_calls": [
+    "shell"
+  ],
+  "expected_changed_files": [
+    "src/artifact.rs"
+  ],
+  "expected_final_outcome": "completed_or_blocked_with_reason",
+  "events": [
+    {
+      "CodingSessionStarted": {
+        "timestamp": 1,
+        "session_id": "session-permission-artifact",
+        "trace_id": "trace-permission-artifact",
+        "repo_root": "/workspace/fixtures/capability/permission-artifact",
+        "intent": "Request approval before performing the protected operation.",
+        "model": "scripted",
+        "source": "offline-scripted-provider",
+        "deeplossless_conversation_id": 2002,
+        "deeplossless_replay_execution_id": "replay-permission-artifact"
+      }
+    },
+    {
+      "ArchitectureViolation": {
+        "rule_id": "requires_approval",
+        "severity": "warning"
+      }
+    },
+    {
+      "ToolCall": {
+        "step": 2,
+        "tool_name": "shell",
+        "args_hash": "approved-artifact-cmd",
+        "success": true
+      }
+    },
+    {
+      "FileEdit": {
+        "path": "src/artifact.rs",
+        "diff_hash": "artifact-patch",
+        "diff": null
+      }
+    },
+    {
+      "Verification": {
+        "command": "cargo test artifact",
+        "success": true,
+        "exit_code": 0,
+        "step": 3
+      }
+    },
+    {
+      "RunCompleted": {
+        "timestamp": 2,
+        "total_steps": 3,
+        "outcome": "completed"
+      }
+    }
+  ]
+}

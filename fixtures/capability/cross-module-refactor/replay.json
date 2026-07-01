@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "capability_case_id": "cross-module-refactor",
+  "fixture_id": "replay-cross-module-refactor",
+  "deeplossless_conversation_id": 2003,
+  "deeplossless_replay_execution_id": "replay-cross-module-refactor",
+  "normalization": {
+    "normalize_workspace_root": true,
+    "normalize_home_dir": true,
+    "normalize_timestamps": true,
+    "normalize_uuids": true,
+    "normalize_durations": true,
+    "normalize_provider_request_ids": true,
+    "normalize_token_and_cost_counters": true
+  },
+  "expected_tool_calls": [
+    "grep",
+    "self_test"
+  ],
+  "expected_changed_files": [
+    "src/config.rs",
+    "src/runner.rs"
+  ],
+  "expected_final_outcome": "completed_or_blocked_with_reason",
+  "events": [
+    {
+      "CodingSessionStarted": {
+        "timestamp": 1,
+        "session_id": "session-cross-module-refactor",
+        "trace_id": "trace-cross-module-refactor",
+        "repo_root": "/workspace/fixtures/capability/cross-module-refactor",
+        "intent": "Refactor across owned modules without touching unrelated files.",
+        "model": "scripted",
+        "source": "offline-scripted-provider",
+        "deeplossless_conversation_id": 2003,
+        "deeplossless_replay_execution_id": "replay-cross-module-refactor"
+      }
+    },
+    {
+      "ToolCall": {
+        "step": 1,
+        "tool_name": "grep",
+        "args_hash": "find-cross-module-symbols",
+        "success": true
+      }
+    },
+    {
+      "FileRead": {
+        "path": "src/config.rs"
+      }
+    },
+    {
+      "FileRead": {
+        "path": "src/runner.rs"
+      }
+    },
+    {
+      "FileEdit": {
+        "path": "src/config.rs",
+        "diff_hash": "config-refactor",
+        "diff": null
+      }
+    },
+    {
+      "FileEdit": {
+        "path": "src/runner.rs",
+        "diff_hash": "runner-refactor",
+        "diff": null
+      }
+    },
+    {
+      "ToolCall": {
+        "step": 3,
+        "tool_name": "self_test",
+        "args_hash": "cross-module-verify",
+        "success": true
+      }
+    },
+    {
+      "Verification": {
+        "command": "cargo test refactor",
+        "success": true,
+        "exit_code": 0,
+        "step": 4
+      }
+    },
+    {
+      "RunCompleted": {
+        "timestamp": 2,
+        "total_steps": 4,
+        "outcome": "completed"
+      }
+    }
+  ]
+}

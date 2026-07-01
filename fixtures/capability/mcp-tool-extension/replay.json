@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "capability_case_id": "mcp-tool-extension",
+  "fixture_id": "replay-mcp-tool-extension",
+  "deeplossless_conversation_id": 2004,
+  "deeplossless_replay_execution_id": "replay-mcp-tool-extension",
+  "normalization": {
+    "normalize_workspace_root": true,
+    "normalize_home_dir": true,
+    "normalize_timestamps": true,
+    "normalize_uuids": true,
+    "normalize_durations": true,
+    "normalize_provider_request_ids": true,
+    "normalize_token_and_cost_counters": true
+  },
+  "expected_tool_calls": [
+    "mcp:test"
+  ],
+  "expected_changed_files": [
+    "equipment/manifest.json"
+  ],
+  "expected_final_outcome": "completed_or_blocked_with_reason",
+  "events": [
+    {
+      "CodingSessionStarted": {
+        "timestamp": 1,
+        "session_id": "session-mcp-tool-extension",
+        "trace_id": "trace-mcp-tool-extension",
+        "repo_root": "/workspace/fixtures/capability/mcp-tool-extension",
+        "intent": "Enable a manifest-declared MCP tool and call it through ToolSpec.",
+        "model": "scripted",
+        "source": "offline-scripted-provider",
+        "deeplossless_conversation_id": 2004,
+        "deeplossless_replay_execution_id": "replay-mcp-tool-extension"
+      }
+    },
+    {
+      "FileEdit": {
+        "path": "equipment/manifest.json",
+        "diff_hash": "mcp-manifest",
+        "diff": null
+      }
+    },
+    {
+      "ToolCall": {
+        "step": 2,
+        "tool_name": "mcp:test",
+        "args_hash": "mcp-tool-call",
+        "success": true
+      }
+    },
+    {
+      "Verification": {
+        "command": "cargo test mcp",
+        "success": true,
+        "exit_code": 0,
+        "step": 3
+      }
+    },
+    {
+      "RunCompleted": {
+        "timestamp": 2,
+        "total_steps": 3,
+        "outcome": "completed"
+      }
+    }
+  ]
+}

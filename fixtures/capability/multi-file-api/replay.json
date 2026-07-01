@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "capability_case_id": "multi-file-api",
+  "fixture_id": "replay-multi-file-api",
+  "deeplossless_conversation_id": 1002,
+  "deeplossless_replay_execution_id": "replay-multi-file-api",
+  "normalization": {
+    "normalize_workspace_root": true,
+    "normalize_home_dir": true,
+    "normalize_timestamps": true,
+    "normalize_uuids": true,
+    "normalize_durations": true,
+    "normalize_provider_request_ids": true,
+    "normalize_token_and_cost_counters": true
+  },
+  "expected_tool_calls": [
+    "grep",
+    "self_test"
+  ],
+  "expected_changed_files": [
+    "src/api.rs",
+    "src/app.rs"
+  ],
+  "expected_final_outcome": "completed_or_blocked_with_reason",
+  "events": [
+    {
+      "CodingSessionStarted": {
+        "timestamp": 1,
+        "session_id": "session-multi-file-api",
+        "trace_id": "trace-multi-file-api",
+        "repo_root": "/workspace/fixtures/capability/multi-file-api",
+        "intent": "Update the API call shape and fix every affected caller.",
+        "model": "scripted",
+        "source": "offline-scripted-provider",
+        "deeplossless_conversation_id": 1002,
+        "deeplossless_replay_execution_id": "replay-multi-file-api"
+      }
+    },
+    {
+      "ToolCall": {
+        "step": 1,
+        "tool_name": "grep",
+        "args_hash": "find-api-callers",
+        "success": true
+      }
+    },
+    {
+      "FileRead": {
+        "path": "src/api.rs"
+      }
+    },
+    {
+      "FileRead": {
+        "path": "src/app.rs"
+      }
+    },
+    {
+      "FileEdit": {
+        "path": "src/api.rs",
+        "diff_hash": "api-signature",
+        "diff": null
+      }
+    },
+    {
+      "FileEdit": {
+        "path": "src/app.rs",
+        "diff_hash": "api-consumer",
+        "diff": null
+      }
+    },
+    {
+      "ToolCall": {
+        "step": 3,
+        "tool_name": "self_test",
+        "args_hash": "multi-file-api-verify",
+        "success": true
+      }
+    },
+    {
+      "Verification": {
+        "command": "cargo test api_contract",
+        "success": true,
+        "exit_code": 0,
+        "step": 4
+      }
+    },
+    {
+      "RunCompleted": {
+        "timestamp": 2,
+        "total_steps": 4,
+        "outcome": "completed"
+      }
+    }
+  ]
+}

@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "capability_case_id": "failure-recovery",
+  "fixture_id": "replay-failure-recovery",
+  "deeplossless_conversation_id": 1003,
+  "deeplossless_replay_execution_id": "replay-failure-recovery",
+  "normalization": {
+    "normalize_workspace_root": true,
+    "normalize_home_dir": true,
+    "normalize_timestamps": true,
+    "normalize_uuids": true,
+    "normalize_durations": true,
+    "normalize_provider_request_ids": true,
+    "normalize_token_and_cost_counters": true
+  },
+  "expected_tool_calls": [
+    "self_test"
+  ],
+  "expected_changed_files": [
+    "src/slug.rs"
+  ],
+  "expected_final_outcome": "completed_or_blocked_with_reason",
+  "events": [
+    {
+      "CodingSessionStarted": {
+        "timestamp": 1,
+        "session_id": "session-failure-recovery",
+        "trace_id": "trace-failure-recovery",
+        "repo_root": "/workspace/fixtures/capability/failure-recovery",
+        "intent": "Run verification, inspect the failure, fix the cause, and rerun.",
+        "model": "scripted",
+        "source": "offline-scripted-provider",
+        "deeplossless_conversation_id": 1003,
+        "deeplossless_replay_execution_id": "replay-failure-recovery"
+      }
+    },
+    {
+      "Verification": {
+        "command": "cargo test slug_recovery",
+        "success": false,
+        "exit_code": 101,
+        "step": 1
+      }
+    },
+    {
+      "RecoveryFeedback": {
+        "rule_id": "verification_failed",
+        "message": "inspect failing assertion and patch slug normalization"
+      }
+    },
+    {
+      "ToolCall": {
+        "step": 2,
+        "tool_name": "self_test",
+        "args_hash": "failure-recovery-tool",
+        "success": true
+      }
+    },
+    {
+      "FileEdit": {
+        "path": "src/slug.rs",
+        "diff_hash": "slug-fix",
+        "diff": null
+      }
+    },
+    {
+      "Verification": {
+        "command": "cargo test slug_recovery",
+        "success": true,
+        "exit_code": 0,
+        "step": 3
+      }
+    },
+    {
+      "RunCompleted": {
+        "timestamp": 2,
+        "total_steps": 3,
+        "outcome": "completed"
+      }
+    }
+  ]
+}

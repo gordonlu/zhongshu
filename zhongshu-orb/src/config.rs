@@ -199,10 +199,22 @@ impl LlmConfig {
 
     pub fn proxy_upstream(&self) -> String {
         if self.offline_enabled() {
-            default_api_base()
-        } else {
-            self.api_base.clone()
+            return default_api_base();
         }
+        let url = self.api_base.trim_end_matches('/');
+        if url.ends_with("/chat/completions") {
+            return url.to_string();
+        }
+        // If URL has a path component (not just scheme://host), append
+        // /chat/completions so deeplossless treats it as case 1 (use as-is).
+        // Bare domains like https://api.deepseek.com are left unchanged
+        // so deeplossless can append its default upstream_path.
+        if let Some(rest) = url.split("://").nth(1) {
+            if rest.contains('/') {
+                return format!("{}/chat/completions", url);
+            }
+        }
+        url.to_string()
     }
 }
 

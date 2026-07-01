@@ -14,6 +14,7 @@ pub struct DeeplosslessConfig {
     pub db_path: String,
     pub api_key: String,
     pub upstream: String,
+    pub upstream_path: String,
     pub summarize_model: String,
     pub proxy_port: u16,
 }
@@ -24,6 +25,7 @@ impl Default for DeeplosslessConfig {
             db_path: "~/.deeplossless/lcm.db".into(),
             api_key: String::new(),
             upstream: DEFAULT_UPSTREAM.into(),
+            upstream_path: "/v1/chat/completions".into(),
             summarize_model: "deepseek-chat".into(),
             proxy_port: 0,
         }
@@ -156,6 +158,7 @@ impl DeeplosslessProxy {
 
         let coord_config = CoordinatorConfig {
             upstream: config.upstream.clone(),
+            upstream_path: config.upstream_path.clone(),
             db_path: config.db_path.clone(),
             api_key: key,
             admin_key: None,
@@ -724,6 +727,7 @@ mod tests {
             db_path,
             api_key: String::new(),
             upstream: DEFAULT_UPSTREAM.into(),
+            upstream_path: "/v1/chat/completions".into(),
             summarize_model: "deepseek-chat".into(),
             proxy_port: 0,
         })
@@ -794,6 +798,7 @@ mod tests {
             db_path,
             api_key: String::new(),
             upstream: DEFAULT_UPSTREAM.into(),
+            upstream_path: "/v1/chat/completions".into(),
             summarize_model: "deepseek-chat".into(),
             proxy_port: 0,
         })

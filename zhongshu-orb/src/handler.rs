@@ -264,6 +264,7 @@ impl ZhongshuApp {
         }
         if let Some(settings) = ov.take_settings() {
             let mut cfg = crate::config::load();
+            let old_api_base = cfg.llm.api_base.clone();
             let old_proxy_port = cfg.deeplossless.proxy_port;
             if !settings.api_key.is_empty() {
                 if let Err(e) = crate::config::store_api_key(&settings.api_key) {
@@ -324,7 +325,10 @@ impl ZhongshuApp {
                 &cfg.llm.model_routing.flash_model,
                 &cfg.llm.model_routing.pro_model,
             );
-            let provider = cfg.llm.build_provider(&cfg.llm.api_base);
+            let base_url = self
+                .runtime
+                .block_on(async { self.proxy.lock().await.base_url().to_string() });
+            let provider = cfg.llm.build_provider(&base_url);
             self.controller.update_llm_runtime(
                 provider,
                 cfg.llm.model.clone(),
@@ -332,8 +336,8 @@ impl ZhongshuApp {
                 cfg.llm.model_routing.reasoning_complex.clone(),
                 cfg.llm.model_routing.reasoning_agent.clone(),
             );
-            if old_proxy_port != cfg.deeplossless.proxy_port {
-                ov.toast("代理端口将在重启后生效");
+            if old_api_base != cfg.llm.api_base || old_proxy_port != cfg.deeplossless.proxy_port {
+                ov.toast("API 地址或代理端口将在重启后生效");
             }
         }
         if ov.take_new_conversation() {

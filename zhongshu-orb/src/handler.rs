@@ -524,6 +524,7 @@ impl ZhongshuApp {
                         }
                         Event::Tool(ToolEvent::Started { name }) => {
                             self.indicator_state = AgentState::Executing;
+                            self.last_activity = Instant::now();
                             if let Some(ind) = self.indicator.as_mut() {
                                 ind.set_state(AgentState::Executing);
                             }

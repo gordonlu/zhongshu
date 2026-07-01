@@ -1363,9 +1363,9 @@ dependencies = [
 
 [[package]]
 name = "deeplossless"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "458049fb6825615c215e94d8d72a0fbdc806649b3481a4593477c2bde8fded87"
+checksum = "b7e52ece07608b04c15b15d0ce21b8cf726d4a0a32e530d0924873c6cc7b1538"
 dependencies = [
  "anyhow",
  "axum",

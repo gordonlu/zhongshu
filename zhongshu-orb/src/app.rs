@@ -804,10 +804,11 @@ impl AgentController {
                     }));
                 }
                 Ok(Err(e)) => {
+                    tracing::error!("agent run failed: {e:#}");
                     let _ = tx
                         .send(ResponseEvent::MessageDelta {
                             id: aid,
-                            delta: format!("{e}"),
+                            delta: format!("{e:#}"),
                         })
                         .await;
                     let _ = tx.send(ResponseEvent::MessageCompleted { id: aid }).await;

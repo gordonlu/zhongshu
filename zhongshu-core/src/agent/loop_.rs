@@ -465,8 +465,19 @@ pub async fn run_agent(
                     &tc.id,
                     output.render_observation(&tc.function.name),
                 ));
-                while crate::authority::is_pending() {
-                    tokio::time::sleep(Duration::from_millis(200)).await;
+                loop {
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                            if !crate::authority::is_pending() {
+                                break;
+                            }
+                        }
+                        _ = cancel_token.cancelled() => {
+                            crate::authority::deny_pending(source);
+                            messages.push(Message::system("用户已中断当前操作，之前的审批请求已取消。"));
+                            break;
+                        }
+                    }
                 }
                 // User approved — update the stale auth_required observation so
                 // the LLM sees "approved" rather than concluding the request was denied.

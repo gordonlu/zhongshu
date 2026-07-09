@@ -3,6 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use zhongshu_core::agent::llm::{Message, OpenAiProvider};
 use zhongshu_core::agent::{run_agent, AgentBudget, AgentCallbacks, AgentRuntime, StopReason};
@@ -133,9 +135,10 @@ async fn main() -> anyhow::Result<()> {
                     status_line(_tool, false);
                 }
             }),
+            run_id: Uuid::new_v4(),
         };
 
-        let result = run_agent(&mut runtime, messages, Some(Arc::new(callbacks)), "").await;
+        let result = run_agent(&mut runtime, messages, Some(Arc::new(callbacks)), "", CancellationToken::new()).await;
 
         match result {
             Ok(r) => {

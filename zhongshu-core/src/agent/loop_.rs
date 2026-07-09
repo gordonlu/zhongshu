@@ -8,7 +8,9 @@ use crate::harness::trace::event::HarnessEvent;
 use crate::tool::{ToolOutput, ToolStatus};
 use anyhow::Context;
 use std::path::PathBuf;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 /// Per-agent resource budget.
 #[derive(Debug, Clone)]
@@ -88,6 +90,7 @@ pub struct AgentCallbacks {
     pub on_text: Box<dyn Fn(&str) + Send + Sync>,
     pub on_tool_start: Box<dyn Fn(&str) + Send + Sync>,
     pub on_tool_done: Box<dyn Fn(&str, bool) + Send + Sync>,
+    pub run_id: Uuid,
 }
 
 /// Run the full ReAct loop using the given runtime and initial messages.
@@ -100,6 +103,7 @@ pub async fn run_agent(
     mut messages: Vec<Message>,
     callbacks: Option<Arc<AgentCallbacks>>,
     source: &str,
+    cancel_token: CancellationToken,
 ) -> anyhow::Result<LoopResult> {
     if user_requested_verification(&messages) {
         runtime.harness_state.verification.required = true;
@@ -135,6 +139,10 @@ pub async fn run_agent(
                 tool_calls_made,
                 tokens,
             ));
+        }
+
+        if cancel_token.is_cancelled() {
+            break;
         }
 
         // Per-step progress tracking for recovery no-progress detection
@@ -181,6 +189,10 @@ pub async fn run_agent(
 
         debug!(step, tokens = current_tokens, "agent loop iteration");
 
+        if cancel_token.is_cancelled() {
+            break;
+        }
+
         let (content, tool_calls) = if let Some(ref cb) = callbacks {
             let n = messages.len();
             let bytes: usize = messages.iter().map(|m| m.content.len()).sum();
@@ -190,7 +202,16 @@ pub async fn run_agent(
                 total_bytes = bytes,
                 "stream_step start"
             );
-            let result = stream_step(runtime, &messages, cb.clone()).await?;
+            let result = {
+                let cancel = cancel_token.clone();
+                tokio::select! {
+                    result = stream_step(runtime, &messages, cb.clone(), &cancel_token) => result,
+                    _ = cancel.cancelled() => {
+                        Ok((String::new(), Vec::new()))
+                    }
+                }
+            };
+            let result = result?;
             debug!(
                 step,
                 content_len = result.0.len(),
@@ -199,7 +220,16 @@ pub async fn run_agent(
             );
             result
         } else {
-            sync_step(runtime, &messages).await?
+            let result = {
+                let cancel = cancel_token.clone();
+                tokio::select! {
+                    result = sync_step(runtime, &messages, &cancel_token) => result,
+                    _ = cancel.cancelled() => {
+                        Ok((String::new(), Vec::new()))
+                    }
+                }
+            };
+            result?
         };
 
         if tool_calls.is_empty() {
@@ -335,26 +365,33 @@ pub async fn run_agent(
             }
 
             let mut tool_timed_out = false;
-            let output = match tokio::time::timeout(
-                runtime.budget.tool_timeout,
-                runtime
-                    .registry
-                    .execute(&tc.function.name, &tc.function.arguments),
-            )
-            .await
-            {
-                Ok(output) => output,
-                Err(_elapsed) => {
-                    tracing::warn!(
-                        "Tool '{}' timed out after {:?}",
-                        tc.function.name,
-                        runtime.budget.tool_timeout
-                    );
-                    tool_timed_out = true;
-                    ToolOutput::error(format!(
-                        "tool '{}' timed out after {:?}",
-                        tc.function.name, runtime.budget.tool_timeout
-                    ))
+            let output = {
+                let cancel = cancel_token.clone();
+                tokio::select! {
+                    result = tokio::time::timeout(
+                        runtime.budget.tool_timeout,
+                        runtime.registry.execute(&tc.function.name, &tc.function.arguments),
+                    ) => {
+                        match result {
+                            Ok(output) => output,
+                            Err(_elapsed) => {
+                                tracing::warn!(
+                                    "Tool '{}' timed out after {:?}",
+                                    tc.function.name,
+                                    runtime.budget.tool_timeout
+                                );
+                                tool_timed_out = true;
+                                ToolOutput::error(format!(
+                                    "tool '{}' timed out after {:?}",
+                                    tc.function.name, runtime.budget.tool_timeout
+                                ))
+                            }
+                        }
+                    }
+                    _ = cancel.cancelled() => {
+                        tool_timed_out = true;
+                        ToolOutput::error("执行被用户中断")
+                    }
                 }
             };
             let tool_success = matches!(output.status, ToolStatus::Success);
@@ -732,6 +769,7 @@ pub async fn run_agent_with_context(
     context: ContextPack,
     callbacks: Option<Arc<AgentCallbacks>>,
     source: &str,
+    cancel_token: CancellationToken,
 ) -> anyhow::Result<LoopResult> {
     let context_desc = format!(
         "evidence={}, recent={}, input_len={}",
@@ -747,7 +785,7 @@ pub async fn run_agent_with_context(
             estimated_tokens: 0,
         },
     );
-    run_agent(runtime, messages, callbacks, source).await
+    run_agent(runtime, messages, callbacks, source, cancel_token).await
 }
 
 fn finish_loop_result(
@@ -1046,6 +1084,7 @@ mod tests {
             vec![Message::user("run checks")],
             None,
             "test",
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -1105,6 +1144,7 @@ mod tests {
             vec![Message::user("check chat coding proof path")],
             None,
             "offline-proof",
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -1305,6 +1345,7 @@ mod tests {
             vec![Message::user("do some work")],
             None,
             "test",
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -1353,6 +1394,7 @@ mod tests {
             vec![Message::user("run a slow tool")],
             None,
             "test",
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -1382,6 +1424,7 @@ mod tests {
             vec![Message::user("run auth tool")],
             None,
             "test",
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -1411,6 +1454,7 @@ mod tests {
             vec![Message::user("check status")],
             None,
             "test",
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -1462,6 +1506,7 @@ mod tests {
             vec![Message::user("do some work")],
             None,
             "test",
+            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -1482,6 +1527,7 @@ mod tests {
 async fn sync_step(
     runtime: &AgentRuntime,
     messages: &[Message],
+    _cancel_token: &CancellationToken,
 ) -> anyhow::Result<(String, Vec<ToolCall>)> {
     let response = tokio::time::timeout(
         runtime.budget.llm_timeout,
@@ -1508,6 +1554,7 @@ async fn stream_step(
     runtime: &AgentRuntime,
     messages: &[Message],
     cb: Arc<AgentCallbacks>,
+    _cancel_token: &CancellationToken,
 ) -> anyhow::Result<(String, Vec<ToolCall>)> {
     let content = Arc::new(std::sync::Mutex::new(String::new()));
     let tool_calls = Arc::new(std::sync::Mutex::new(Vec::<StreamToolCall>::new()));

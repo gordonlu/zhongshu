@@ -1,6 +1,7 @@
 use crate::agent::attention::AttentionLevel;
 use crate::agent::llm::{LlmProvider, Message};
 use crate::agent::loop_::{run_agent, AgentCallbacks};
+use tokio_util::sync::CancellationToken;
 use crate::agent::profile::AgentProfile;
 use crate::agent::report::Report;
 use crate::agent::runtime::AgentRuntime;
@@ -47,7 +48,7 @@ impl Worker {
             )),
         ];
 
-        let result = run_agent(&mut scoped_runtime, messages, callbacks, &task.source).await?;
+        let result = run_agent(&mut scoped_runtime, messages, callbacks, &task.source, CancellationToken::new()).await?;
 
         let last_content = result
             .messages

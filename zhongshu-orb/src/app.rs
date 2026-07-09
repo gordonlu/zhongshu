@@ -11,6 +11,7 @@ const AGENT_TIMEOUT: Duration = Duration::from_secs(300);
 use crate::agent::AgentMemory;
 use crate::config;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use zhongshu_core::agent::llm::LlmProvider;
 use zhongshu_core::agent::{
     run_agent_with_context, AgentBudget, AgentCallbacks, AgentProfile, AgentRuntime, ModelRouter,
@@ -535,6 +536,7 @@ impl AgentController {
                             }));
                         })
                     },
+                    run_id,
                 }
             };
 
@@ -545,6 +547,7 @@ impl AgentController {
                     context_pack,
                     Some(Arc::new(callbacks)),
                     &input,
+                    CancellationToken::new(),
                 ),
             )
             .await;

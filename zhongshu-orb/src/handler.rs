@@ -425,6 +425,12 @@ impl ZhongshuApp {
                 .update_status(&task_id, zhongshu_core::core::TaskStatus::Cancelled)
             {
                 tracing::warn!("cancel task failed: {e}");
+            } else if let Ok(Some(task)) = self.task_repo.get(&task_id) {
+                self.event_bus.publish(Event::Task(TaskEvent::Cancelled {
+                    task_id: task.id.clone(),
+                    title: task.title.clone(),
+                    reason: "UI 取消".into(),
+                }));
             }
             refresh = true;
         }
@@ -434,6 +440,12 @@ impl ZhongshuApp {
                 .update_status(&task_id, zhongshu_core::core::TaskStatus::Completed)
             {
                 tracing::warn!("complete task failed: {e}");
+            } else if let Ok(Some(task)) = self.task_repo.get(&task_id) {
+                self.event_bus.publish(Event::Task(TaskEvent::Completed {
+                    task_id: task.id.clone(),
+                    title: task.title.clone(),
+                    output: String::new(),
+                }));
             }
             refresh = true;
         }
@@ -552,10 +564,28 @@ impl ZhongshuApp {
                                     zhongshu_core::desktop::notification::show("任务触发", &title);
                             }
                         }
+                        Event::Task(TaskEvent::Claimed { task_id, .. }) => {
+                            if self.config.agent.desktop_notification {
+                                let _ =
+                                    zhongshu_core::desktop::notification::show("任务已开始执行", &task_id);
+                            }
+                        }
                         Event::Task(TaskEvent::Completed { title, .. }) => {
                             if self.config.agent.desktop_notification {
                                 let _ =
                                     zhongshu_core::desktop::notification::show("任务完成", &title);
+                            }
+                        }
+                        Event::Task(TaskEvent::Failed { title, error, .. }) => {
+                            if self.config.agent.desktop_notification {
+                                let _ =
+                                    zhongshu_core::desktop::notification::show("任务失败", &format!("{title}: {error}"));
+                            }
+                        }
+                        Event::Task(TaskEvent::Cancelled { title, reason, .. }) => {
+                            if self.config.agent.desktop_notification {
+                                let _ =
+                                    zhongshu_core::desktop::notification::show("任务已取消", &format!("{title}: {reason}"));
                             }
                         }
                         Event::Harness(event) => {

@@ -213,7 +213,7 @@ impl TaskStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
     pub goal_id: Option<String>,
@@ -222,9 +222,39 @@ pub struct Task {
     pub input: Option<String>,
     pub output: Option<String>,
     pub error: Option<String>,
+    pub claimed_by: Option<String>,
+    pub claimed_at: Option<i64>,
+    pub lease_until: Option<i64>,
+    pub retry_count: i32,
+    pub max_retries: i32,
+    pub summary: Option<String>,
     pub created_at: i64,
     pub started_at: Option<i64>,
     pub finished_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ClaimResult {
+    Claimed(Task),
+    AlreadyClaimed { worker_id: String },
+    NotFound,
+    NotClaimable { status: TaskStatus },
+    RetriesExhausted { retry_count: i32 },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum RetryOutcome {
+    NotFound,
+    PermanentlyFailed,
+    Scheduled,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ScheduleRetryResult {
+    NotFound,
+    NotRetriable { reason: String },
+    RetriesExhausted { retry_count: i32, max_retries: i32 },
+    Scheduled,
 }
 
 // ── Task Step ────────────────────────────────────────────────────────

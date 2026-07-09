@@ -276,7 +276,8 @@ fn main() {
     let scheduler = Scheduler::new(Database::new(core_db_path.clone())).with_event_bus(eb.clone());
 
     let goal_tool = GoalTool::new(GoalRepository::new(Database::new(core_db_path.clone())));
-    let task_tool = TaskTool::new(TaskRepository::new(Database::new(core_db_path.clone())));
+    let task_tool = TaskTool::new(TaskRepository::new(Database::new(core_db_path.clone())))
+        .with_event_bus(eb.clone());
     let llm_registry = std::sync::Arc::new(cfg.llm.to_registry());
     if let Ok(primary) = llm_registry.client_for_role("primary") {
         tracing::info!("LLM registry: primary={}", primary.model);
@@ -541,6 +542,12 @@ fn main() {
     let _event_logger = EventLogger::new(event_log_path).unwrap().spawn(&eb);
 
     let task_repo = TaskRepository::new(Database::new(core_db_path.clone()));
+    {
+        let recovered = task_repo.recover_stale_inflight(0).unwrap_or_default();
+        if !recovered.is_empty() {
+            tracing::info!("startup: recovered {} stale inflight tasks", recovered.len());
+        }
+    }
     let runbook_store = RunbookStore::new(Database::new(core_db_path.clone()));
     let mut app = match ZhongshuApp::new(
         cfg,

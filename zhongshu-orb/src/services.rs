@@ -11,9 +11,10 @@ use zhongshu_core::equipment::{
 
 use crate::app::AgentController;
 use zhongshu_core::core::{
-    ArtifactRepository, ArtifactType, Database, GoalRepository, GoalType, MemoryCandidateStore,
-    MemoryPolicy, ObservationStore, ObservationType, RunbookStore, Scheduler, StepStatus,
-    SuggestionEngine, SuggestionStatus, TaskPlanner, TaskRepository, TaskStatus, TaskStep,
+    ArtifactRepository, ArtifactType, ClaimResult, Database, GoalRepository, GoalType,
+    MemoryCandidateStore, MemoryPolicy, ObservationStore, ObservationType, RetryOutcome,
+    RunbookStore, Scheduler, StepStatus, SuggestionEngine, SuggestionStatus, TaskPlanner,
+    TaskRepository, TaskStatus, TaskStep,
 };
 use zhongshu_core::event::{Event, EventBus, GoalEvent, SuggestionEvent, TaskEvent};
 use zhongshu_core::task::Task as WorkerTask;
@@ -88,18 +89,27 @@ pub fn spawn_event_observation_feed(eb: Arc<EventBus>, observation_store: Observ
     tokio::spawn(async move {
         let mut rx = eb.subscribe();
         let obs = observation_store;
-        while let Ok(event) = rx.recv().await {
-            let (type_, content) = match &event {
-                Event::Agent(e) => (ObservationType::AgentAction, format!("{:?}", e)),
-                Event::Tool(e) => (ObservationType::ToolResult, format!("{:?}", e)),
-                _ => continue,
-            };
-            let obs = obs.clone();
-            tokio::task::spawn_blocking(move || {
-                if let Err(e) = obs.insert(type_, &content, Some("eventbus"), None) {
-                    tracing::debug!("observation insert: {e}");
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let (type_, content) = match &event {
+                        Event::Agent(e) => (ObservationType::AgentAction, format!("{:?}", e)),
+                        Event::Tool(e) => (ObservationType::ToolResult, format!("{:?}", e)),
+                        _ => continue,
+                    };
+                    let obs = obs.clone();
+                    tokio::task::spawn_blocking(move || {
+                        if let Err(e) = obs.insert(type_, &content, Some("eventbus"), None) {
+                            tracing::debug!("observation insert: {e}");
+                        }
+                    });
                 }
-            });
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("observation feed: lagged by {n} events");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
         }
     });
 }
@@ -110,38 +120,58 @@ pub fn spawn_event_workflow(eb: Arc<EventBus>, core_db_path: PathBuf) {
         let mut rx = eb.subscribe();
         let goal_repo = GoalRepository::new(Database::new(core_db_path.clone()));
         let task_repo = TaskRepository::new(Database::new(core_db_path));
-        while let Ok(event) = rx.recv().await {
-            match event {
-                Event::Suggestion(SuggestionEvent::Accepted { content, .. }) => {
-                    let repo = goal_repo.clone();
-                    let trepo = task_repo.clone();
-                    tokio::task::spawn_blocking(move || {
-                        if let Ok(goal) = repo.create(&content, None, GoalType::OneShot) {
-                            tracing::info!(
-                                "event: created goal '{}' from accepted suggestion",
-                                goal.title
-                            );
-                            if let Ok(ref t) = trepo.create(Some(&goal.id), &goal.title) {
-                                tracing::info!("event: created task '{}' from new goal", t.title);
+        loop {
+            match rx.recv().await {
+                Ok(event) => match event {
+                    Event::Suggestion(SuggestionEvent::Accepted { content, .. }) => {
+                        let repo = goal_repo.clone();
+                        let trepo = task_repo.clone();
+                        let bus = eb.clone();
+                        tokio::task::spawn_blocking(move || {
+                            if let Ok(goal) = repo.create(&content, None, GoalType::OneShot) {
+                                tracing::info!(
+                                    "event: created goal '{}' from accepted suggestion",
+                                    goal.title
+                                );
+                                if let Ok(ref t) = trepo.create(Some(&goal.id), &goal.title) {
+                                    tracing::info!(
+                                        "event: created task '{}' from new goal",
+                                        t.title
+                                    );
+                                    bus.publish(Event::Task(TaskEvent::Triggered {
+                                        task_id: t.id.clone(),
+                                        title: t.title.clone(),
+                                    }));
+                                }
                             }
-                        }
-                    });
+                        });
+                    }
+                    Event::Goal(GoalEvent::Created { goal_id, .. }) => {
+                        let trepo = task_repo.clone();
+                        let bus = eb.clone();
+                        tokio::task::spawn_blocking(move || {
+                            if let Ok(ref t) = trepo.create(Some(&goal_id), "执行目标") {
+                                tracing::info!("event: created task from goal {}", goal_id);
+                                bus.publish(Event::Task(TaskEvent::Triggered {
+                                    task_id: t.id.clone(),
+                                    title: t.title.clone(),
+                                }));
+                            }
+                        });
+                    }
+                    _ => {}
+                },
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("event workflow: lagged by {n} events");
+                    continue;
                 }
-                Event::Goal(GoalEvent::Created { goal_id, .. }) => {
-                    let trepo = task_repo.clone();
-                    tokio::task::spawn_blocking(move || {
-                        if trepo.create(Some(&goal_id), "执行目标").is_ok() {
-                            tracing::info!("event: created task from goal {}", goal_id);
-                        }
-                    });
-                }
-                _ => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     });
 }
 
-/// Listen for Task::Triggered → plan steps → run LLM per step → save output + artifact + memory.
+/// Listen for Task::Triggered → claim → plan → execute steps → finalize.
 pub fn spawn_task_executor(
     eb: Arc<EventBus>,
     core_db_path: PathBuf,
@@ -150,53 +180,138 @@ pub fn spawn_task_executor(
 ) {
     tokio::spawn(async move {
         let mut rx = eb.subscribe();
+        let db_path = core_db_path.clone();
         let task_repo = TaskRepository::new(Database::new(core_db_path.clone()));
         let planner = TaskPlanner::new(Database::new(core_db_path.clone()));
         let artifact_repo = ArtifactRepository::new(Database::new(core_db_path.clone()));
-        let db_path = core_db_path.clone();
         let memory_candidates = MemoryCandidateStore::new(Database::new(core_db_path));
-        while let Ok(event) = rx.recv().await {
+        loop {
+            let worker_id = format!("executor-{}", std::process::id());
+            let event = match rx.recv().await {
+                Ok(e) => e,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("executor: lagged by {n} events");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            };
             let (task_id, title) = match &event {
                 Event::Task(TaskEvent::Triggered { task_id, title }) => {
                     (task_id.clone(), title.clone())
                 }
                 _ => continue,
             };
-            let plnr = planner.clone();
 
-            // 1. Plan the task (async LLM call)
+            // Pre-check DB to skip terminal tasks
+            if let Ok(Some(t)) = task_repo.get(&task_id) {
+                if matches!(t.status, TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled) {
+                    continue;
+                }
+                if matches!(t.status, TaskStatus::Running | TaskStatus::Planning) {
+                    continue;
+                }
+            }
+
+            // Atomic claim
+            let claim = tokio::task::spawn_blocking({
+                let trepo = task_repo.clone();
+                let tid = task_id.clone();
+                let wid = worker_id.clone();
+                move || trepo.claim_task(&tid, &wid, 300)
+            })
+            .await;
+            let claim = match claim {
+                Ok(Ok(c)) => c,
+                _ => continue,
+            };
+            match claim {
+                ClaimResult::Claimed(_) => {
+                    eb.publish(Event::Task(TaskEvent::Claimed {
+                        task_id: task_id.clone(),
+                        worker_id: worker_id.clone(),
+                    }));
+                }
+                ClaimResult::AlreadyClaimed { worker_id: wid } => {
+                    tracing::debug!("executor: task {task_id} already claimed by {wid}");
+                    continue;
+                }
+                ClaimResult::NotClaimable { status } => {
+                    tracing::debug!("executor: task {task_id} not claimable (status={:?})", status);
+                    continue;
+                }
+                ClaimResult::RetriesExhausted { retry_count } => {
+                    tracing::warn!("executor: task {task_id} retries exhausted ({retry_count})");
+                    eb.publish(Event::Task(TaskEvent::RetriesExhausted {
+                        task_id: task_id.clone(),
+                        retry_count,
+                    }));
+                    continue;
+                }
+                ClaimResult::NotFound => continue,
+            }
+
+            // Spawn lease renewal loop
+            let lease_trepo = task_repo.clone();
+            let lease_tid = task_id.clone();
+            let lease_wid = worker_id.clone();
+            let lease_handle = tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(120)).await;
+                    if lease_trepo.renew_lease(&lease_tid, &lease_wid, 300).unwrap_or(false) {
+                        tracing::trace!("executor: renewed lease for task {lease_tid}");
+                    } else {
+                        break;
+                    }
+                }
+            });
+
+            // Plan the task
             let provider = { worker_runtime.read().await.provider.clone() };
-            let plan_steps = match plnr.plan(&task_id, &*provider).await {
+            let plan_steps = match planner.plan(&task_id, &*provider).await {
                 Ok(steps) if !steps.is_empty() => steps,
-                Ok(_) => continue,
+                Ok(_) => {
+                    // Empty plan is a failure
+                    let err = "executor: planner returned no steps";
+                    let _ = tokio::task::spawn_blocking({
+                        let trepo = task_repo.clone();
+                        let tid = task_id.clone();
+                        move || trepo.mark_failed(&tid, "", err)
+                    })
+                    .await;
+                    eb.publish(Event::Task(TaskEvent::Failed {
+                        task_id: task_id.clone(),
+                        title: title.clone(),
+                        error: err.into(),
+                    }));
+                    lease_handle.abort();
+                    continue;
+                }
                 Err(e) => {
                     tracing::warn!("executor: plan failed: {e}");
+                    let fail_err = format!("plan failed: {e}");
+                    let _ = tokio::task::spawn_blocking({
+                        let trepo = task_repo.clone();
+                        let tid = task_id.clone();
+                        let err = fail_err.clone();
+                        move || trepo.mark_failed(&tid, "", &err)
+                    })
+                    .await;
+                    eb.publish(Event::Task(TaskEvent::Failed {
+                        task_id: task_id.clone(),
+                        title: title.clone(),
+                        error: fail_err,
+                    }));
+                    lease_handle.abort();
                     continue;
                 }
             };
 
-            // 2. Execute steps one by one
-            let trepo = task_repo.clone();
-            let r#in = tokio::task::spawn_blocking({
-                let trepo = trepo.clone();
-                let tid = task_id.clone();
-                move || trepo.update_status(&tid, TaskStatus::Running)
-            })
-            .await;
-            if let Err(e) = r#in {
-                tracing::warn!("executor: update_status Running failed: {e}");
-                continue;
-            }
-            if let Ok(Err(e)) = r#in {
-                tracing::warn!("executor: set Running failed: {e}");
-                continue;
-            }
-
+            // Execute steps one by one
             let mut all_output = String::new();
-            let mut failed = false;
+            let mut step_failed = false;
+            let mut step_error = String::new();
 
             for step in &plan_steps {
-                // Mark step running and store input
                 let prompt = if all_output.is_empty() {
                     format!("任务：{title}\n当前步骤：{}\n请执行此步骤。", step.action)
                 } else {
@@ -205,8 +320,9 @@ pub fn spawn_task_executor(
                         all_output, step.action,
                     )
                 };
+
                 let _ = tokio::task::spawn_blocking({
-                    let trepo = trepo.clone();
+                    let trepo = task_repo.clone();
                     let sid = step.id.clone();
                     let p = prompt.clone();
                     move || {
@@ -218,6 +334,16 @@ pub fn spawn_task_executor(
 
                 let worker_task = task_step_to_worker_task(&task_id, &title, step, &prompt);
                 let runtime_snapshot = { worker_runtime.read().await.clone() };
+
+                // Post-plan cancel check
+                if let Ok(Some(t)) = task_repo.get(&task_id) {
+                    if t.status == TaskStatus::Cancelled {
+                        step_failed = true;
+                        step_error = "task was cancelled".into();
+                        break;
+                    }
+                }
+
                 let step_output = match Worker::execute(
                     &runtime_snapshot,
                     &worker_profile,
@@ -227,7 +353,6 @@ pub fn spawn_task_executor(
                 .await
                 {
                     Ok(report) => {
-                        // Extract tool summary and verification from trace events
                         let tool_names: Vec<String> = report
                             .trace_events
                             .iter()
@@ -274,9 +399,8 @@ pub fn spawn_task_executor(
                             report.findings
                         };
 
-                        // Persist step output, tool summary, and verification
                         let _ = tokio::task::spawn_blocking({
-                            let trepo = trepo.clone();
+                            let trepo = task_repo.clone();
                             let sid = step.id.clone();
                             let out = step_output.clone();
                             let ts = tool_summary.clone();
@@ -298,17 +422,17 @@ pub fn spawn_task_executor(
                     }
                     Err(e) => {
                         tracing::warn!("executor: step '{}' worker failed: {e}", step.action);
-                        let err_msg = format!("Worker execution error: {e}");
+                        step_error = format!("Worker execution error: {e}");
                         let _ = tokio::task::spawn_blocking({
-                            let trepo = trepo.clone();
+                            let trepo = task_repo.clone();
                             let sid = step.id.clone();
-                            let em = err_msg.clone();
+                            let em = step_error.clone();
                             move || {
                                 let _ = trepo.set_step_error(&sid, &em);
                             }
                         })
                         .await;
-                        failed = true;
+                        step_failed = true;
                         break;
                     }
                 };
@@ -319,6 +443,18 @@ pub fn spawn_task_executor(
                 all_output.push_str(&format!("步骤 {}: {}", step.step_order + 1, step_output));
             }
 
+            // Finalize: check DB status for late-arriving cancel
+            let final_status = tokio::task::spawn_blocking({
+                let trepo = task_repo.clone();
+                let tid = task_id.clone();
+                move || trepo.get(&tid)
+            })
+            .await;
+            let was_cancelled = match final_status {
+                Ok(Ok(Some(t))) => t.status == TaskStatus::Cancelled,
+                _ => false,
+            };
+
             let trepo = task_repo.clone();
             let arepo = artifact_repo.clone();
             let mc = memory_candidates.clone();
@@ -327,22 +463,56 @@ pub fn spawn_task_executor(
             let ttl = title.clone();
             let out = all_output.clone();
 
-            if failed {
-                let _dbp = db_path.clone();
-                tokio::task::spawn_blocking(move || {
-                    let _ = trepo.set_output(&tid, &out, Some("execution failed"));
-                    let _ = trepo.update_status(&tid, TaskStatus::Failed);
-                    let _ = _dbp;
-                    tracing::warn!("executor: task '{}' failed", ttl);
-                });
+            if was_cancelled {
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _ = trepo.set_summary(&tid, &format!("cancelled: {ttl}"));
+                    ebus.publish(Event::Task(TaskEvent::Cancelled {
+                        task_id: tid.clone(),
+                        title: ttl.clone(),
+                        reason: "cancelled during execution".into(),
+                    }));
+                })
+                .await;
+            } else if step_failed {
+                let _ = tokio::task::spawn_blocking(move || {
+                    let err = &step_error;
+                    match trepo.record_failure(&tid, &worker_id, err) {
+                        Ok(RetryOutcome::Scheduled) => {
+                            tracing::info!("executor: task '{}' failed, retry scheduled", ttl);
+                            trepo.set_summary(&tid, &format!("failed, retry scheduled: {ttl}")).ok();
+                            ebus.publish(Event::Task(TaskEvent::RetryScheduled {
+                                task_id: tid.clone(),
+                                retry_count: 0,
+                                max_retries: 3,
+                            }));
+                            // Re-trigger for immediate retry
+                            ebus.publish(Event::Task(TaskEvent::Triggered {
+                                task_id: tid.clone(),
+                                title: ttl.clone(),
+                            }));
+                        }
+                        Ok(RetryOutcome::PermanentlyFailed) => {
+                            tracing::warn!("executor: task '{}' permanently failed", ttl);
+                            trepo.set_summary(&tid, &format!("failed: {ttl}")).ok();
+                            ebus.publish(Event::Task(TaskEvent::Failed {
+                                task_id: tid.clone(),
+                                title: ttl.clone(),
+                                error: err.clone(),
+                            }));
+                        }
+                        Ok(RetryOutcome::NotFound) => {}
+                        Err(e) => tracing::warn!("executor: record_failure failed: {e}"),
+                    }
+                })
+                .await;
             } else {
                 let steps_for_runbook = plan_steps.clone();
-                let _dbp = db_path.clone();
+                let db = db_path.clone();
                 tokio::task::spawn_blocking(move || {
-                    let _ = trepo.set_output(&tid, &out, None);
-                    let _ = trepo.update_status(&tid, TaskStatus::Completed);
+                    let _ = trepo.mark_completed(&tid, &out);
+                    trepo.set_summary(&tid, &format!("completed: {ttl}")).ok();
                     // Save runbook
-                    let rstore = RunbookStore::new(Database::new(_dbp));
+                    let rstore = RunbookStore::new(Database::new(db));
                     let _ = rstore.save(&zhongshu_core::core::Runbook {
                         id: format!("rb-{tid}"),
                         goal: ttl.clone(),
@@ -352,10 +522,8 @@ pub fn spawn_task_executor(
                             .map(|d| d.as_secs().to_string())
                             .unwrap_or_default(),
                         total_steps: steps_for_runbook.len(),
-                        passed: steps_for_runbook
-                            .len()
-                            .saturating_sub(if failed { 0 } else { 0 }),
-                        failed: if failed { 1 } else { 0 },
+                        passed: steps_for_runbook.len(),
+                        failed: 0,
                         steps: steps_for_runbook
                             .iter()
                             .enumerate()
@@ -363,7 +531,7 @@ pub fn spawn_task_executor(
                                 action: format!("step_{}", i + 1),
                                 tool: "task".into(),
                                 input: s.action.clone(),
-                                output_status: if failed { "failed" } else { "completed" }.into(),
+                                output_status: "completed".into(),
                                 output_preview: out.chars().take(200).collect(),
                                 verification: "".into(),
                             })
@@ -391,6 +559,7 @@ pub fn spawn_task_executor(
                     tracing::info!("executor: completed task '{}'", ttl);
                 });
             }
+            lease_handle.abort();
         }
     });
 }
@@ -604,6 +773,21 @@ pub fn spawn_compensation(eb: Arc<EventBus>, core_db_path: PathBuf) {
                         }));
                     }
                 }
+
+                // 3. Recover stale in-flight tasks (mid-executor crash).
+                if let Ok(recovered) = task_repo.recover_stale_inflight(600) {
+                    for task in &recovered {
+                        tracing::warn!(
+                            "compensation: recovered stale task '{}' as failed",
+                            task.title
+                        );
+                        bus.publish(Event::Task(TaskEvent::Failed {
+                            task_id: task.id.clone(),
+                            title: task.title.clone(),
+                            error: task.error.clone().unwrap_or_default(),
+                        }));
+                    }
+                }
             });
         }
     });
@@ -722,7 +906,15 @@ pub fn spawn_runbook_to_skill(
 ) {
     tokio::spawn(async move {
         let mut rx = eb.subscribe();
-        while let Ok(event) = rx.recv().await {
+        loop {
+            let event = match rx.recv().await {
+                Ok(e) => e,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("runbook2skill: lagged by {n} events");
+                    continue;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            };
             let task_id = match &event {
                 Event::Task(TaskEvent::Completed { task_id, .. }) => task_id.clone(),
                 _ => continue,

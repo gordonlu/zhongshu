@@ -34,6 +34,18 @@ impl Database {
             let _ = conn.execute_batch(sql);
         }
 
+        // Phase 5 migration: claim/lease/retry/summary columns
+        for sql in &[
+            "ALTER TABLE tasks ADD COLUMN claimed_by TEXT",
+            "ALTER TABLE tasks ADD COLUMN claimed_at INTEGER",
+            "ALTER TABLE tasks ADD COLUMN lease_until INTEGER",
+            "ALTER TABLE tasks ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE tasks ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 3",
+            "ALTER TABLE tasks ADD COLUMN summary TEXT",
+        ] {
+            let _ = conn.execute_batch(sql);
+        }
+
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS observations (
@@ -76,6 +88,12 @@ impl Database {
                 input           TEXT,
                 output          TEXT,
                 error           TEXT,
+                claimed_by      TEXT,
+                claimed_at      INTEGER,
+                lease_until     INTEGER,
+                retry_count     INTEGER NOT NULL DEFAULT 0,
+                max_retries     INTEGER NOT NULL DEFAULT 3,
+                summary         TEXT,
                 created_at      INTEGER NOT NULL,
                 started_at      INTEGER,
                 finished_at     INTEGER

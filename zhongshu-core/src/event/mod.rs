@@ -89,7 +89,13 @@ impl Event {
             },
             Event::Task(e) => match e {
                 TaskEvent::Triggered { .. } => "task_triggered",
+                TaskEvent::Claimed { .. } => "task_claimed",
+                TaskEvent::ClaimFailed { .. } => "task_claim_failed",
                 TaskEvent::Completed { .. } => "task_completed",
+                TaskEvent::Failed { .. } => "task_failed",
+                TaskEvent::Cancelled { .. } => "task_cancelled",
+                TaskEvent::RetryScheduled { .. } => "task_retry_scheduled",
+                TaskEvent::RetriesExhausted { .. } => "task_retries_exhausted",
             },
             Event::Memory(..) => "memory",
             Event::Goal(e) => match e {
@@ -118,6 +124,18 @@ impl Event {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum MemoryEvent {
     Compacted,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum TaskEvent {
+    Triggered { task_id: String, title: String },
+    Claimed { task_id: String, worker_id: String },
+    ClaimFailed { task_id: String, reason: String },
+    Completed { task_id: String, title: String, output: String },
+    Failed { task_id: String, title: String, error: String },
+    Cancelled { task_id: String, title: String, reason: String },
+    RetryScheduled { task_id: String, retry_count: i32, max_retries: i32 },
+    RetriesExhausted { task_id: String, retry_count: i32 },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -266,19 +284,6 @@ pub enum HarnessUiEvent {
     PhaseTransition {
         from: String,
         to: String,
-    },
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum TaskEvent {
-    Triggered {
-        task_id: String,
-        title: String,
-    },
-    Completed {
-        task_id: String,
-        title: String,
-        output: String,
     },
 }
 

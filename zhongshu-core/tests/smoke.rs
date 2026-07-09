@@ -8,21 +8,24 @@
 // Steps through the pipeline manually for deterministic verification.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
 use zhongshu_core::agent::attention::AttentionLevel;
 use zhongshu_core::agent::llm::{
     ChatCompletionRequest, ChatCompletionResponse, FinalChoice, LlmProvider, Message, Role,
     StreamEvent,
 };
+use zhongshu_core::agent::run::{InterruptionAction, RunController};
 use zhongshu_core::agent::{
-    AgentBudget, AgentProfile, AgentRuntime, AttentionManager, Report, Worker,
+    run_agent, AgentBudget, AgentProfile, AgentRuntime, AttentionManager, Report, Worker,
 };
 use zhongshu_core::event::{Event, EventBus, SourceEvent};
 use zhongshu_core::rule::{Rule, RuleCondition, RuleEngine, RuleTask};
 use zhongshu_core::source::Source;
 use zhongshu_core::task::TaskQueue;
-use zhongshu_core::tool::ToolRegistry;
+use zhongshu_core::tool::{Tool, ToolOutput, ToolRegistry};
 
 // ── Mock LLM provider ─────────────────────────────────────────────────
 
@@ -451,4 +454,132 @@ fn smoke_budget_default_is_assistant() {
     let b = AgentBudget::default();
     assert_eq!(b.max_steps, 80);
     assert_eq!(b.llm_timeout.as_secs(), 240);
+}
+
+// ── Interruption smoke test ────────────────────────────────────────────
+//
+// Tests that CancellationToken stops the agent loop mid-flight.
+
+#[derive(Clone)]
+struct YieldProvider;
+
+#[async_trait]
+impl LlmProvider for YieldProvider {
+    async fn chat(
+        &self,
+        _request: ChatCompletionRequest,
+    ) -> anyhow::Result<ChatCompletionResponse> {
+        tokio::task::yield_now().await;
+        Ok(ChatCompletionResponse {
+            choices: vec![FinalChoice {
+                message: Message::assistant("done"),
+                finish_reason: Some("stop".into()),
+            }],
+            usage: None,
+        })
+    }
+    async fn stream_chat(
+        &self,
+        _request: ChatCompletionRequest,
+        _on_event: Box<dyn FnMut(StreamEvent) + Send>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn change_model(&self, _model: &str) -> Arc<dyn LlmProvider> {
+        Arc::new(self.clone())
+    }
+    fn model_name(&self) -> &str {
+        "yield"
+    }
+}
+
+struct SleepTool;
+
+#[async_trait]
+impl Tool for SleepTool {
+    fn name(&self) -> &str {
+        "sleep"
+    }
+    fn description(&self) -> &str {
+        "sleeps for testing"
+    }
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object","properties":{}})
+    }
+    async fn execute(&self, _arguments: &serde_json::Value) -> ToolOutput {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        ToolOutput::success(serde_json::json!({"slept": true}))
+    }
+}
+
+#[tokio::test]
+async fn smoke_token_cancellation_stops_agent_loop() {
+    let mut runtime = AgentRuntime::new(
+        YieldProvider,
+        ToolRegistry::new().register(SleepTool),
+        "yield",
+        AgentBudget {
+            max_steps: 10,
+            max_tool_calls: 10,
+            per_tool_limit: 10,
+            token_limit: 10_000,
+            llm_timeout: Duration::from_secs(5),
+            tool_timeout: Duration::from_secs(5),
+        },
+    );
+
+    let cancel_token = CancellationToken::new();
+    // Cancel immediately so the agent loop sees it on first iteration
+    cancel_token.cancel();
+
+    let result = run_agent(
+        &mut runtime,
+        vec![Message::user("请一直运行")],
+        None,
+        "cancel-test",
+        cancel_token,
+    )
+    .await;
+
+    let result = result.expect("run_agent should return Ok even if cancelled");
+    // The loop exits early via `break` on cancel check, falling through
+    // to the "max steps reached" path.
+    assert!(
+        matches!(result.stop_reason, zhongshu_core::agent::StopReason::MaxStepsReached),
+        "cancelled token should stop the agent loop early, got {:?}",
+        result.stop_reason
+    );
+}
+
+// ── RunController interrupt sync test ──────────────────────────────────
+// RunController uses tokio::sync::RwLock internally, so its methods
+// must be called outside a tokio runtime context.
+
+#[test]
+fn smoke_run_controller_interrupt_captures_context() {
+    let eb = Arc::new(EventBus::new(16));
+    let (response_tx, _response_rx) = tokio::sync::mpsc::channel(64);
+
+    let controller = RunController::new(eb, response_tx);
+
+    controller.start_run("测试插话打断");
+    assert!(controller.run_id().is_some(), "run_id should be set after start_run");
+
+    let action = controller.interrupt("停下");
+
+    assert!(
+        matches!(action, InterruptionAction::CancelAndReplan { .. }),
+        "interrupt('停下') should produce CancelAndReplan, got {action:?}"
+    );
+    assert!(controller.is_interrupted(), "controller should report interrupted");
+    assert!(
+        controller.interruption_ctx().is_some(),
+        "interruption context should be captured"
+    );
+    if let Some(ctx) = controller.interruption_ctx() {
+        assert!(
+            ctx.user_message.contains("停下"),
+            "context should contain the interjection message"
+        );
+    }
 }

@@ -91,6 +91,10 @@ impl RunController {
         }
     }
 
+    pub fn interruption_ctx(&self) -> Option<InterruptionCtx> {
+        self.interruption_ctx.blocking_lock().clone()
+    }
+
     pub fn take_last_action(&self) -> Option<InterruptionAction> {
         self.last_action.lock().unwrap().take()
     }

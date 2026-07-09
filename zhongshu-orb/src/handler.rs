@@ -7,6 +7,7 @@ use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::window::WindowId;
 
+use zhongshu_core::agent::run::RunController;
 use zhongshu_core::agent::{AgentRuntime, ModelRouter};
 use zhongshu_core::authority;
 use zhongshu_core::event::{
@@ -76,6 +77,7 @@ pub struct ZhongshuApp {
     pub worker_base_tools: ToolRegistry,
     pub overlay_zoomed: bool,
     pub auth_watch: watch::Receiver<Option<zhongshu_core::authority::PendingRequest>>,
+    pub run_controller: Arc<RunController>,
     pub active_run_id: Uuid,
 }
 
@@ -96,6 +98,7 @@ impl ZhongshuApp {
         equipment: Arc<Mutex<EquipmentRegistry>>,
         worker_runtime: Arc<tokio::sync::RwLock<AgentRuntime>>,
         worker_base_tools: ToolRegistry,
+        run_controller: Arc<RunController>,
     ) -> anyhow::Result<Self> {
         let hotkey = HotkeyManager::new(&config.hotkey).unwrap_or_else(|e| {
             tracing::warn!("Global hotkey unavailable: {e:#}");
@@ -134,6 +137,7 @@ impl ZhongshuApp {
             worker_base_tools,
             overlay_zoomed: false,
             auth_watch,
+            run_controller,
             active_run_id: Uuid::new_v4(),
         })
     }
@@ -353,8 +357,15 @@ impl ZhongshuApp {
             self.delete_all_history();
         }
         if ov.take_stop() {
-            ov.send(&serde_json::json!({"type": "stop"}));
-            self.controller.cancel();
+            use zhongshu_core::agent::run::RunState;
+            if matches!(self.run_controller.state(), RunState::Interrupted { .. }) {
+                // Already interrupted — fully cancel
+                self.controller.cancel();
+            } else {
+                // Interrupt current run
+                self.run_controller.interrupt("stop");
+                ov.send(&serde_json::json!({"type": "stop"}));
+            }
         }
         if ov.take_toggle_zoom() {
             self.overlay_zoomed = !self.overlay_zoomed;

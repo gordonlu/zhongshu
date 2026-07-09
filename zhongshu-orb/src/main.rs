@@ -352,6 +352,7 @@ fn main() {
         core_db_path.clone(),
     ));
     controller.set_auto_evolve(cfg.agent.auto_evolve);
+    let run_controller = controller.run_controller.clone();
     let inbox = Arc::new(AgentInbox::new(controller.clone()));
     inbox.start();
     services::spawn_auto_evolution(observer.clone(), controller.clone(), equipment.clone());
@@ -566,6 +567,7 @@ fn main() {
         equipment.clone(),
         worker_runtime.clone(),
         base_worker_registry,
+        run_controller,
     ) {
         Ok(app) => app,
         Err(e) => {

@@ -314,6 +314,14 @@ impl RunController {
         Some(prompt)
     }
 
+    pub fn begin_resume(&self) -> Uuid {
+        let run_id = Uuid::new_v4();
+        *self.run_id.blocking_write() = Some(run_id);
+        *self.cancel_token.blocking_write() = CancellationToken::new();
+        self.interrupted.store(false, Ordering::SeqCst);
+        run_id
+    }
+
     pub async fn finish_run(&self, stop_reason: &str) {
         *self.state.blocking_write() = RunState::Finished {
             stop_reason: stop_reason.into(),

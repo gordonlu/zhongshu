@@ -38,7 +38,15 @@ impl TaskRepository {
         conn.execute(
             "INSERT INTO tasks (id, goal_id, title, status, retry_count, max_retries, created_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![task.id, task.goal_id, task.title, task.status.as_str(), task.retry_count, task.max_retries, task.created_at],
+            params![
+                task.id,
+                task.goal_id,
+                task.title,
+                task.status.as_str(),
+                task.retry_count,
+                task.max_retries,
+                task.created_at
+            ],
         )?;
         Ok(task)
     }
@@ -71,13 +79,26 @@ impl TaskRepository {
         conn.execute(
             "INSERT INTO tasks (id, goal_id, title, status, retry_count, max_retries, created_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![task.id, task.goal_id, task.title, task.status.as_str(), task.retry_count, task.max_retries, task.created_at],
+            params![
+                task.id,
+                task.goal_id,
+                task.title,
+                task.status.as_str(),
+                task.retry_count,
+                task.max_retries,
+                task.created_at
+            ],
         )?;
         Ok(task)
     }
 
     /// Atomically claim a task by ID. Only succeeds for non-terminal tasks.
-    pub fn claim_task(&self, id: &str, worker_id: &str, lease_secs: i64) -> rusqlite::Result<ClaimResult> {
+    pub fn claim_task(
+        &self,
+        id: &str,
+        worker_id: &str,
+        lease_secs: i64,
+    ) -> rusqlite::Result<ClaimResult> {
         let conn = self.db.conn()?;
         let now_ts = now();
         let lease_end = now_ts + lease_secs;
@@ -88,11 +109,18 @@ impl TaskRepository {
             Some(t) => t,
             None => return Ok(ClaimResult::NotFound),
         };
-        if matches!(task.status, TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled) {
-            return Ok(ClaimResult::NotClaimable { status: task.status });
+        if matches!(
+            task.status,
+            TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+        ) {
+            return Ok(ClaimResult::NotClaimable {
+                status: task.status,
+            });
         }
         if task.retry_count >= task.max_retries && task.max_retries > 0 {
-            return Ok(ClaimResult::RetriesExhausted { retry_count: task.retry_count });
+            return Ok(ClaimResult::RetriesExhausted {
+                retry_count: task.retry_count,
+            });
         }
         if let Some(ref w) = task.claimed_by {
             if w == worker_id {
@@ -110,25 +138,47 @@ impl TaskRepository {
              lease_until = ?4, retry_count = retry_count + 1 \
              WHERE id = ?5 AND status NOT IN ('completed', 'failed', 'cancelled') \
              AND (claimed_by IS NULL OR lease_until < ?6)",
-            params![TaskStatus::Running.as_str(), worker_id, now_ts, lease_end, id, now_ts],
+            params![
+                TaskStatus::Running.as_str(),
+                worker_id,
+                now_ts,
+                lease_end,
+                id,
+                now_ts
+            ],
         )?;
         if n == 0 {
             // Re-read to give precise reason
             let t = self.get(id)?;
             return match t {
-                Some(t) if matches!(t.status, TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled) =>
-                    Ok(ClaimResult::NotClaimable { status: t.status }),
-                Some(t) if t.retry_count >= t.max_retries =>
-                    Ok(ClaimResult::RetriesExhausted { retry_count: t.retry_count }),
-                Some(t) if t.claimed_by.is_some() && t.claimed_by.as_deref() != Some(worker_id) =>
-                    Ok(ClaimResult::AlreadyClaimed { worker_id: t.claimed_by.unwrap_or_default() }),
+                Some(t)
+                    if matches!(
+                        t.status,
+                        TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+                    ) =>
+                {
+                    Ok(ClaimResult::NotClaimable { status: t.status })
+                }
+                Some(t) if t.retry_count >= t.max_retries => Ok(ClaimResult::RetriesExhausted {
+                    retry_count: t.retry_count,
+                }),
+                Some(t) if t.claimed_by.is_some() && t.claimed_by.as_deref() != Some(worker_id) => {
+                    Ok(ClaimResult::AlreadyClaimed {
+                        worker_id: t.claimed_by.unwrap_or_default(),
+                    })
+                }
                 _ => Ok(ClaimResult::NotFound),
             };
         }
         self.get(id).map(|t| ClaimResult::Claimed(t.unwrap()))
     }
 
-    pub fn renew_lease(&self, id: &str, worker_id: &str, lease_secs: i64) -> rusqlite::Result<bool> {
+    pub fn renew_lease(
+        &self,
+        id: &str,
+        worker_id: &str,
+        lease_secs: i64,
+    ) -> rusqlite::Result<bool> {
         let conn = self.db.conn()?;
         let lease_end = now() + lease_secs;
         let n = conn.execute(
@@ -198,7 +248,12 @@ impl TaskRepository {
 
     /// Record a failure with retry logic. If retries remain, requeues to Pending.
     /// If exhausted, marks Failed permanently.
-    pub fn record_failure(&self, id: &str, _worker_id: &str, error: &str) -> rusqlite::Result<RetryOutcome> {
+    pub fn record_failure(
+        &self,
+        id: &str,
+        _worker_id: &str,
+        error: &str,
+    ) -> rusqlite::Result<RetryOutcome> {
         let task = match self.get(id)? {
             Some(t) => t,
             None => return Ok(RetryOutcome::NotFound),
@@ -218,7 +273,13 @@ impl TaskRepository {
                  claimed_by = NULL, claimed_at = NULL, lease_until = NULL, \
                  retry_count = ?4 \
                  WHERE id = ?5",
-                params![TaskStatus::Failed.as_str(), error, now_ts, new_retry_count, id],
+                params![
+                    TaskStatus::Failed.as_str(),
+                    error,
+                    now_ts,
+                    new_retry_count,
+                    id
+                ],
             )?;
             Ok(RetryOutcome::PermanentlyFailed)
         } else {
@@ -248,7 +309,9 @@ impl TaskRepository {
             None => return Ok(ScheduleRetryResult::NotFound),
         };
         if task.status == TaskStatus::Cancelled {
-            return Ok(ScheduleRetryResult::NotRetriable { reason: "task was cancelled".into() });
+            return Ok(ScheduleRetryResult::NotRetriable {
+                reason: "task was cancelled".into(),
+            });
         }
         if task.retry_count >= task.max_retries {
             return Ok(ScheduleRetryResult::RetriesExhausted {
@@ -307,7 +370,10 @@ impl TaskRepository {
             if self.mark_failed(
                 &task.id,
                 "",
-                &format!("task interrupted: stale while in '{}' state", task.status.as_str()),
+                &format!(
+                    "task interrupted: stale while in '{}' state",
+                    task.status.as_str()
+                ),
             )? {
                 recovered.push(task.clone());
             }

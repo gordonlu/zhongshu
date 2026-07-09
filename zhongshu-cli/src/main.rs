@@ -138,7 +138,14 @@ async fn main() -> anyhow::Result<()> {
             run_id: Uuid::new_v4(),
         };
 
-        let result = run_agent(&mut runtime, messages, Some(Arc::new(callbacks)), "", CancellationToken::new()).await;
+        let result = run_agent(
+            &mut runtime,
+            messages,
+            Some(Arc::new(callbacks)),
+            "",
+            CancellationToken::new(),
+        )
+        .await;
 
         match result {
             Ok(r) => {

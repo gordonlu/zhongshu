@@ -511,8 +511,7 @@ mod tests {
         let rendered = output.render_observation("webfetch");
         let msg = format!(
             "{} tool_result\nagent: call_123\n\n{}",
-            "<|tool_result|>",
-            rendered
+            "<|tool_result|>", rendered
         );
 
         assert!(msg.contains("source=\"external\""));

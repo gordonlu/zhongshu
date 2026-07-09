@@ -204,7 +204,10 @@ pub fn spawn_task_executor(
 
             // Pre-check DB to skip terminal tasks
             if let Ok(Some(t)) = task_repo.get(&task_id) {
-                if matches!(t.status, TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled) {
+                if matches!(
+                    t.status,
+                    TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+                ) {
                     continue;
                 }
                 if matches!(t.status, TaskStatus::Running | TaskStatus::Planning) {
@@ -236,7 +239,10 @@ pub fn spawn_task_executor(
                     continue;
                 }
                 ClaimResult::NotClaimable { status } => {
-                    tracing::debug!("executor: task {task_id} not claimable (status={:?})", status);
+                    tracing::debug!(
+                        "executor: task {task_id} not claimable (status={:?})",
+                        status
+                    );
                     continue;
                 }
                 ClaimResult::RetriesExhausted { retry_count } => {
@@ -257,7 +263,10 @@ pub fn spawn_task_executor(
             let lease_handle = tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(Duration::from_secs(120)).await;
-                    if lease_trepo.renew_lease(&lease_tid, &lease_wid, 300).unwrap_or(false) {
+                    if lease_trepo
+                        .renew_lease(&lease_tid, &lease_wid, 300)
+                        .unwrap_or(false)
+                    {
                         tracing::trace!("executor: renewed lease for task {lease_tid}");
                     } else {
                         break;
@@ -479,7 +488,9 @@ pub fn spawn_task_executor(
                     match trepo.record_failure(&tid, &worker_id, err) {
                         Ok(RetryOutcome::Scheduled) => {
                             tracing::info!("executor: task '{}' failed, retry scheduled", ttl);
-                            trepo.set_summary(&tid, &format!("failed, retry scheduled: {ttl}")).ok();
+                            trepo
+                                .set_summary(&tid, &format!("failed, retry scheduled: {ttl}"))
+                                .ok();
                             ebus.publish(Event::Task(TaskEvent::RetryScheduled {
                                 task_id: tid.clone(),
                                 retry_count: 0,

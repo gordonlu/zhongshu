@@ -589,8 +589,10 @@ impl ZhongshuApp {
                         }
                         Event::Task(TaskEvent::Claimed { task_id, .. }) => {
                             if self.config.agent.desktop_notification {
-                                let _ =
-                                    zhongshu_core::desktop::notification::show("任务已开始执行", &task_id);
+                                let _ = zhongshu_core::desktop::notification::show(
+                                    "任务已开始执行",
+                                    &task_id,
+                                );
                             }
                         }
                         Event::Task(TaskEvent::Completed { title, .. }) => {
@@ -601,14 +603,18 @@ impl ZhongshuApp {
                         }
                         Event::Task(TaskEvent::Failed { title, error, .. }) => {
                             if self.config.agent.desktop_notification {
-                                let _ =
-                                    zhongshu_core::desktop::notification::show("任务失败", &format!("{title}: {error}"));
+                                let _ = zhongshu_core::desktop::notification::show(
+                                    "任务失败",
+                                    &format!("{title}: {error}"),
+                                );
                             }
                         }
                         Event::Task(TaskEvent::Cancelled { title, reason, .. }) => {
                             if self.config.agent.desktop_notification {
-                                let _ =
-                                    zhongshu_core::desktop::notification::show("任务已取消", &format!("{title}: {reason}"));
+                                let _ = zhongshu_core::desktop::notification::show(
+                                    "任务已取消",
+                                    &format!("{title}: {reason}"),
+                                );
                             }
                         }
                         Event::Harness(event) => {
@@ -864,7 +870,7 @@ impl ZhongshuApp {
                                 }
                             }
                             _ => {}
-                        }
+                        },
                         _ => {}
                     }
                 }

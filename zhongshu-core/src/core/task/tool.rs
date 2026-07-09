@@ -152,7 +152,9 @@ impl Tool for TaskTool {
                 match self.repo.mark_completed(id, output) {
                     Ok(true) => {
                         if let Ok(Some(task)) = self.repo.get(id) {
-                            let _ = self.repo.set_summary(id, &format!("completed: {}", task.title));
+                            let _ = self
+                                .repo
+                                .set_summary(id, &format!("completed: {}", task.title));
                             if let Some(eb) = &self.eb {
                                 eb.publish(Event::Task(TaskEvent::Completed {
                                     task_id: id.to_string(),
@@ -166,7 +168,9 @@ impl Tool for TaskTool {
                     Ok(false) => {
                         let t = self.repo.get(id).ok().flatten();
                         let reason = match t {
-                            Some(task) if task.status == TaskStatus::Cancelled => "任务已被取消".to_string(),
+                            Some(task) if task.status == TaskStatus::Cancelled => {
+                                "任务已被取消".to_string()
+                            }
                             Some(task) => format!("任务状态为 {}", task.status.as_str()),
                             None => "任务不存在".to_string(),
                         };
@@ -216,10 +220,15 @@ impl Tool for TaskTool {
                         ToolOutput::success(json!({"status": "retry_scheduled"}))
                     }
                     Ok(ScheduleRetryResult::NotFound) => ToolOutput::error("任务不存在"),
-                    Ok(ScheduleRetryResult::NotRetriable { reason }) =>
-                        ToolOutput::error(&format!("不可重试: {reason}")),
-                    Ok(ScheduleRetryResult::RetriesExhausted { retry_count, max_retries }) =>
-                        ToolOutput::error(&format!("重试次数已耗尽 ({retry_count}/{max_retries})")),
+                    Ok(ScheduleRetryResult::NotRetriable { reason }) => {
+                        ToolOutput::error(&format!("不可重试: {reason}"))
+                    }
+                    Ok(ScheduleRetryResult::RetriesExhausted {
+                        retry_count,
+                        max_retries,
+                    }) => {
+                        ToolOutput::error(&format!("重试次数已耗尽 ({retry_count}/{max_retries})"))
+                    }
                     Err(e) => ToolOutput::error(&format!("重试失败: {e}")),
                 }
             }

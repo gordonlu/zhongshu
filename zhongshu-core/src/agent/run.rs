@@ -1,12 +1,12 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::{RwLock, Mutex};
-use tokio_util::sync::CancellationToken;
+use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::sync::{Mutex, RwLock};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::event::{Event, EventBus, ResponseEvent, RunEvent};
 use crate::agent::intent::{intent_classify, InterruptionIntent};
+use crate::event::{Event, EventBus, ResponseEvent, RunEvent};
 use crate::tool::spec::SideEffect;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,10 +72,7 @@ pub struct RunController {
 }
 
 impl RunController {
-    pub fn new(
-        event_bus: Arc<EventBus>,
-        _response_tx: mpsc::Sender<ResponseEvent>,
-    ) -> Self {
+    pub fn new(event_bus: Arc<EventBus>, _response_tx: mpsc::Sender<ResponseEvent>) -> Self {
         Self {
             run_id: Arc::new(RwLock::new(None)),
             state: Arc::new(RwLock::new(RunState::Idle)),
@@ -183,7 +180,11 @@ impl RunController {
             }
         }
 
-        let rid = self.run_id.blocking_read().map(|r| r.to_string()).unwrap_or_default();
+        let rid = self
+            .run_id
+            .blocking_read()
+            .map(|r| r.to_string())
+            .unwrap_or_default();
 
         // Save context before transition
         let partial = self.take_partial_response();
@@ -234,11 +235,9 @@ impl RunController {
         _tool: Option<&ToolCallInfo>,
     ) -> InterruptionAction {
         match intent {
-            InterruptionIntent::Stop => {
-                InterruptionAction::CancelAndReplan {
-                    reason: "用户要求停止".into(),
-                }
-            }
+            InterruptionIntent::Stop => InterruptionAction::CancelAndReplan {
+                reason: "用户要求停止".into(),
+            },
             InterruptionIntent::Redirect | InterruptionIntent::Constraint => {
                 InterruptionAction::CancelAndReplan {
                     reason: match intent {
@@ -248,7 +247,10 @@ impl RunController {
                 }
             }
             InterruptionIntent::ApprovalCorrection => {
-                if matches!(state, RunState::ToolExecuting { .. } | RunState::WaitingApproval { .. }) {
+                if matches!(
+                    state,
+                    RunState::ToolExecuting { .. } | RunState::WaitingApproval { .. }
+                ) {
                     InterruptionAction::RequireConfirmation {
                         question: "当前操作被用户禁止，需要重新确认。".into(),
                     }
@@ -258,16 +260,12 @@ impl RunController {
                     }
                 }
             }
-            InterruptionIntent::ProgressAsk => {
-                InterruptionAction::PauseAndRespond {
-                    summary: "用户询问当前进度".into(),
-                }
-            }
-            InterruptionIntent::Continue => {
-                InterruptionAction::ContinueWithNote {
-                    note: "用户要求继续".into(),
-                }
-            }
+            InterruptionIntent::ProgressAsk => InterruptionAction::PauseAndRespond {
+                summary: "用户询问当前进度".into(),
+            },
+            InterruptionIntent::Continue => InterruptionAction::ContinueWithNote {
+                note: "用户要求继续".into(),
+            },
             InterruptionIntent::Other => {
                 // Check if there's an interrupted run to resume
                 if self.interrupted.load(Ordering::SeqCst) {
@@ -449,7 +447,10 @@ mod tests {
 
         // Second interjection with "继续"
         let action = ctrl.interrupt("继续吧");
-        assert!(matches!(action, InterruptionAction::ContinueWithNote { .. }));
+        assert!(matches!(
+            action,
+            InterruptionAction::ContinueWithNote { .. }
+        ));
     }
 
     #[test]

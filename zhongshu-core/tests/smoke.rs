@@ -545,7 +545,10 @@ async fn smoke_token_cancellation_stops_agent_loop() {
     // The loop exits early via `break` on cancel check, falling through
     // to the "max steps reached" path.
     assert!(
-        matches!(result.stop_reason, zhongshu_core::agent::StopReason::MaxStepsReached),
+        matches!(
+            result.stop_reason,
+            zhongshu_core::agent::StopReason::MaxStepsReached
+        ),
         "cancelled token should stop the agent loop early, got {:?}",
         result.stop_reason
     );
@@ -563,7 +566,10 @@ fn smoke_run_controller_interrupt_captures_context() {
     let controller = RunController::new(eb, response_tx);
 
     controller.start_run("测试插话打断");
-    assert!(controller.run_id().is_some(), "run_id should be set after start_run");
+    assert!(
+        controller.run_id().is_some(),
+        "run_id should be set after start_run"
+    );
 
     let action = controller.interrupt("停下");
 
@@ -571,7 +577,10 @@ fn smoke_run_controller_interrupt_captures_context() {
         matches!(action, InterruptionAction::CancelAndReplan { .. }),
         "interrupt('停下') should produce CancelAndReplan, got {action:?}"
     );
-    assert!(controller.is_interrupted(), "controller should report interrupted");
+    assert!(
+        controller.is_interrupted(),
+        "controller should report interrupted"
+    );
     assert!(
         controller.interruption_ctx().is_some(),
         "interruption context should be captured"

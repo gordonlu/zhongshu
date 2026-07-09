@@ -112,16 +112,28 @@ fn collect_expanded(tree: &UseTree, prefix: String, result: &mut Vec<String>) {
     match tree {
         UseTree::Path(p) => {
             let seg = p.ident.to_string();
-            let new_prefix = if prefix.is_empty() { seg } else { format!("{prefix}::{seg}") };
+            let new_prefix = if prefix.is_empty() {
+                seg
+            } else {
+                format!("{prefix}::{seg}")
+            };
             collect_expanded(&p.tree, new_prefix, result);
         }
         UseTree::Name(n) => {
             let name = n.ident.to_string();
-            result.push(if prefix.is_empty() { name } else { format!("{prefix}::{name}") });
+            result.push(if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}::{name}")
+            });
         }
         UseTree::Rename(r) => {
             let name = r.ident.to_string();
-            result.push(if prefix.is_empty() { name } else { format!("{prefix}::{name}") });
+            result.push(if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}::{name}")
+            });
         }
         UseTree::Glob(_) => {
             result.push(format!("{prefix}::*"));

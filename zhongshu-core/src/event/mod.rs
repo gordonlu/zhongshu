@@ -138,14 +138,42 @@ pub enum MemoryEvent {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum TaskEvent {
-    Triggered { task_id: String, title: String },
-    Claimed { task_id: String, worker_id: String },
-    ClaimFailed { task_id: String, reason: String },
-    Completed { task_id: String, title: String, output: String },
-    Failed { task_id: String, title: String, error: String },
-    Cancelled { task_id: String, title: String, reason: String },
-    RetryScheduled { task_id: String, retry_count: i32, max_retries: i32 },
-    RetriesExhausted { task_id: String, retry_count: i32 },
+    Triggered {
+        task_id: String,
+        title: String,
+    },
+    Claimed {
+        task_id: String,
+        worker_id: String,
+    },
+    ClaimFailed {
+        task_id: String,
+        reason: String,
+    },
+    Completed {
+        task_id: String,
+        title: String,
+        output: String,
+    },
+    Failed {
+        task_id: String,
+        title: String,
+        error: String,
+    },
+    Cancelled {
+        task_id: String,
+        title: String,
+        reason: String,
+    },
+    RetryScheduled {
+        task_id: String,
+        retry_count: i32,
+        max_retries: i32,
+    },
+    RetriesExhausted {
+        task_id: String,
+        retry_count: i32,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -156,27 +184,12 @@ pub enum GoalEvent {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum RunEvent {
-    Started {
-        run_id: String,
-        goal: String,
-    },
-    Interrupted {
-        run_id: String,
-        reason: String,
-    },
-    Resuming {
-        run_id: String,
-    },
-    Paused {
-        run_id: String,
-    },
-    Finished {
-        run_id: String,
-        stop_reason: String,
-    },
-    Cancelled {
-        run_id: String,
-    },
+    Started { run_id: String, goal: String },
+    Interrupted { run_id: String, reason: String },
+    Resuming { run_id: String },
+    Paused { run_id: String },
+    Finished { run_id: String, stop_reason: String },
+    Cancelled { run_id: String },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -230,9 +243,20 @@ pub enum SourceEvent {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ToolEvent {
-    Started { name: String, run_id: String },
-    Completed { name: String, success: bool, run_id: String },
-    Interrupted { name: String, run_id: String, tool_call_id: String },
+    Started {
+        name: String,
+        run_id: String,
+    },
+    Completed {
+        name: String,
+        success: bool,
+        run_id: String,
+    },
+    Interrupted {
+        name: String,
+        run_id: String,
+        tool_call_id: String,
+    },
 }
 
 /// UI-facing events from the harness layer (verification, recovery, phase).

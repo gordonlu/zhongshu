@@ -162,8 +162,6 @@ pub async fn run_agent(
                 let text = crate::harness::render::render_feedback(&fb);
                 messages.push(Message::system(text));
             }
-
-
         }
 
         let current_tokens = estimate_total_tokens(&messages);
@@ -406,8 +404,10 @@ pub async fn run_agent(
                     SideEffect::ReadOnly => {
                         // Fast read-only: accept result if tool already completed
                     }
-                    SideEffect::LocalWrite | SideEffect::SystemChange
-                    | SideEffect::ExternalAction | SideEffect::Irreversible => {
+                    SideEffect::LocalWrite
+                    | SideEffect::SystemChange
+                    | SideEffect::ExternalAction
+                    | SideEffect::Irreversible => {
                         // Force pause: tool output is NOT applied automatically
                         // Override output to signal interruption — loop continues but
                         // the LLM sees a failure observation.

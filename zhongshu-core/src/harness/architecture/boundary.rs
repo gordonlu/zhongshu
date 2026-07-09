@@ -49,7 +49,9 @@ const BASELINE: &[BaselineEntry] = &[
 ];
 
 fn is_baseline(file: &str, detail: &str) -> bool {
-    BASELINE.iter().any(|(f, d)| file.ends_with(f) && detail == *d)
+    BASELINE
+        .iter()
+        .any(|(f, d)| file.ends_with(f) && detail == *d)
 }
 
 /// Run the full boundary check and return violations.
@@ -97,7 +99,11 @@ fn scan_use_statements(dir: &Path, prefix: &str, violations: &mut Vec<Violation>
             Err(_) => continue,
         };
         let rel = path.to_string_lossy().to_string();
-        let rel = if let Some(p) = rel.split_once(prefix) { p.1.trim_start_matches('/') } else { continue };
+        let rel = if let Some(p) = rel.split_once(prefix) {
+            p.1.trim_start_matches('/')
+        } else {
+            continue;
+        };
         let rel_path = format!("{prefix}/{rel}");
         let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
 
@@ -133,7 +139,13 @@ fn scan_use_statements(dir: &Path, prefix: &str, violations: &mut Vec<Violation>
 }
 
 /// Expand a use statement into individual import paths and check each.
-fn expand_imports(text: &str, rel_path: &str, file_name: &str, line: usize, violations: &mut Vec<Violation>) {
+fn expand_imports(
+    text: &str,
+    rel_path: &str,
+    file_name: &str,
+    line: usize,
+    violations: &mut Vec<Violation>,
+) {
     let text = text.strip_suffix(';').unwrap_or(text);
     let text = text.strip_prefix("use ").unwrap_or(text);
     let text = text.strip_prefix("pub use ").unwrap_or(text);
@@ -222,7 +234,13 @@ fn extract_types_from_use_path(path: &str) -> Vec<String> {
 }
 
 /// Check a single orb-side import against B002/B003/B004.
-fn check_orb_to_core(ty: &str, rel_path: &str, file_name: &str, line: usize, violations: &mut Vec<Violation>) {
+fn check_orb_to_core(
+    ty: &str,
+    rel_path: &str,
+    file_name: &str,
+    line: usize,
+    violations: &mut Vec<Violation>,
+) {
     let ty_lower = ty.to_lowercase();
 
     // B002: direct db module
@@ -247,7 +265,8 @@ fn check_orb_to_core(ty: &str, rel_path: &str, file_name: &str, line: usize, vio
                 file: rel_path.into(),
                 line_no: line,
                 detail: ty.into(),
-                message: "orb must not own a Database handle; use EventBus or service traits".into(),
+                message: "orb must not own a Database handle; use EventBus or service traits"
+                    .into(),
             });
         }
         return;
@@ -292,7 +311,11 @@ fn scan_inline_fqn(dir: &Path, prefix: &str, violations: &mut Vec<Violation>) {
             Err(_) => continue,
         };
         let rel = path.to_string_lossy().to_string();
-        let rel = if let Some(p) = rel.split_once(prefix) { p.1.trim_start_matches('/') } else { continue };
+        let rel = if let Some(p) = rel.split_once(prefix) {
+            p.1.trim_start_matches('/')
+        } else {
+            continue;
+        };
         let rel_path = format!("{prefix}/{rel}");
         let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
 
@@ -326,10 +349,19 @@ fn scan_inline_fqn(dir: &Path, prefix: &str, violations: &mut Vec<Violation>) {
                 let ident = fqn.split("::").last().unwrap_or(&fqn);
                 // Skip public API: EventBus, AgentRuntime, ToolRegistry, etc.
                 let public_apis = [
-                    "EventBus", "AgentRuntime", "ToolRegistry", "AuthorityGate", "Event",
-                    "MessageId", "ResponseEvent", "ResponseRole",
+                    "EventBus",
+                    "AgentRuntime",
+                    "ToolRegistry",
+                    "AuthorityGate",
+                    "Event",
+                    "MessageId",
+                    "ResponseEvent",
+                    "ResponseRole",
                 ];
-                if public_apis.contains(&ident) || ident.contains("context::") || ident.ends_with("Tool") {
+                if public_apis.contains(&ident)
+                    || ident.contains("context::")
+                    || ident.ends_with("Tool")
+                {
                     continue;
                 }
                 if ident == "Database" {
@@ -339,17 +371,23 @@ fn scan_inline_fqn(dir: &Path, prefix: &str, violations: &mut Vec<Violation>) {
                             file: rel_path.clone(),
                             line_no: i + 1,
                             detail: ident.into(),
-                            message: "orb must not own a Database handle; use EventBus or service traits".into(),
+                            message:
+                                "orb must not own a Database handle; use EventBus or service traits"
+                                    .into(),
                         });
                     }
-                } else if (ident.ends_with("Repository") || ident.ends_with("Store")) && !ident.ends_with("Tool") {
+                } else if (ident.ends_with("Repository") || ident.ends_with("Store"))
+                    && !ident.ends_with("Tool")
+                {
                     if !is_baseline(file_name, ident) {
                         violations.push(Violation {
                             rule: "B004",
                             file: rel_path.clone(),
                             line_no: i + 1,
                             detail: ident.into(),
-                            message: format!("orb must not directly use core storage type `{ident}`"),
+                            message: format!(
+                                "orb must not directly use core storage type `{ident}`"
+                            ),
                         });
                     }
                 }
@@ -389,7 +427,10 @@ fn strip_comments_and_strings(content: &str) -> String {
     while i < bytes.len() {
         // Line comment: //
         if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
-            let end = content[i..].find('\n').map(|p| i + p + 1).unwrap_or(content.len());
+            let end = content[i..]
+                .find('\n')
+                .map(|p| i + p + 1)
+                .unwrap_or(content.len());
             // Preserve the newline to keep line numbers
             result.push_str(&" ".repeat(end - i - 1));
             if end < content.len() {
@@ -400,7 +441,10 @@ fn strip_comments_and_strings(content: &str) -> String {
         }
         // Block comment: /* ... */
         if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            let end = content[i..].find("*/").map(|p| i + p + 2).unwrap_or(content.len());
+            let end = content[i..]
+                .find("*/")
+                .map(|p| i + p + 2)
+                .unwrap_or(content.len());
             // Count newlines to keep line numbers
             let comment = &content[i..end];
             let nl_count = comment.bytes().filter(|&b| b == b'\n').count();
@@ -466,7 +510,10 @@ pub fn format_report(violations: &[Violation]) -> String {
     if violations.is_empty() {
         return "architecture boundary check: 0 violations".into();
     }
-    let baseline_count = violations.iter().filter(|v| is_baseline(&v.file, &v.detail)).count();
+    let baseline_count = violations
+        .iter()
+        .filter(|v| is_baseline(&v.file, &v.detail))
+        .count();
     let new_count = violations.len() - baseline_count;
     let mut out = format!(
         "architecture boundary check: {} violations ({} new, {} baseline)\n",
@@ -475,8 +522,17 @@ pub fn format_report(violations: &[Violation]) -> String {
         baseline_count,
     );
     for v in violations {
-        let tag = if is_baseline(&v.file, &v.detail) { "[BASELINE]" } else { "[NEW]" };
-        writeln!(&mut out, "  {} {}:{}  {}  {}", tag, v.file, v.line_no, v.rule, v.message).unwrap();
+        let tag = if is_baseline(&v.file, &v.detail) {
+            "[BASELINE]"
+        } else {
+            "[NEW]"
+        };
+        writeln!(
+            &mut out,
+            "  {} {}:{}  {}  {}",
+            tag, v.file, v.line_no, v.rule, v.message
+        )
+        .unwrap();
     }
     out
 }
@@ -488,7 +544,10 @@ pub struct BoundaryResult {
 
 pub fn check_workspace_boundaries(workspace: &Path) -> BoundaryResult {
     let violations = check_boundaries(workspace);
-    let new_violations: Vec<&Violation> = violations.iter().filter(|v| !is_baseline(&v.file, &v.detail)).collect();
+    let new_violations: Vec<&Violation> = violations
+        .iter()
+        .filter(|v| !is_baseline(&v.file, &v.detail))
+        .collect();
     let report = format_report(&violations);
     BoundaryResult {
         ok: new_violations.is_empty(),
@@ -505,27 +564,49 @@ mod tests {
         let content = "use zhongshu_orb::Overlay;";
         let mut v = Vec::new();
         expand_imports(content, "zhongshu-core/src/foo.rs", "foo.rs", 1, &mut v);
-        assert!(v.iter().any(|x| x.rule == "B001"), "should detect B001: {v:?}");
+        assert!(
+            v.iter().any(|x| x.rule == "B001"),
+            "should detect B001: {v:?}"
+        );
     }
 
     #[test]
     fn detects_orb_use_of_database() {
         let mut v = Vec::new();
-        expand_imports("zhongshu_core::core::Database", "zhongshu-orb/src/main.rs", "main.rs", 1, &mut v);
+        expand_imports(
+            "zhongshu_core::core::Database",
+            "zhongshu-orb/src/main.rs",
+            "main.rs",
+            1,
+            &mut v,
+        );
         assert!(v.iter().any(|x| x.rule == "B003"));
     }
 
     #[test]
     fn detects_orb_use_of_repository() {
         let mut v = Vec::new();
-        expand_imports("zhongshu_core::core::NewVendorRepository", "zhongshu-orb/src/main.rs", "main.rs", 1, &mut v);
+        expand_imports(
+            "zhongshu_core::core::NewVendorRepository",
+            "zhongshu-orb/src/main.rs",
+            "main.rs",
+            1,
+            &mut v,
+        );
         assert!(v.iter().any(|x| x.rule == "B004"));
     }
 
     #[test]
     fn does_not_flag_public_api() {
         let mut v = Vec::new();
-        for api in &["EventBus", "AgentRuntime", "ToolRegistry", "AuthorityGate", "TaskTool", "GoalTool"] {
+        for api in &[
+            "EventBus",
+            "AgentRuntime",
+            "ToolRegistry",
+            "AuthorityGate",
+            "TaskTool",
+            "GoalTool",
+        ] {
             v.clear();
             expand_imports(
                 &format!("zhongshu_core::core::{api}"),
@@ -534,7 +615,10 @@ mod tests {
                 1,
                 &mut v,
             );
-            assert!(!v.iter().any(|x| x.rule == "B004"), "should not flag {api}: {v:?}");
+            assert!(
+                !v.iter().any(|x| x.rule == "B004"),
+                "should not flag {api}: {v:?}"
+            );
         }
     }
 
@@ -549,9 +633,8 @@ mod tests {
 
     #[test]
     fn inline_fqn_detection() {
-        let stripped = strip_comments_and_strings(
-            "fn foo(x: zhongshu_core::core::Database) {} // comment"
-        );
+        let stripped =
+            strip_comments_and_strings("fn foo(x: zhongshu_core::core::Database) {} // comment");
         let cleaned = stripped.trim_start();
         assert!(cleaned.starts_with("fn foo(x: zhongshu_core::core::Database)"));
     }
@@ -569,7 +652,10 @@ mod tests {
     fn strip_strings_removes_string_content() {
         let result = strip_comments_and_strings("let x = \"hello zhongshu_orb::world\";");
         // The string content (including zhongshu_orb::) should be replaced with spaces
-        assert!(!result.contains("zhongshu_orb::"), "string content not stripped");
+        assert!(
+            !result.contains("zhongshu_orb::"),
+            "string content not stripped"
+        );
     }
 
     #[test]
@@ -585,7 +671,12 @@ mod tests {
         let mut v = Vec::new();
         // EventBus/Event are under zhongshu_core::event not zhongshu_core::core::
         // But even if under core, should not be flagged
-        let safe = ["context::ContextMessage", "MemoryPolicy", "Scheduler", "SuggestionEngine"];
+        let safe = [
+            "context::ContextMessage",
+            "MemoryPolicy",
+            "Scheduler",
+            "SuggestionEngine",
+        ];
         for api in &safe {
             v.clear();
             expand_imports(
@@ -598,7 +689,10 @@ mod tests {
             // Check that it's not flagged as B004
             // MemoryPolicy/Scheduler/SuggestionEngine are not Repository/Store
             if !api.ends_with("Repository") && !api.ends_with("Store") {
-                assert!(!v.iter().any(|x| x.rule == "B004"), "should not flag {api}: {v:?}");
+                assert!(
+                    !v.iter().any(|x| x.rule == "B004"),
+                    "should not flag {api}: {v:?}"
+                );
             }
         }
     }
@@ -613,7 +707,10 @@ mod tests {
             1,
             &mut v,
         );
-        assert!(!v.iter().any(|x| x.rule == "B004"), "equipment should not be storage: {v:?}");
+        assert!(
+            !v.iter().any(|x| x.rule == "B004"),
+            "equipment should not be storage: {v:?}"
+        );
     }
 
     #[test]
@@ -626,7 +723,10 @@ mod tests {
             1,
             &mut v,
         );
-        assert!(v.iter().any(|x| x.rule == "B003"), "new file should be caught");
+        assert!(
+            v.iter().any(|x| x.rule == "B003"),
+            "new file should be caught"
+        );
     }
 
     #[test]
@@ -640,6 +740,9 @@ mod tests {
             1,
             &mut v,
         );
-        assert!(v.iter().any(|x| x.rule == "B004"), "new type in baselined file should fire");
+        assert!(
+            v.iter().any(|x| x.rule == "B004"),
+            "new type in baselined file should fire"
+        );
     }
 }

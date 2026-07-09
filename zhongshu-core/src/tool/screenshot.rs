@@ -85,6 +85,7 @@ impl Tool for ScreenshotTool {
             "width": image.width(),
             "height": image.height(),
             "file_size_bytes": file_size,
-        })).external()
+        }))
+        .external()
     }
 }

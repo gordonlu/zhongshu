@@ -312,12 +312,10 @@ impl AgentController {
             delta: input.to_string(),
             run_id: rid,
         });
-        let _ = self
-            .response_tx
-            .try_send(ResponseEvent::MessageCompleted {
-                id: uid,
-                run_id: rid,
-            });
+        let _ = self.response_tx.try_send(ResponseEvent::MessageCompleted {
+            id: uid,
+            run_id: rid,
+        });
 
         self.event_bus
             .publish(Event::Agent(AgentEvent::StateChanged {
@@ -487,7 +485,9 @@ impl AgentController {
                             run_id,
                         })
                         .await;
-                    let _ = tx.send(ResponseEvent::MessageCompleted { id: aid, run_id }).await;
+                    let _ = tx
+                        .send(ResponseEvent::MessageCompleted { id: aid, run_id })
+                        .await;
                     return;
                 }
             };
@@ -842,7 +842,9 @@ impl AgentController {
                     memory.archive_completed_goals(KEEP_COMPLETED_GOALS);
                     stop_reason = "completed".to_string();
                     overall_success = true;
-                    let _ = tx.send(ResponseEvent::MessageCompleted { id: aid, run_id }).await;
+                    let _ = tx
+                        .send(ResponseEvent::MessageCompleted { id: aid, run_id })
+                        .await;
                     eb.publish(Event::Agent(AgentEvent::StateChanged {
                         from: AgentState::Thinking,
                         to: AgentState::Done { success: true },
@@ -859,7 +861,9 @@ impl AgentController {
                             run_id,
                         })
                         .await;
-                    let _ = tx.send(ResponseEvent::MessageCompleted { id: aid, run_id }).await;
+                    let _ = tx
+                        .send(ResponseEvent::MessageCompleted { id: aid, run_id })
+                        .await;
                     eb.publish(Event::Agent(AgentEvent::StateChanged {
                         from: AgentState::Thinking,
                         to: AgentState::Done { success: false },
@@ -876,7 +880,9 @@ impl AgentController {
                             run_id,
                         })
                         .await;
-                    let _ = tx.send(ResponseEvent::MessageCompleted { id: aid, run_id }).await;
+                    let _ = tx
+                        .send(ResponseEvent::MessageCompleted { id: aid, run_id })
+                        .await;
                     eb.publish(Event::Agent(AgentEvent::StateChanged {
                         from: AgentState::Thinking,
                         to: AgentState::Done { success: false },
@@ -888,7 +894,9 @@ impl AgentController {
             if rc.is_interrupted() {
                 let action = rc.take_last_action();
                 match action {
-                    Some(zhongshu_core::agent::run::InterruptionAction::ContinueWithNote { .. }) => {
+                    Some(zhongshu_core::agent::run::InterruptionAction::ContinueWithNote {
+                        ..
+                    }) => {
                         if let Some(prompt) = rc.build_recovery_prompt() {
                             tracing::info!("agent interrupted, performing recovery re-run");
                             let recovery_input = format!(
@@ -962,7 +970,8 @@ impl AgentController {
                                 .await;
                                 match r2 {
                                     Ok(Ok(rr)) => {
-                                        let conversation_id = proxy.lock().await.current_conv_id().await;
+                                        let conversation_id =
+                                            proxy.lock().await.current_conv_id().await;
                                         persist_trace_runbook(
                                             core_db_path.clone(),
                                             &input,
@@ -1136,8 +1145,15 @@ impl AgentController {
                                                 _ => {}
                                             }
                                         }
-                                        let last = rr.messages.last().map(|x| x.content.as_str()).unwrap_or("");
-                                        history_arc.lock().unwrap().push(("user".to_string(), input.clone()));
+                                        let last = rr
+                                            .messages
+                                            .last()
+                                            .map(|x| x.content.as_str())
+                                            .unwrap_or("");
+                                        history_arc
+                                            .lock()
+                                            .unwrap()
+                                            .push(("user".to_string(), input.clone()));
                                         if !last.is_empty() {
                                             let tools_used = new_tn.lock().unwrap();
                                             let history_content = if tools_used.is_empty() {
@@ -1146,21 +1162,40 @@ impl AgentController {
                                                 let mut deduped: Vec<(&str, u32)> = Vec::new();
                                                 for name in tools_used.iter().map(|s| s.as_str()) {
                                                     if let Some(last) = deduped.last_mut() {
-                                                        if last.0 == name { last.1 += 1; continue; }
+                                                        if last.0 == name {
+                                                            last.1 += 1;
+                                                            continue;
+                                                        }
                                                     }
                                                     deduped.push((name, 1));
                                                 }
-                                                let badge = deduped.iter()
-                                                    .map(|(n, c)| if *c > 1 { format!("✓ {n} ×{c}") } else { format!("✓ {n}") })
-                                                    .collect::<Vec<_>>().join(" · ");
+                                                let badge = deduped
+                                                    .iter()
+                                                    .map(|(n, c)| {
+                                                        if *c > 1 {
+                                                            format!("✓ {n} ×{c}")
+                                                        } else {
+                                                            format!("✓ {n}")
+                                                        }
+                                                    })
+                                                    .collect::<Vec<_>>()
+                                                    .join(" · ");
                                                 format!("[工具: {badge}]\n\n{last}")
                                             };
-                                            history_arc.lock().unwrap().push(("assistant".to_string(), history_content));
+                                            history_arc
+                                                .lock()
+                                                .unwrap()
+                                                .push(("assistant".to_string(), history_content));
                                         }
                                         memory.extract_todos(last);
                                         memory.extract_goal_completions(last);
                                         memory.archive_completed_goals(KEEP_COMPLETED_GOALS);
-                                        let _ = tx.send(ResponseEvent::MessageCompleted { id: aid, run_id }).await;
+                                        let _ = tx
+                                            .send(ResponseEvent::MessageCompleted {
+                                                id: aid,
+                                                run_id,
+                                            })
+                                            .await;
                                         eb.publish(Event::Agent(AgentEvent::StateChanged {
                                             from: AgentState::Thinking,
                                             to: AgentState::Done { success: true },
@@ -1170,12 +1205,19 @@ impl AgentController {
                                         tracing::error!("recovery agent run failed: {e:#}");
                                         stop_reason = "recovery_failed".to_string();
                                         overall_success = false;
-                                        let _ = tx.send(ResponseEvent::MessageDelta {
-                                            id: aid,
-                                            delta: format!("{e:#}"),
-                                            run_id,
-                                        }).await;
-                                        let _ = tx.send(ResponseEvent::MessageCompleted { id: aid, run_id }).await;
+                                        let _ = tx
+                                            .send(ResponseEvent::MessageDelta {
+                                                id: aid,
+                                                delta: format!("{e:#}"),
+                                                run_id,
+                                            })
+                                            .await;
+                                        let _ = tx
+                                            .send(ResponseEvent::MessageCompleted {
+                                                id: aid,
+                                                run_id,
+                                            })
+                                            .await;
                                         eb.publish(Event::Agent(AgentEvent::StateChanged {
                                             from: AgentState::Thinking,
                                             to: AgentState::Done { success: false },
@@ -1185,12 +1227,19 @@ impl AgentController {
                                         tracing::warn!("recovery agent task timed out");
                                         stop_reason = "recovery_timeout".to_string();
                                         overall_success = false;
-                                        let _ = tx.send(ResponseEvent::MessageDelta {
-                                            id: aid,
-                                            delta: "[恢复超时]".into(),
-                                            run_id,
-                                        }).await;
-                                        let _ = tx.send(ResponseEvent::MessageCompleted { id: aid, run_id }).await;
+                                        let _ = tx
+                                            .send(ResponseEvent::MessageDelta {
+                                                id: aid,
+                                                delta: "[恢复超时]".into(),
+                                                run_id,
+                                            })
+                                            .await;
+                                        let _ = tx
+                                            .send(ResponseEvent::MessageCompleted {
+                                                id: aid,
+                                                run_id,
+                                            })
+                                            .await;
                                         eb.publish(Event::Agent(AgentEvent::StateChanged {
                                             from: AgentState::Thinking,
                                             to: AgentState::Done { success: false },
@@ -1200,53 +1249,73 @@ impl AgentController {
                             }
                         }
                     }
-                    Some(zhongshu_core::agent::run::InterruptionAction::CancelAndReplan { reason }) => {
+                    Some(zhongshu_core::agent::run::InterruptionAction::CancelAndReplan {
+                        reason,
+                    }) => {
                         tracing::info!("interruption cancelled: {reason}");
                         stop_reason = "cancelled".to_string();
                         overall_success = false;
-                        let _ = tx.send(ResponseEvent::MessageDelta {
-                            id: aid,
-                            delta: format!("[已停止: {reason}]"),
-                            run_id,
-                        }).await;
-                        let _ = tx.send(ResponseEvent::MessageCompleted { id: aid, run_id }).await;
+                        let _ = tx
+                            .send(ResponseEvent::MessageDelta {
+                                id: aid,
+                                delta: format!("[已停止: {reason}]"),
+                                run_id,
+                            })
+                            .await;
+                        let _ = tx
+                            .send(ResponseEvent::MessageCompleted { id: aid, run_id })
+                            .await;
                         eb.publish(Event::Agent(AgentEvent::StateChanged {
                             from: AgentState::Thinking,
                             to: AgentState::Done { success: false },
                         }));
                     }
-                    Some(zhongshu_core::agent::run::InterruptionAction::PauseAndRespond { summary }) => {
+                    Some(zhongshu_core::agent::run::InterruptionAction::PauseAndRespond {
+                        summary,
+                    }) => {
                         tracing::info!("interruption paused: {summary}");
                         stop_reason = "paused".to_string();
                         overall_success = true;
-                        let _ = tx.send(ResponseEvent::MessageDelta {
-                            id: aid,
-                            delta: format!("[已暂停: {summary}]"),
-                            run_id,
-                        }).await;
-                        let _ = tx.send(ResponseEvent::MessageCompleted { id: aid, run_id }).await;
+                        let _ = tx
+                            .send(ResponseEvent::MessageDelta {
+                                id: aid,
+                                delta: format!("[已暂停: {summary}]"),
+                                run_id,
+                            })
+                            .await;
+                        let _ = tx
+                            .send(ResponseEvent::MessageCompleted { id: aid, run_id })
+                            .await;
                         eb.publish(Event::Agent(AgentEvent::StateChanged {
                             from: AgentState::Thinking,
                             to: AgentState::Done { success: true },
                         }));
                     }
-                    Some(zhongshu_core::agent::run::InterruptionAction::RequireConfirmation { question }) => {
+                    Some(zhongshu_core::agent::run::InterruptionAction::RequireConfirmation {
+                        question,
+                    }) => {
                         tracing::info!("interruption requires confirmation: {question}");
                         stop_reason = "awaiting_confirmation".to_string();
                         overall_success = false;
-                        let _ = tx.send(ResponseEvent::MessageDelta {
-                            id: aid,
-                            delta: format!("[需要确认: {question}]"),
-                            run_id,
-                        }).await;
-                        let _ = tx.send(ResponseEvent::MessageCompleted { id: aid, run_id }).await;
+                        let _ = tx
+                            .send(ResponseEvent::MessageDelta {
+                                id: aid,
+                                delta: format!("[需要确认: {question}]"),
+                                run_id,
+                            })
+                            .await;
+                        let _ = tx
+                            .send(ResponseEvent::MessageCompleted { id: aid, run_id })
+                            .await;
                         eb.publish(Event::Agent(AgentEvent::StateChanged {
                             from: AgentState::Thinking,
                             to: AgentState::Done { success: false },
                         }));
                     }
                     None => {
-                        tracing::warn!("interrupted but no action stored — assuming CancelAndReplan");
+                        tracing::warn!(
+                            "interrupted but no action stored — assuming CancelAndReplan"
+                        );
                         stop_reason = "cancelled".to_string();
                         overall_success = false;
                     }
@@ -1259,7 +1328,9 @@ impl AgentController {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             *state_arc.write().await = AgentState::Idle;
             eb.publish(Event::Agent(AgentEvent::StateChanged {
-                from: AgentState::Done { success: overall_success },
+                from: AgentState::Done {
+                    success: overall_success,
+                },
                 to: AgentState::Idle,
             }));
         });

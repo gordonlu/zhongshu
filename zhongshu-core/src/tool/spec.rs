@@ -228,9 +228,10 @@ fn infer_workspace_scope(name: &str, effect: ToolEffect) -> WorkspaceScope {
 pub fn infer_side_effect(name: &str) -> SideEffect {
     match name {
         // Read-only tools
-        "read_file" | "list_dir" | "grep" | "glob" | "search_files"
-        | "webfetch" | "web_search" | "system_info" | "self_test"
-        | "memory_query" | "goal" | "task" | "suggestion" => SideEffect::ReadOnly,
+        "read_file" | "list_dir" | "grep" | "glob" | "search_files" | "webfetch" | "web_search"
+        | "system_info" | "self_test" | "memory_query" | "goal" | "task" | "suggestion" => {
+            SideEffect::ReadOnly
+        }
 
         // Local writes
         "write_file" | "edit" | "memory" | "fs" | "patch" => SideEffect::LocalWrite,

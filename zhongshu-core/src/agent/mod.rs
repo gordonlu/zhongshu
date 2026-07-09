@@ -1,8 +1,7 @@
 pub mod attention;
-pub mod intent;
-pub mod run;
 pub mod attention_manager;
 pub mod dispatcher;
+pub mod intent;
 pub mod llm;
 pub mod llm_registry;
 pub mod loop_;
@@ -10,6 +9,7 @@ pub mod orchestrator;
 pub mod profile;
 pub mod report;
 pub mod router;
+pub mod run;
 pub mod runtime;
 pub mod worker;
 

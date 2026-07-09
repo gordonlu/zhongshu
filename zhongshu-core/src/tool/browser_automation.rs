@@ -399,8 +399,13 @@ fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
     }
     let table: Vec<i8> = {
         let mut t = vec![-1i8; 128];
-        for (i, ch) in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".chars().enumerate() {
-            if ch as usize <= 127 { t[ch as usize] = i as i8; }
+        for (i, ch) in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+            .chars()
+            .enumerate()
+        {
+            if ch as usize <= 127 {
+                t[ch as usize] = i as i8;
+            }
         }
         t['=' as usize] = 0;
         t
@@ -413,9 +418,13 @@ fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
         }
         let mut vals = [0u32; 4];
         for (i, &b) in chunk.iter().enumerate() {
-            if b as usize >= 128 { return Err("invalid base64 character".into()); }
+            if b as usize >= 128 {
+                return Err("invalid base64 character".into());
+            }
             let v = table[b as usize];
-            if v < 0 { return Err("invalid base64 character".into()); }
+            if v < 0 {
+                return Err("invalid base64 character".into());
+            }
             vals[i] = v as u32;
         }
         let triple = (vals[0] << 18) | (vals[1] << 12) | (vals[2] << 6) | vals[3];
@@ -775,14 +784,8 @@ mod tests {
 
     #[test]
     fn base64_decode_decodes_standard_input() {
-        assert_eq!(
-            decode_base64("aGVsbG8=").unwrap(),
-            b"hello"
-        );
-        assert_eq!(
-            decode_base64("5Lit5paH").unwrap(),
-            "中文".as_bytes()
-        );
+        assert_eq!(decode_base64("aGVsbG8=").unwrap(), b"hello");
+        assert_eq!(decode_base64("5Lit5paH").unwrap(), "中文".as_bytes());
         assert!(decode_base64("").unwrap().is_empty());
     }
 

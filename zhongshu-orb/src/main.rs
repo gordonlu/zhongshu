@@ -547,7 +547,10 @@ fn main() {
     {
         let recovered = task_repo.recover_stale_inflight(0).unwrap_or_default();
         if !recovered.is_empty() {
-            tracing::info!("startup: recovered {} stale inflight tasks", recovered.len());
+            tracing::info!(
+                "startup: recovered {} stale inflight tasks",
+                recovered.len()
+            );
         }
     }
     let runbook_store = RunbookStore::new(Database::new(core_db_path.clone()));

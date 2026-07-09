@@ -24,6 +24,15 @@ pub enum WorkspaceScope {
     Unrestricted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SideEffect {
+    ReadOnly,
+    LocalWrite,
+    SystemChange,
+    ExternalAction,
+    Irreversible,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolSpec {
     pub name: String,
@@ -33,6 +42,7 @@ pub struct ToolSpec {
     pub workspace_scope: WorkspaceScope,
     pub supports_concurrent_execution: bool,
     pub requires_approval: bool,
+    pub side_effect: SideEffect,
 }
 
 impl ToolSpec {
@@ -45,6 +55,7 @@ impl ToolSpec {
             workspace_scope: WorkspaceScope::Unrestricted,
             supports_concurrent_execution: false,
             requires_approval: true,
+            side_effect: SideEffect::ReadOnly,
         }
     }
 
@@ -62,6 +73,7 @@ impl ToolSpec {
             workspace_scope,
             supports_concurrent_execution: read_only && !destructive,
             requires_approval: destructive || matches!(effect, ToolEffect::System),
+            side_effect: infer_side_effect(name),
         }
     }
 
@@ -101,6 +113,14 @@ impl ToolSpec {
 
     pub fn requires_approval(mut self, requires: bool) -> Self {
         self.requires_approval = requires || self.destructive;
+        self
+    }
+
+    pub fn side_effect(mut self, se: SideEffect) -> Self {
+        self.side_effect = se;
+        if !matches!(se, SideEffect::ReadOnly) {
+            self.read_only = false;
+        }
         self
     }
 }
@@ -202,6 +222,29 @@ fn infer_workspace_scope(name: &str, effect: ToolEffect) -> WorkspaceScope {
         ("shell", _) => WorkspaceScope::CurrentDirectoryOnly,
         (_, ToolEffect::Network | ToolEffect::Browser) => WorkspaceScope::External,
         _ => WorkspaceScope::Unrestricted,
+    }
+}
+
+pub fn infer_side_effect(name: &str) -> SideEffect {
+    match name {
+        // Read-only tools
+        "read_file" | "list_dir" | "grep" | "glob" | "search_files"
+        | "webfetch" | "web_search" | "system_info" | "self_test"
+        | "memory_query" | "goal" | "task" | "suggestion" => SideEffect::ReadOnly,
+
+        // Local writes
+        "write_file" | "edit" | "memory" | "fs" | "patch" => SideEffect::LocalWrite,
+
+        // System changes
+        "screenshot" | "automation" | "desktop" => SideEffect::SystemChange,
+
+        // External actions
+        "browser" | "browser_automation" | "browser_session" => SideEffect::ExternalAction,
+
+        // Process execution (shell)
+        "shell" => SideEffect::Irreversible,
+
+        _ => SideEffect::ReadOnly,
     }
 }
 
@@ -315,5 +358,15 @@ mod tests {
 
         assert_eq!(summary.status, ToolStatus::Success);
         assert!(summary.preview.chars().count() <= 11);
+    }
+
+    #[test]
+    fn side_effect_inference() {
+        assert_eq!(infer_side_effect("read_file"), SideEffect::ReadOnly);
+        assert_eq!(infer_side_effect("write_file"), SideEffect::LocalWrite);
+        assert_eq!(infer_side_effect("screenshot"), SideEffect::SystemChange);
+        assert_eq!(infer_side_effect("browser"), SideEffect::ExternalAction);
+        assert_eq!(infer_side_effect("shell"), SideEffect::Irreversible);
+        assert_eq!(infer_side_effect("unknown_tool"), SideEffect::ReadOnly);
     }
 }

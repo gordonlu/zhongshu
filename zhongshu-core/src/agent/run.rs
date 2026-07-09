@@ -67,6 +67,7 @@ pub struct RunController {
     interruption_ctx: Arc<Mutex<Option<InterruptionCtx>>>,
     original_goal: Arc<RwLock<String>>,
     event_bus: Arc<EventBus>,
+    #[allow(dead_code)]
     response_tx: mpsc::Sender<ResponseEvent>,
     interrupted: Arc<AtomicBool>,
 }

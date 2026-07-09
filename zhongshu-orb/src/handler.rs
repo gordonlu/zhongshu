@@ -153,6 +153,7 @@ impl ZhongshuApp {
         }
     }
 
+    #[allow(dead_code)]
     pub fn update_active_run_id(&mut self, run_id: Uuid) {
         self.active_run_id = run_id;
     }

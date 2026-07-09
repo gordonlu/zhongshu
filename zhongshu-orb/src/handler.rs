@@ -535,7 +535,7 @@ impl ZhongshuApp {
                                 }
                             }
                         }
-                        Event::Tool(ToolEvent::Started { name }) => {
+                        Event::Tool(ToolEvent::Started { name, .. }) => {
                             self.indicator_state = AgentState::Executing;
                             self.last_activity = Instant::now();
                             if let Some(ind) = self.indicator.as_mut() {
@@ -545,7 +545,7 @@ impl ZhongshuApp {
                                 ov.send(&serde_json::json!({"type":"tool_call","name":name}));
                             }
                         }
-                        Event::Tool(ToolEvent::Completed { name, success }) => {
+                        Event::Tool(ToolEvent::Completed { name, success, .. }) => {
                             if let Some(ref ov) = self.overlay {
                                 ov.send(&serde_json::json!({
                                     "type": "tool_result",
@@ -840,7 +840,7 @@ impl ZhongshuApp {
         while let Ok(ev) = self.response_rx.try_recv() {
             active = true;
             match ev {
-                ResponseEvent::MessageStarted { id, role } => {
+                ResponseEvent::MessageStarted { id, role, .. } => {
                     if matches!(role, ResponseRole::Assistant) {
                         self.assistant_id = Some(id);
                         if let Some(ref ov) = self.overlay {
@@ -852,7 +852,7 @@ impl ZhongshuApp {
                         self.filter = ControlTokenFilter::new();
                     }
                 }
-                ResponseEvent::MessageDelta { id, delta } => {
+                ResponseEvent::MessageDelta { id, delta, .. } => {
                     if self.assistant_id.map(|aid| aid == id).unwrap_or(false) {
                         let cleaned = self.filter.feed(&delta);
                         if !cleaned.is_empty() {
@@ -862,7 +862,7 @@ impl ZhongshuApp {
                         }
                     }
                 }
-                ResponseEvent::MessageCompleted { id } => {
+                ResponseEvent::MessageCompleted { id, .. } => {
                     if self.assistant_id.map(|aid| aid == id).unwrap_or(false) {
                         if let Some(ref ov) = self.overlay {
                             ov.complete_message();

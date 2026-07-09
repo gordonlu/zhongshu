@@ -394,13 +394,13 @@ impl EquipmentObserver {
     pub fn observe(&mut self, event: &Event) {
         let ts = now();
         match event {
-            Event::Tool(ToolEvent::Started { name }) => {
+            Event::Tool(ToolEvent::Started { name, .. }) => {
                 self.store.push(Observation {
                     timestamp: ts,
                     kind: ObservationKind::ToolStarted { name: name.clone() },
                 });
             }
-            Event::Tool(ToolEvent::Completed { name, success }) => {
+            Event::Tool(ToolEvent::Completed { name, success, .. }) => {
                 self.store.push(Observation {
                     timestamp: ts,
                     kind: ObservationKind::ToolCompleted {
@@ -754,17 +754,21 @@ mod tests {
         let mut obs = EquipmentObserver::new();
         obs.observe(&Event::Tool(ToolEvent::Started {
             name: "shell".into(),
+            run_id: "test".into(),
         }));
         obs.observe(&Event::Tool(ToolEvent::Completed {
             name: "shell".into(),
             success: true,
+            run_id: "test".into(),
         }));
         obs.observe(&Event::Tool(ToolEvent::Started {
             name: "read_file".into(),
+            run_id: "test".into(),
         }));
         obs.observe(&Event::Tool(ToolEvent::Completed {
             name: "read_file".into(),
             success: false,
+            run_id: "test".into(),
         }));
         assert_eq!(obs.store.len(), 4);
         let report = obs.usage_report();
@@ -804,17 +808,21 @@ mod tests {
         for i in 0..6 {
             obs.observe(&Event::Tool(ToolEvent::Started {
                 name: "shell".into(),
+                run_id: "test".into(),
             }));
             obs.observe(&Event::Tool(ToolEvent::Completed {
                 name: "shell".into(),
                 success: true,
+                run_id: "test".into(),
             }));
             obs.observe(&Event::Tool(ToolEvent::Started {
                 name: "web_search".into(),
+                run_id: "test".into(),
             }));
             obs.observe(&Event::Tool(ToolEvent::Completed {
                 name: "web_search".into(),
                 success: true,
+                run_id: "test".into(),
             }));
         }
         for i in 0..5 {

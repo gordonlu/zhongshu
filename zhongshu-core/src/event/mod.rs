@@ -1,6 +1,7 @@
 use crate::agent::report::Report;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{broadcast, mpsc};
+use uuid::Uuid;
 
 // ── Message identity ────────────────────────────────────────────────
 
@@ -55,6 +56,7 @@ pub enum Event {
     Task(TaskEvent),
     Memory(MemoryEvent),
     Goal(GoalEvent),
+    Run(RunEvent),
     Suggestion(SuggestionEvent),
     Authority(AuthorityEvent),
     Attention(AttentionEvent),
@@ -102,6 +104,14 @@ impl Event {
                 GoalEvent::Created { .. } => "goal_created",
                 GoalEvent::Completed { .. } => "goal_completed",
             },
+            Event::Run(e) => match e {
+                RunEvent::Started { .. } => "run_started",
+                RunEvent::Interrupted { .. } => "run_interrupted",
+                RunEvent::Resuming { .. } => "run_resuming",
+                RunEvent::Paused { .. } => "run_paused",
+                RunEvent::Finished { .. } => "run_finished",
+                RunEvent::Cancelled { .. } => "run_cancelled",
+            },
             Event::Suggestion(e) => match e {
                 SuggestionEvent::Accepted { .. } => "suggestion_accepted",
                 SuggestionEvent::Rejected { .. } => "suggestion_rejected",
@@ -142,6 +152,31 @@ pub enum TaskEvent {
 pub enum GoalEvent {
     Created { goal_id: String, title: String },
     Completed { goal_id: String },
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum RunEvent {
+    Started {
+        run_id: String,
+        goal: String,
+    },
+    Interrupted {
+        run_id: String,
+        reason: String,
+    },
+    Resuming {
+        run_id: String,
+    },
+    Paused {
+        run_id: String,
+    },
+    Finished {
+        run_id: String,
+        stop_reason: String,
+    },
+    Cancelled {
+        run_id: String,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -195,8 +230,9 @@ pub enum SourceEvent {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ToolEvent {
-    Started { name: String },
-    Completed { name: String, success: bool },
+    Started { name: String, run_id: String },
+    Completed { name: String, success: bool, run_id: String },
+    Interrupted { name: String, run_id: String, tool_call_id: String },
 }
 
 /// UI-facing events from the harness layer (verification, recovery, phase).
@@ -441,9 +477,20 @@ pub enum ResponseRole {
 
 #[derive(Debug, Clone)]
 pub enum ResponseEvent {
-    MessageStarted { id: MessageId, role: ResponseRole },
-    MessageDelta { id: MessageId, delta: String },
-    MessageCompleted { id: MessageId },
+    MessageStarted {
+        id: MessageId,
+        role: ResponseRole,
+        run_id: Uuid,
+    },
+    MessageDelta {
+        id: MessageId,
+        delta: String,
+        run_id: Uuid,
+    },
+    MessageCompleted {
+        id: MessageId,
+        run_id: Uuid,
+    },
 }
 
 /// Bounded sender for response events.  `try_send` drops when full;
@@ -502,6 +549,7 @@ mod tests {
         let mut rx2 = bus.subscribe();
         bus.publish(Event::Tool(ToolEvent::Started {
             name: "search".into(),
+            run_id: "test".into(),
         }));
         assert!(rx1.try_recv().is_ok());
         assert!(rx2.try_recv().is_ok());
@@ -522,12 +570,17 @@ mod tests {
         let _ = tx.try_send(ResponseEvent::MessageStarted {
             id,
             role: ResponseRole::Assistant,
+            run_id: Uuid::default(),
         });
         let _ = tx.try_send(ResponseEvent::MessageDelta {
             id,
             delta: "hello".into(),
+            run_id: Uuid::default(),
         });
-        let _ = tx.try_send(ResponseEvent::MessageCompleted { id });
+        let _ = tx.try_send(ResponseEvent::MessageCompleted {
+            id,
+            run_id: Uuid::default(),
+        });
         assert!(rx.try_recv().is_ok());
         assert!(rx.try_recv().is_ok());
         assert!(rx.try_recv().is_ok());
@@ -558,6 +611,7 @@ mod tests {
         tx.send(ResponseEvent::MessageDelta {
             id,
             delta: "ok".into(),
+            run_id: Uuid::default(),
         })
         .await
         .unwrap();
@@ -590,16 +644,19 @@ mod tests {
         let _ = tx.try_send(ResponseEvent::MessageDelta {
             id,
             delta: "a".into(),
+            run_id: Uuid::default(),
         });
         let _ = tx.try_send(ResponseEvent::MessageDelta {
             id,
             delta: "b".into(),
+            run_id: Uuid::default(),
         });
         // Third send should fail (full), not block or panic.
         assert!(tx
             .try_send(ResponseEvent::MessageDelta {
                 id,
-                delta: "c".into()
+                delta: "c".into(),
+                run_id: Uuid::default(),
             })
             .is_err());
         // Drain.

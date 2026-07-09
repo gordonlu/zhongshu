@@ -62,7 +62,8 @@ fn preflight_checks() {
     assert!(
         tx.try_send(ResponseEvent::MessageStarted {
             id,
-            role: ResponseRole::System
+            role: ResponseRole::System,
+            run_id: uuid::Uuid::default(),
         })
         .is_ok(),
         "preflight: response tx failed"

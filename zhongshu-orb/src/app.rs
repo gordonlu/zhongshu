@@ -298,14 +298,19 @@ impl AgentController {
         let _ = self.response_tx.try_send(ResponseEvent::MessageStarted {
             id: uid,
             role: ResponseRole::User,
+            run_id: uuid::Uuid::default(),
         });
         let _ = self.response_tx.try_send(ResponseEvent::MessageDelta {
             id: uid,
             delta: input.to_string(),
+            run_id: uuid::Uuid::default(),
         });
         let _ = self
             .response_tx
-            .try_send(ResponseEvent::MessageCompleted { id: uid });
+            .try_send(ResponseEvent::MessageCompleted {
+                id: uid,
+                run_id: uuid::Uuid::default(),
+            });
 
         self.event_bus
             .publish(Event::Agent(AgentEvent::StateChanged {
@@ -362,10 +367,12 @@ impl AgentController {
 
         let handle = tokio::spawn(async move {
             let aid = MessageId::new();
+            let run_id = uuid::Uuid::new_v4();
             let _ = tx
                 .send(ResponseEvent::MessageStarted {
                     id: aid,
                     role: ResponseRole::Assistant,
+                    run_id,
                 })
                 .await;
 
@@ -385,6 +392,7 @@ impl AgentController {
                         .send(ResponseEvent::MessageDelta {
                             id: aid,
                             delta: format!("\n——压缩中(已归档{dropped}条)——\n\n"),
+                            run_id,
                         })
                         .await;
                     // Best-effort deeplossless DAG compression before discarding.
@@ -464,9 +472,10 @@ impl AgentController {
                         .send(ResponseEvent::MessageDelta {
                             id: aid,
                             delta: format!("context build error: {e}"),
+                            run_id,
                         })
                         .await;
-                    let _ = tx.send(ResponseEvent::MessageCompleted { id: aid }).await;
+                    let _ = tx.send(ResponseEvent::MessageCompleted { id: aid, run_id }).await;
                     return;
                 }
             };
@@ -499,24 +508,33 @@ impl AgentController {
                                 let _ = tx.try_send(ResponseEvent::MessageDelta {
                                     id: aid,
                                     delta: x.to_string(),
+                                    run_id,
                                 });
                             } else {
                                 tracing::debug!("on_text empty");
                             }
                         })
                     },
-                    on_tool_start: Box::new(move |name: &str| {
-                        tn.lock().unwrap().push(name.to_string());
-                        eb1.publish(Event::Tool(ToolEvent::Started {
-                            name: name.to_string(),
-                        }));
-                    }),
-                    on_tool_done: Box::new(move |name: &str, ok: bool| {
-                        eb2.publish(Event::Tool(ToolEvent::Completed {
-                            name: name.to_string(),
-                            success: ok,
-                        }));
-                    }),
+                    on_tool_start: {
+                        let run_id = run_id.to_string();
+                        Box::new(move |name: &str| {
+                            tn.lock().unwrap().push(name.to_string());
+                            eb1.publish(Event::Tool(ToolEvent::Started {
+                                name: name.to_string(),
+                                run_id: run_id.clone(),
+                            }));
+                        })
+                    },
+                    on_tool_done: {
+                        let run_id = run_id.to_string();
+                        Box::new(move |name: &str, ok: bool| {
+                            eb2.publish(Event::Tool(ToolEvent::Completed {
+                                name: name.to_string(),
+                                success: ok,
+                                run_id: run_id.clone(),
+                            }));
+                        })
+                    },
                 }
             };
 
@@ -797,7 +815,7 @@ impl AgentController {
                     memory.extract_goal_completions(last);
                     // Archive old completed goals to keep the list bounded.
                     memory.archive_completed_goals(KEEP_COMPLETED_GOALS);
-                    let _ = tx.send(ResponseEvent::MessageCompleted { id: aid }).await;
+                    let _ = tx.send(ResponseEvent::MessageCompleted { id: aid, run_id }).await;
                     eb.publish(Event::Agent(AgentEvent::StateChanged {
                         from: AgentState::Thinking,
                         to: AgentState::Done { success: true },
@@ -809,9 +827,10 @@ impl AgentController {
                         .send(ResponseEvent::MessageDelta {
                             id: aid,
                             delta: format!("{e:#}"),
+                            run_id,
                         })
                         .await;
-                    let _ = tx.send(ResponseEvent::MessageCompleted { id: aid }).await;
+                    let _ = tx.send(ResponseEvent::MessageCompleted { id: aid, run_id }).await;
                     eb.publish(Event::Agent(AgentEvent::StateChanged {
                         from: AgentState::Thinking,
                         to: AgentState::Done { success: false },
@@ -823,9 +842,10 @@ impl AgentController {
                         .send(ResponseEvent::MessageDelta {
                             id: aid,
                             delta: "[连接超时: 300s 无响应]".into(),
+                            run_id,
                         })
                         .await;
-                    let _ = tx.send(ResponseEvent::MessageCompleted { id: aid }).await;
+                    let _ = tx.send(ResponseEvent::MessageCompleted { id: aid, run_id }).await;
                     eb.publish(Event::Agent(AgentEvent::StateChanged {
                         from: AgentState::Thinking,
                         to: AgentState::Done { success: false },

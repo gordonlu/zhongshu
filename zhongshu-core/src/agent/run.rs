@@ -166,6 +166,19 @@ impl RunController {
 
     /// Called when user submits a message during an active run.
     pub fn interrupt(&self, user_message: &str) -> InterruptionAction {
+        // If already interrupted, append message instead of overwriting context.
+        if self.interrupted.load(Ordering::SeqCst) {
+            if let Some(ref mut ctx) = *self.interruption_ctx.blocking_lock() {
+                ctx.user_message = format!("{}\n{}", ctx.user_message, user_message);
+                let intent = intent_classify(&ctx.user_message);
+                let state = self.state.blocking_read().clone();
+                let tool = self.current_tool();
+                let action = self.determine_action(intent, &state, tool.as_ref());
+                *self.last_action.lock().unwrap() = Some(action.clone());
+                return action;
+            }
+        }
+
         let rid = self.run_id.blocking_read().map(|r| r.to_string()).unwrap_or_default();
 
         // Save context before transition
@@ -204,7 +217,8 @@ impl RunController {
         let intent = intent_classify(user_message);
 
         // Determine action
-        let action = self.determine_action(intent, &state_str, tool.as_ref());
+        let state_snapshot = self.state.blocking_read().clone();
+        let action = self.determine_action(intent, &state_snapshot, tool.as_ref());
         *self.last_action.lock().unwrap() = Some(action.clone());
         action
     }
@@ -212,7 +226,7 @@ impl RunController {
     fn determine_action(
         &self,
         intent: InterruptionIntent,
-        state: &str,
+        state: &RunState,
         _tool: Option<&ToolCallInfo>,
     ) -> InterruptionAction {
         match intent {
@@ -230,7 +244,7 @@ impl RunController {
                 }
             }
             InterruptionIntent::ApprovalCorrection => {
-                if state.contains("ToolExecuting") || state.contains("WaitingApproval") {
+                if matches!(state, RunState::ToolExecuting { .. } | RunState::WaitingApproval { .. }) {
                     InterruptionAction::RequireConfirmation {
                         question: "当前操作被用户禁止，需要重新确认。".into(),
                     }
@@ -324,6 +338,10 @@ impl RunController {
         let run_id = self.run_id.blocking_read().unwrap_or_else(Uuid::new_v4);
         *self.cancel_token.blocking_write() = CancellationToken::new();
         self.interrupted.store(false, Ordering::SeqCst);
+        *self.state.blocking_write() = RunState::Resuming;
+        self.event_bus.publish(Event::Run(RunEvent::Resuming {
+            run_id: run_id.to_string(),
+        }));
         run_id
     }
 

@@ -7629,8 +7629,10 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "zhongshu-core",
 ]
 
@@ -7704,6 +7706,7 @@ dependencies = [
  "serde_json",
  "softbuffer",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "uuid",

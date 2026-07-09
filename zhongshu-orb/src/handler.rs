@@ -11,7 +11,7 @@ use zhongshu_core::agent::{AgentRuntime, ModelRouter};
 use zhongshu_core::authority;
 use zhongshu_core::event::{
     AgentEvent, AgentState, Event, EventBus, EventRx, HarnessUiEvent, MessageId, ResponseEvent,
-    ResponseRole, ResponseRx, ResponseTx, TaskEvent, ToolEvent,
+    ResponseRole, ResponseRx, ResponseTx, RunEvent, TaskEvent, ToolEvent,
 };
 use zhongshu_core::integration::DeeplosslessProxy;
 use zhongshu_message_core::streaming::ControlTokenFilter;
@@ -20,6 +20,8 @@ use crate::app::{AgentController, AgentInbox};
 use crate::config::AppConfig;
 use crate::hotkey::HotkeyManager;
 use crate::indicator::Indicator;
+use uuid::Uuid;
+
 use crate::overlay::{AuthRequest, OverlayHandle};
 use crate::overlay_contract::{
     chat_coding_smoke_commands, chat_coding_smoke_events, CodingUiEvent, OverlayToUiEvent,
@@ -74,6 +76,7 @@ pub struct ZhongshuApp {
     pub worker_base_tools: ToolRegistry,
     pub overlay_zoomed: bool,
     pub auth_watch: watch::Receiver<Option<zhongshu_core::authority::PendingRequest>>,
+    pub active_run_id: Uuid,
 }
 
 impl ZhongshuApp {
@@ -131,6 +134,7 @@ impl ZhongshuApp {
             worker_base_tools,
             overlay_zoomed: false,
             auth_watch,
+            active_run_id: Uuid::new_v4(),
         })
     }
 
@@ -143,6 +147,10 @@ impl ZhongshuApp {
         if activity {
             self.last_activity = Instant::now();
         }
+    }
+
+    pub fn update_active_run_id(&mut self, run_id: Uuid) {
+        self.active_run_id = run_id;
     }
 
     /// Poll pending actions from overlay IPC.
@@ -821,6 +829,27 @@ impl ZhongshuApp {
                                 }
                             }
                         }
+                        Event::Run(run_event) => match run_event {
+                            RunEvent::Interrupted { .. } => {
+                                if let Some(ref ov) = self.overlay {
+                                    ov.toast("已按你的新消息暂停当前步骤。");
+                                    ov.set_state("paused");
+                                }
+                            }
+                            RunEvent::Resuming { .. } => {
+                                if let Some(ref ov) = self.overlay {
+                                    ov.toast("正在按新约束重新调整。");
+                                    ov.set_state("thinking");
+                                }
+                            }
+                            RunEvent::Cancelled { .. } => {
+                                if let Some(ref ov) = self.overlay {
+                                    ov.toast("已停止后续操作。");
+                                    ov.set_state("idle");
+                                }
+                            }
+                            _ => {}
+                        }
                         _ => {}
                     }
                 }
@@ -840,7 +869,10 @@ impl ZhongshuApp {
         while let Ok(ev) = self.response_rx.try_recv() {
             active = true;
             match ev {
-                ResponseEvent::MessageStarted { id, role, .. } => {
+                ResponseEvent::MessageStarted { id, role, run_id } => {
+                    if run_id != self.active_run_id {
+                        continue;
+                    }
                     if matches!(role, ResponseRole::Assistant) {
                         self.assistant_id = Some(id);
                         if let Some(ref ov) = self.overlay {
@@ -852,7 +884,10 @@ impl ZhongshuApp {
                         self.filter = ControlTokenFilter::new();
                     }
                 }
-                ResponseEvent::MessageDelta { id, delta, .. } => {
+                ResponseEvent::MessageDelta { id, delta, run_id } => {
+                    if run_id != self.active_run_id {
+                        continue;
+                    }
                     if self.assistant_id.map(|aid| aid == id).unwrap_or(false) {
                         let cleaned = self.filter.feed(&delta);
                         if !cleaned.is_empty() {
@@ -862,7 +897,10 @@ impl ZhongshuApp {
                         }
                     }
                 }
-                ResponseEvent::MessageCompleted { id, .. } => {
+                ResponseEvent::MessageCompleted { id, run_id } => {
+                    if run_id != self.active_run_id {
+                        continue;
+                    }
                     if self.assistant_id.map(|aid| aid == id).unwrap_or(false) {
                         if let Some(ref ov) = self.overlay {
                             ov.complete_message();

@@ -64,7 +64,7 @@ impl Tool for WebFetchTool {
                 "url": url,
                 "warning": format!("目标网站返回了安全验证页面（{reason}），无法获取实际内容"),
                 "note": "这个网站有反爬机制，可能需要在真实的浏览器中打开。",
-            }));
+            })).external();
         }
 
         let raw = arguments["raw"].as_bool().unwrap_or(false);
@@ -87,7 +87,7 @@ impl Tool for WebFetchTool {
             "url": url,
             "content": truncated,
             "chars": truncated.len(),
-        }))
+        })).external()
     }
 }
 

@@ -121,7 +121,7 @@ impl Tool for BrowserAutomationTool {
         match result {
             Ok(mut v) => {
                 v["risk"] = json!(classify_browser_action_risk(action));
-                ToolOutput::success(v)
+                ToolOutput::success(v).external()
             }
             Err(e) => ToolOutput::error(format!("浏览器自动化失败: {e}")),
         }
@@ -351,6 +351,11 @@ async fn select_option(args: &Value) -> anyhow::Result<Value> {
     })))
 }
 
+fn screenshots_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".config/zhongshu/screenshots")
+}
+
 async fn screenshot(_args: &Value) -> anyhow::Result<Value> {
     let mut browser = ensure_browser().await?;
     let browser = browser.as_mut().expect("browser initialized");
@@ -362,15 +367,67 @@ async fn screenshot(_args: &Value) -> anyhow::Result<Value> {
             json!({"format":"png"}),
         )
         .await?;
-    let data = result["data"].as_str().unwrap_or("");
-    let preview_len = data.len().min(200);
+    let data = result["result"]["data"].as_str().unwrap_or("");
+    if data.is_empty() {
+        return Err(anyhow::anyhow!("screenshot returned no data"));
+    }
+    let decoded = decode_base64(data).map_err(|e| anyhow::anyhow!("base64 decode failed: {e}"))?;
+    let dir = screenshots_dir();
+    std::fs::create_dir_all(&dir)?;
+    let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let path = dir.join(format!("browser_screenshot_{ts}.png"));
+    std::fs::write(&path, &decoded)?;
+    let path_str = path.to_string_lossy().into_owned();
     Ok(sanitize_external_value(json!({
         "action": "screenshot",
         "tab_id": tab.id,
+        "path": path_str,
         "mime": "image/png",
-        "data_length": data.len(),
-        "base64_preview": &data[..preview_len],
+        "file_size_bytes": decoded.len(),
+        "note": "Screenshot saved to disk. The model cannot see the image directly — describe the image content based on your knowledge or use eval to inspect the page.",
     })))
+}
+
+/// Minimal inline base64 decoder (no new dependencies).
+fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
+    let clean: String = input.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    if clean.is_empty() {
+        return Ok(Vec::new());
+    }
+    if clean.len() % 4 != 0 {
+        return Err("invalid base64 length".into());
+    }
+    let table: Vec<i8> = {
+        let mut t = vec![-1i8; 128];
+        for (i, ch) in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".chars().enumerate() {
+            if ch as usize <= 127 { t[ch as usize] = i as i8; }
+        }
+        t['=' as usize] = 0;
+        t
+    };
+    let mut result = Vec::with_capacity(clean.len() / 4 * 3);
+    let bytes: Vec<u8> = clean.bytes().collect();
+    for chunk in bytes.chunks(4) {
+        if chunk.len() != 4 {
+            return Err("invalid base64 chunk".into());
+        }
+        let mut vals = [0u32; 4];
+        for (i, &b) in chunk.iter().enumerate() {
+            if b as usize >= 128 { return Err("invalid base64 character".into()); }
+            let v = table[b as usize];
+            if v < 0 { return Err("invalid base64 character".into()); }
+            vals[i] = v as u32;
+        }
+        let triple = (vals[0] << 18) | (vals[1] << 12) | (vals[2] << 6) | vals[3];
+        result.push((triple >> 16) as u8);
+        if chunk[2] != b'=' {
+            result.push((triple >> 8) as u8);
+        }
+        if chunk[3] != b'=' {
+            result.push(triple as u8);
+        }
+    }
+    Ok(result)
 }
 
 async fn console_messages(_args: &Value) -> anyhow::Result<Value> {
@@ -714,6 +771,25 @@ mod tests {
         assert_eq!(tab.title, "T");
         assert_eq!(tab.url, "https://example.com");
         assert_eq!(tab.websocket_url, "ws://127.0.0.1/devtools/page/1");
+    }
+
+    #[test]
+    fn base64_decode_decodes_standard_input() {
+        assert_eq!(
+            decode_base64("aGVsbG8=").unwrap(),
+            b"hello"
+        );
+        assert_eq!(
+            decode_base64("5Lit5paH").unwrap(),
+            "中文".as_bytes()
+        );
+        assert!(decode_base64("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn base64_decode_rejects_invalid() {
+        assert!(decode_base64("!!!").is_err());
+        assert!(decode_base64("aGVsbG8!!!!").is_err());
     }
 
     #[test]

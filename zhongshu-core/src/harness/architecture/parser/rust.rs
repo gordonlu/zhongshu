@@ -91,6 +91,49 @@ fn path_to_string(path: &syn::Path) -> String {
         .join("::")
 }
 
+/// Expand a use tree into individual leaf import paths.
+/// Handles grouped imports (`a::{b, c}`), aliases (`a as b` → `a`),
+/// and globs (`a::*`).
+pub fn expanded_rust_imports(content: &str) -> Vec<String> {
+    let ast: syn::File = match syn::parse_file(content) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let mut result = Vec::new();
+    for item in &ast.items {
+        if let syn::Item::Use(u) = item {
+            collect_expanded(&u.tree, String::new(), &mut result);
+        }
+    }
+    result
+}
+
+fn collect_expanded(tree: &UseTree, prefix: String, result: &mut Vec<String>) {
+    match tree {
+        UseTree::Path(p) => {
+            let seg = p.ident.to_string();
+            let new_prefix = if prefix.is_empty() { seg } else { format!("{prefix}::{seg}") };
+            collect_expanded(&p.tree, new_prefix, result);
+        }
+        UseTree::Name(n) => {
+            let name = n.ident.to_string();
+            result.push(if prefix.is_empty() { name } else { format!("{prefix}::{name}") });
+        }
+        UseTree::Rename(r) => {
+            let name = r.ident.to_string();
+            result.push(if prefix.is_empty() { name } else { format!("{prefix}::{name}") });
+        }
+        UseTree::Glob(_) => {
+            result.push(format!("{prefix}::*"));
+        }
+        UseTree::Group(g) => {
+            for item in &g.items {
+                collect_expanded(item, prefix.clone(), result);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

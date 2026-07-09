@@ -13,3 +13,5 @@ pub mod rust_ast;
 pub mod semantic;
 pub mod symbol;
 pub mod violation;
+
+pub mod boundary;

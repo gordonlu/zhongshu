@@ -37,6 +37,7 @@ impl LayerGraph {
     pub fn default() -> Self {
         let mut g = LayerGraph::new();
         g.add_layer("orb", "zhongshu-orb/src/**/*.rs");
+        g.add_layer("core_db", "zhongshu-core/src/core/db/**/*.rs");
         g.add_layer("core", "zhongshu-core/src/**/*.rs");
         g
     }

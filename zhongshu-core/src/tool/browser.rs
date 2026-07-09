@@ -70,7 +70,7 @@ impl Tool for BrowserTool {
                 "warning": format!("目标网站返回了安全验证页面（{reason}），无法获取内容"),
                 "note": "该网站有反爬机制，已在默认浏览器中打开，你可以直接查看。",
                 "opened_browser": open_browser,
-            }));
+            })).external();
         }
 
         let raw = arguments["raw"].as_bool().unwrap_or(false);
@@ -98,7 +98,7 @@ impl Tool for BrowserTool {
             "content": truncated,
             "chars": truncated.len(),
             "browser_opened": open_browser,
-        }))
+        })).external()
     }
 }
 

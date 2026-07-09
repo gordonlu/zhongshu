@@ -613,6 +613,15 @@ fn proof_check_specs() -> Vec<CheckSpec> {
             skip_reason: None,
         },
         CheckSpec {
+            id: "architecture-boundary",
+            title: "Architecture boundary check",
+            command: vec!["cargo", "test", "-p", "zhongshu-core", "--lib", "harness::architecture::boundary::tests"],
+            areas: &[],
+            modes: &[ProofMode::Local, ProofMode::Pr, ProofMode::Baseline, ProofMode::Release],
+            requires_loopback_bind: false,
+            skip_reason: None,
+        },
+        CheckSpec {
             id: "git-diff-check",
             title: "Git whitespace check",
             command: vec!["git", "diff", "--check"],

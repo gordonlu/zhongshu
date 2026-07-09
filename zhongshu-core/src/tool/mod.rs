@@ -23,7 +23,8 @@ pub use executor::{
 };
 use serde::{Deserialize, Serialize};
 pub use spec::{
-    ObservableToolInput, ToolEffect, ToolReplayKey, ToolResultSummary, ToolSpec, WorkspaceScope,
+    infer_side_effect, ObservableToolInput, SideEffect, ToolEffect, ToolReplayKey,
+    ToolResultSummary, ToolSpec, WorkspaceScope,
 };
 use std::collections::HashMap;
 use std::sync::Arc;

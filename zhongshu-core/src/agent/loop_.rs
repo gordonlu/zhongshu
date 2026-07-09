@@ -5,7 +5,7 @@ use crate::agent::llm::{Message, StreamEvent, StreamToolCall, ToolCall};
 use crate::agent::runtime::AgentRuntime;
 use crate::core::context::ContextPack;
 use crate::harness::trace::event::HarnessEvent;
-use crate::tool::{ToolOutput, ToolStatus};
+use crate::tool::{infer_side_effect, SideEffect, ToolOutput, ToolStatus};
 use anyhow::Context;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
@@ -394,6 +394,38 @@ pub async fn run_agent(
                     }
                 }
             };
+
+            // Interruption handling: check cancellation status and side effect
+            if cancel_token.is_cancelled() {
+                let side_effect = runtime
+                    .registry
+                    .get(&tc.function.name)
+                    .map(|t| t.spec().side_effect)
+                    .unwrap_or_else(|| infer_side_effect(&tc.function.name));
+                match side_effect {
+                    SideEffect::ReadOnly => {
+                        // Fast read-only: accept result if tool already completed
+                    }
+                    SideEffect::LocalWrite | SideEffect::SystemChange
+                    | SideEffect::ExternalAction | SideEffect::Irreversible => {
+                        // Force pause: tool output is NOT applied automatically
+                        // Override output to signal interruption — loop continues but
+                        // the LLM sees a failure observation.
+                        let interrupted = ToolOutput::error(format!(
+                            "{} 被用户中断。此操作未执行。",
+                            tc.function.name
+                        ));
+                        // Interrupted tools do not count as tool failures for recovery
+                        // (consecutive_failures is not incremented for these)
+                        messages.push(Message::tool_result(
+                            &tc.id,
+                            interrupted.render_observation(&tc.function.name),
+                        ));
+                        continue;
+                    }
+                }
+            }
+
             let tool_success = matches!(output.status, ToolStatus::Success);
             let exit_code = tool_exit_code(&output);
             record_trace(

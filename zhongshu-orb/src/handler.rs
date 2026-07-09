@@ -78,7 +78,7 @@ pub struct ZhongshuApp {
     pub overlay_zoomed: bool,
     pub auth_watch: watch::Receiver<Option<zhongshu_core::authority::PendingRequest>>,
     pub run_controller: Arc<RunController>,
-    pub active_run_id: Uuid,
+    pub active_run_id: Option<Uuid>,
 }
 
 impl ZhongshuApp {
@@ -138,7 +138,7 @@ impl ZhongshuApp {
             overlay_zoomed: false,
             auth_watch,
             run_controller,
-            active_run_id: Uuid::new_v4(),
+            active_run_id: None,
         })
     }
 
@@ -153,9 +153,12 @@ impl ZhongshuApp {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn update_active_run_id(&mut self, run_id: Uuid) {
-        self.active_run_id = run_id;
+    pub fn sync_active_run_id(&mut self) {
+        let prev = self.active_run_id;
+        self.active_run_id = self.run_controller.run_id();
+        if prev != self.active_run_id {
+            tracing::debug!(?self.active_run_id, "active_run_id synced");
+        }
     }
 
     /// Poll pending actions from overlay IPC.
@@ -878,13 +881,25 @@ impl ZhongshuApp {
 
     fn reduce_responses(&mut self) -> bool {
         let mut active = false;
+        self.sync_active_run_id();
         while let Ok(ev) = self.response_rx.try_recv() {
             active = true;
+            let accept = match self.active_run_id {
+                Some(rid) => {
+                    let ev_rid = match ev {
+                        ResponseEvent::MessageStarted { ref run_id, .. }
+                        | ResponseEvent::MessageDelta { ref run_id, .. }
+                        | ResponseEvent::MessageCompleted { ref run_id, .. } => run_id,
+                    };
+                    *ev_rid == rid
+                }
+                None => true,
+            };
+            if !accept {
+                continue;
+            }
             match ev {
-                ResponseEvent::MessageStarted { id, role, run_id } => {
-                    if run_id != self.active_run_id {
-                        continue;
-                    }
+                ResponseEvent::MessageStarted { id, role, .. } => {
                     if matches!(role, ResponseRole::Assistant) {
                         self.assistant_id = Some(id);
                         if let Some(ref ov) = self.overlay {
@@ -896,10 +911,7 @@ impl ZhongshuApp {
                         self.filter = ControlTokenFilter::new();
                     }
                 }
-                ResponseEvent::MessageDelta { id, delta, run_id } => {
-                    if run_id != self.active_run_id {
-                        continue;
-                    }
+                ResponseEvent::MessageDelta { id, delta, .. } => {
                     if self.assistant_id.map(|aid| aid == id).unwrap_or(false) {
                         let cleaned = self.filter.feed(&delta);
                         if !cleaned.is_empty() {
@@ -909,10 +921,7 @@ impl ZhongshuApp {
                         }
                     }
                 }
-                ResponseEvent::MessageCompleted { id, run_id } => {
-                    if run_id != self.active_run_id {
-                        continue;
-                    }
+                ResponseEvent::MessageCompleted { id, .. } => {
                     if self.assistant_id.map(|aid| aid == id).unwrap_or(false) {
                         if let Some(ref ov) = self.overlay {
                             ov.complete_message();

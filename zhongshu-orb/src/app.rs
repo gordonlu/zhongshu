@@ -571,6 +571,9 @@ impl AgentController {
             )
             .await;
 
+            let mut stop_reason = "completed".to_string();
+            let mut overall_success = true;
+
             match r {
                 Ok(Ok(rr)) => {
                     let conversation_id = proxy.lock().await.current_conv_id().await;
@@ -837,6 +840,8 @@ impl AgentController {
                     memory.extract_goal_completions(last);
                     // Archive old completed goals to keep the list bounded.
                     memory.archive_completed_goals(KEEP_COMPLETED_GOALS);
+                    stop_reason = "completed".to_string();
+                    overall_success = true;
                     let _ = tx.send(ResponseEvent::MessageCompleted { id: aid, run_id }).await;
                     eb.publish(Event::Agent(AgentEvent::StateChanged {
                         from: AgentState::Thinking,
@@ -845,6 +850,8 @@ impl AgentController {
                 }
                 Ok(Err(e)) => {
                     tracing::error!("agent run failed: {e:#}");
+                    stop_reason = "error".to_string();
+                    overall_success = false;
                     let _ = tx
                         .send(ResponseEvent::MessageDelta {
                             id: aid,
@@ -860,6 +867,8 @@ impl AgentController {
                 }
                 Err(_) => {
                     tracing::warn!("agent task timed out after 300s");
+                    stop_reason = "timeout".to_string();
+                    overall_success = false;
                     let _ = tx
                         .send(ResponseEvent::MessageDelta {
                             id: aid,
@@ -877,321 +886,380 @@ impl AgentController {
 
             // ── Recovery after interruption ──────────────────────────
             if rc.is_interrupted() {
-                if let Some(prompt) = rc.build_recovery_prompt() {
-                    tracing::info!("agent interrupted, performing recovery re-run");
-                    let recovery_input = format!(
-                        "[恢复]\n用户插话。请你先自然回应新消息，然后根据当前状态决定是继续还是调整方案。\n\n{prompt}"
-                    );
-                    if let Ok((recovery_pack, _)) = ContextPackBuilder::new()
-                        .stable_system(sys)
-                        .state(recovery_state)
-                        .with_evidence(Vec::new())
-                        .with_recent(recovery_recent)
-                        .input(recovery_input)
-                        .build(max_ctx as usize)
-                    {
-                        rc.set_state(zhongshu_core::agent::run::RunState::Resuming);
-                        let _new_rid = rc.begin_resume();
-                        let new_tn = Arc::new(Mutex::new(Vec::<String>::new()));
-                        let new_callbacks = AgentCallbacks {
-                            on_text: {
-                                let tx = tx.clone();
-                                Box::new(move |x: &str| {
-                                    if !x.is_empty() {
-                                        let _ = tx.try_send(ResponseEvent::MessageDelta {
-                                            id: aid,
-                                            delta: x.to_string(),
-                                            run_id,
-                                        });
-                                    }
-                                })
-                            },
-                            on_tool_start: {
-                                let run_id = run_id.to_string();
-                                let eb1 = eb.clone();
-                                Box::new(move |name: &str| {
-                                    eb1.publish(Event::Tool(ToolEvent::Started {
-                                        name: name.to_string(),
-                                        run_id: run_id.clone(),
-                                    }));
-                                })
-                            },
-                            on_tool_done: {
-                                let run_id = run_id.to_string();
-                                let eb2 = eb.clone();
-                                Box::new(move |name: &str, ok: bool| {
-                                    eb2.publish(Event::Tool(ToolEvent::Completed {
-                                        name: name.to_string(),
-                                        success: ok,
-                                        run_id: run_id.clone(),
-                                    }));
-                                })
-                            },
-                            run_id,
-                        };
-                        let new_token = rc.cancel_token();
-                        let mut recovery_runtime = AgentRuntime::with_llm(
-                            recovery_provider,
-                            recovery_model,
-                            recovery_tools,
-                            recovery_budget,
-                        );
-                        recovery_runtime.reasoning_effort = recovery_reasoning;
-                        let r2 = tokio::time::timeout(
-                            AGENT_TIMEOUT,
-                            run_agent_with_context(
-                                &mut recovery_runtime,
-                                recovery_pack,
-                                Some(Arc::new(new_callbacks)),
-                                &input,
-                                new_token,
-                            ),
-                        )
-                        .await;
-                        match r2 {
-                            Ok(Ok(rr)) => {
-                                let conversation_id = proxy.lock().await.current_conv_id().await;
-                                persist_trace_runbook(
-                                    core_db_path.clone(),
-                                    &input,
-                                    &rr.trace_events,
-                                    conversation_id,
-                                );
-                                for event in &rr.trace_events {
-                                    match event {
-                                        zhongshu_core::harness::trace::event::HarnessEvent::CodingSessionStarted {
-                                            session_id, trace_id, intent, model,
-                                            deeplossless_conversation_id,
-                                            deeplossless_replay_execution_id, ..
-                                        } => {
-                                            eb.publish(Event::Harness(HarnessUiEvent::CodingSessionStarted {
-                                                session_id: session_id.clone(),
-                                                trace_id: trace_id.clone(),
-                                                intent: intent.clone(),
-                                                model: model.clone(),
-                                                deeplossless_conversation_id: *deeplossless_conversation_id,
-                                                deeplossless_replay_execution_id: deeplossless_replay_execution_id.clone(),
-                                            }));
-                                        }
-                                        zhongshu_core::harness::trace::event::HarnessEvent::CodingPlanCreated {
-                                            session_id, step_count, risk,
-                                        } => {
-                                            eb.publish(Event::Harness(HarnessUiEvent::CodingPlanCreated {
-                                                session_id: session_id.clone(),
-                                                step_count: *step_count,
-                                                risk: risk.clone(),
-                                            }));
-                                        }
-                                        zhongshu_core::harness::trace::event::HarnessEvent::CodingStepStarted {
-                                            session_id, step_id, kind: _, title,
-                                        } => {
-                                            eb.publish(Event::Harness(HarnessUiEvent::CodingStepStarted {
-                                                session_id: session_id.clone(),
-                                                step_id: step_id.clone(),
-                                                kind: String::new(),
-                                                title: title.clone(),
-                                            }));
-                                        }
-                                        zhongshu_core::harness::trace::event::HarnessEvent::CodingStepCompleted {
-                                            session_id, step_id, status,
-                                        } => {
-                                            eb.publish(Event::Harness(HarnessUiEvent::CodingStepCompleted {
-                                                session_id: session_id.clone(),
-                                                step_id: step_id.clone(),
-                                                status: status.clone(),
-                                            }));
-                                        }
-                                        zhongshu_core::harness::trace::event::HarnessEvent::WorkerStarted {
-                                            session_id, worker, task_id, owned_files,
-                                        } => {
-                                            eb.publish(Event::Harness(HarnessUiEvent::WorkerStarted {
-                                                session_id: session_id.clone(),
-                                                worker: worker.clone(),
-                                                task_id: task_id.clone(),
-                                                owned_files: owned_files.iter().map(|p| p.clone()).collect(),
-                                            }));
-                                        }
-                                        zhongshu_core::harness::trace::event::HarnessEvent::WorkerCompleted {
-                                            session_id, worker, task_id, success,
-                                            trace_event_count,
-                                        } => {
-                                            eb.publish(Event::Harness(HarnessUiEvent::WorkerCompleted {
-                                                session_id: session_id.clone(),
-                                                worker: worker.clone(),
-                                                task_id: task_id.clone(),
-                                                success: *success,
-                                                trace_event_count: *trace_event_count,
-                                            }));
-                                        }
-                                        zhongshu_core::harness::trace::event::HarnessEvent::WorkerConflict {
-                                            session_id, worker, task_id, reason,
-                                        } => {
-                                            eb.publish(Event::Harness(HarnessUiEvent::WorkerConflict {
-                                                session_id: session_id.clone(),
-                                                worker: worker.clone(),
-                                                task_id: task_id.clone(),
-                                                reason: reason.clone(),
-                                            }));
-                                        }
-                                        zhongshu_core::harness::trace::event::HarnessEvent::PatchPreview {
-                                            session_id, path, operation, diff_summary, diff,
-                                        } => {
-                                            eb.publish(Event::Harness(HarnessUiEvent::PatchPreview {
-                                                session_id: session_id.clone(),
-                                                path: path.clone(),
-                                                operation: operation.clone(),
-                                                diff_summary: diff_summary.clone(),
-                                                diff: diff.clone().map(Into::into),
-                                            }));
-                                        }
-                                        zhongshu_core::harness::trace::event::HarnessEvent::PatchApplied {
-                                            session_id, path, operation, changed,
-                                        } => {
-                                            eb.publish(Event::Harness(HarnessUiEvent::PatchApplied {
-                                                session_id: session_id.clone(),
-                                                path: path.clone(),
-                                                operation: operation.clone(),
-                                                changed: *changed,
-                                            }));
-                                        }
-                                        zhongshu_core::harness::trace::event::HarnessEvent::FileEdit { path, diff, .. } => {
-                                            let display_path = if path.as_os_str().is_empty() {
-                                                PathBuf::from("workspace")
-                                            } else {
-                                                path.clone()
-                                            };
-                                            eb.publish(Event::Harness(HarnessUiEvent::PatchPreview {
-                                                session_id: None,
-                                                path: display_path,
-                                                operation: "file_edit".into(),
-                                                diff_summary: diff.as_deref()
-                                                    .unwrap_or("mutation without captured diff")
-                                                    .lines().next()
-                                                    .unwrap_or("mutation without captured diff")
-                                                    .to_string(),
-                                                diff: file_edit_patch_payload(diff.as_ref()),
-                                            }));
-                                        }
-                                        zhongshu_core::harness::trace::event::HarnessEvent::ContextIncluded {
-                                            description, estimated_tokens,
-                                        } => {
-                                            eb.publish(Event::Harness(HarnessUiEvent::ContextIncluded {
-                                                description: description.clone(),
-                                                estimated_tokens: *estimated_tokens,
-                                            }));
-                                        }
-                                        zhongshu_core::harness::trace::event::HarnessEvent::ContextPressure {
-                                            pressure_percent, dropped_evidence, dropped_recent,
-                                        } => {
-                                            eb.publish(Event::Harness(HarnessUiEvent::ContextPressure {
-                                                pressure_percent: *pressure_percent,
-                                                dropped_evidence: *dropped_evidence,
-                                                dropped_recent: *dropped_recent,
-                                            }));
-                                        }
-                                        zhongshu_core::harness::trace::event::HarnessEvent::ReplayAvailable {
-                                            conversation_id, replay_execution_id,
-                                        } => {
-                                            eb.publish(Event::Harness(HarnessUiEvent::ReplayAvailable {
-                                                conversation_id: *conversation_id,
-                                                replay_execution_id: replay_execution_id.clone(),
-                                            }));
-                                        }
-                                        zhongshu_core::harness::trace::event::HarnessEvent::Verification {
-                                            command, success, exit_code, step,
-                                        } => {
-                                            eb.publish(Event::Harness(HarnessUiEvent::Verification {
-                                                command: command.clone(),
-                                                success: *success,
-                                                exit_code: *exit_code,
-                                                step: *step,
-                                            }));
-                                        }
-                                        zhongshu_core::harness::trace::event::HarnessEvent::RecoveryFeedback {
-                                            rule_id, message,
-                                        } => {
-                                            eb.publish(Event::Harness(HarnessUiEvent::RecoveryFeedback {
-                                                rule_id: rule_id.clone(),
-                                                message: message.clone(),
-                                            }));
-                                        }
-                                        zhongshu_core::harness::trace::event::HarnessEvent::PhaseTransition { from, to } => {
-                                            eb.publish(Event::Harness(HarnessUiEvent::PhaseTransition {
-                                                from: from.clone(),
-                                                to: to.clone(),
-                                            }));
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                let last = rr.messages.last().map(|x| x.content.as_str()).unwrap_or("");
-                                history_arc.lock().unwrap().push(("user".to_string(), input.clone()));
-                                if !last.is_empty() {
-                                    let tools_used = new_tn.lock().unwrap();
-                                    let history_content = if tools_used.is_empty() {
-                                        last.to_string()
-                                    } else {
-                                        let mut deduped: Vec<(&str, u32)> = Vec::new();
-                                        for name in tools_used.iter().map(|s| s.as_str()) {
-                                            if let Some(last) = deduped.last_mut() {
-                                                if last.0 == name { last.1 += 1; continue; }
+                let action = rc.take_last_action();
+                match action {
+                    Some(zhongshu_core::agent::run::InterruptionAction::ContinueWithNote { .. }) => {
+                        if let Some(prompt) = rc.build_recovery_prompt() {
+                            tracing::info!("agent interrupted, performing recovery re-run");
+                            let recovery_input = format!(
+                                "[恢复]\n用户插话。请你先自然回应新消息，然后根据当前状态决定是继续还是调整方案。\n\n{prompt}"
+                            );
+                            if let Ok((recovery_pack, _)) = ContextPackBuilder::new()
+                                .stable_system(sys)
+                                .state(recovery_state)
+                                .with_evidence(Vec::new())
+                                .with_recent(recovery_recent)
+                                .input(recovery_input)
+                                .build(max_ctx as usize)
+                            {
+                                rc.set_state(zhongshu_core::agent::run::RunState::Resuming);
+                                let _run_id = rc.begin_resume();
+                                let new_tn = Arc::new(Mutex::new(Vec::<String>::new()));
+                                let new_callbacks = AgentCallbacks {
+                                    on_text: {
+                                        let tx = tx.clone();
+                                        Box::new(move |x: &str| {
+                                            if !x.is_empty() {
+                                                let _ = tx.try_send(ResponseEvent::MessageDelta {
+                                                    id: aid,
+                                                    delta: x.to_string(),
+                                                    run_id,
+                                                });
                                             }
-                                            deduped.push((name, 1));
+                                        })
+                                    },
+                                    on_tool_start: {
+                                        let run_id = run_id.to_string();
+                                        let eb1 = eb.clone();
+                                        Box::new(move |name: &str| {
+                                            eb1.publish(Event::Tool(ToolEvent::Started {
+                                                name: name.to_string(),
+                                                run_id: run_id.clone(),
+                                            }));
+                                        })
+                                    },
+                                    on_tool_done: {
+                                        let run_id = run_id.to_string();
+                                        let eb2 = eb.clone();
+                                        Box::new(move |name: &str, ok: bool| {
+                                            eb2.publish(Event::Tool(ToolEvent::Completed {
+                                                name: name.to_string(),
+                                                success: ok,
+                                                run_id: run_id.clone(),
+                                            }));
+                                        })
+                                    },
+                                    run_id,
+                                };
+                                let new_token = rc.cancel_token();
+                                let mut recovery_runtime = AgentRuntime::with_llm(
+                                    recovery_provider,
+                                    recovery_model,
+                                    recovery_tools,
+                                    recovery_budget,
+                                );
+                                recovery_runtime.reasoning_effort = recovery_reasoning;
+                                let r2 = tokio::time::timeout(
+                                    AGENT_TIMEOUT,
+                                    run_agent_with_context(
+                                        &mut recovery_runtime,
+                                        recovery_pack,
+                                        Some(Arc::new(new_callbacks)),
+                                        &input,
+                                        new_token,
+                                    ),
+                                )
+                                .await;
+                                match r2 {
+                                    Ok(Ok(rr)) => {
+                                        let conversation_id = proxy.lock().await.current_conv_id().await;
+                                        persist_trace_runbook(
+                                            core_db_path.clone(),
+                                            &input,
+                                            &rr.trace_events,
+                                            conversation_id,
+                                        );
+                                        for event in &rr.trace_events {
+                                            match event {
+                                                zhongshu_core::harness::trace::event::HarnessEvent::CodingSessionStarted {
+                                                    session_id, trace_id, intent, model,
+                                                    deeplossless_conversation_id,
+                                                    deeplossless_replay_execution_id, ..
+                                                } => {
+                                                    eb.publish(Event::Harness(HarnessUiEvent::CodingSessionStarted {
+                                                        session_id: session_id.clone(),
+                                                        trace_id: trace_id.clone(),
+                                                        intent: intent.clone(),
+                                                        model: model.clone(),
+                                                        deeplossless_conversation_id: *deeplossless_conversation_id,
+                                                        deeplossless_replay_execution_id: deeplossless_replay_execution_id.clone(),
+                                                    }));
+                                                }
+                                                zhongshu_core::harness::trace::event::HarnessEvent::CodingPlanCreated {
+                                                    session_id, step_count, risk,
+                                                } => {
+                                                    eb.publish(Event::Harness(HarnessUiEvent::CodingPlanCreated {
+                                                        session_id: session_id.clone(),
+                                                        step_count: *step_count,
+                                                        risk: risk.clone(),
+                                                    }));
+                                                }
+                                                zhongshu_core::harness::trace::event::HarnessEvent::CodingStepStarted {
+                                                    session_id, step_id, kind: _, title,
+                                                } => {
+                                                    eb.publish(Event::Harness(HarnessUiEvent::CodingStepStarted {
+                                                        session_id: session_id.clone(),
+                                                        step_id: step_id.clone(),
+                                                        kind: String::new(),
+                                                        title: title.clone(),
+                                                    }));
+                                                }
+                                                zhongshu_core::harness::trace::event::HarnessEvent::CodingStepCompleted {
+                                                    session_id, step_id, status,
+                                                } => {
+                                                    eb.publish(Event::Harness(HarnessUiEvent::CodingStepCompleted {
+                                                        session_id: session_id.clone(),
+                                                        step_id: step_id.clone(),
+                                                        status: status.clone(),
+                                                    }));
+                                                }
+                                                zhongshu_core::harness::trace::event::HarnessEvent::WorkerStarted {
+                                                    session_id, worker, task_id, owned_files,
+                                                } => {
+                                                    eb.publish(Event::Harness(HarnessUiEvent::WorkerStarted {
+                                                        session_id: session_id.clone(),
+                                                        worker: worker.clone(),
+                                                        task_id: task_id.clone(),
+                                                        owned_files: owned_files.iter().map(|p| p.clone()).collect(),
+                                                    }));
+                                                }
+                                                zhongshu_core::harness::trace::event::HarnessEvent::WorkerCompleted {
+                                                    session_id, worker, task_id, success,
+                                                    trace_event_count,
+                                                } => {
+                                                    eb.publish(Event::Harness(HarnessUiEvent::WorkerCompleted {
+                                                        session_id: session_id.clone(),
+                                                        worker: worker.clone(),
+                                                        task_id: task_id.clone(),
+                                                        success: *success,
+                                                        trace_event_count: *trace_event_count,
+                                                    }));
+                                                }
+                                                zhongshu_core::harness::trace::event::HarnessEvent::WorkerConflict {
+                                                    session_id, worker, task_id, reason,
+                                                } => {
+                                                    eb.publish(Event::Harness(HarnessUiEvent::WorkerConflict {
+                                                        session_id: session_id.clone(),
+                                                        worker: worker.clone(),
+                                                        task_id: task_id.clone(),
+                                                        reason: reason.clone(),
+                                                    }));
+                                                }
+                                                zhongshu_core::harness::trace::event::HarnessEvent::PatchPreview {
+                                                    session_id, path, operation, diff_summary, diff,
+                                                } => {
+                                                    eb.publish(Event::Harness(HarnessUiEvent::PatchPreview {
+                                                        session_id: session_id.clone(),
+                                                        path: path.clone(),
+                                                        operation: operation.clone(),
+                                                        diff_summary: diff_summary.clone(),
+                                                        diff: diff.clone().map(Into::into),
+                                                    }));
+                                                }
+                                                zhongshu_core::harness::trace::event::HarnessEvent::PatchApplied {
+                                                    session_id, path, operation, changed,
+                                                } => {
+                                                    eb.publish(Event::Harness(HarnessUiEvent::PatchApplied {
+                                                        session_id: session_id.clone(),
+                                                        path: path.clone(),
+                                                        operation: operation.clone(),
+                                                        changed: *changed,
+                                                    }));
+                                                }
+                                                zhongshu_core::harness::trace::event::HarnessEvent::FileEdit { path, diff, .. } => {
+                                                    let display_path = if path.as_os_str().is_empty() {
+                                                        PathBuf::from("workspace")
+                                                    } else {
+                                                        path.clone()
+                                                    };
+                                                    eb.publish(Event::Harness(HarnessUiEvent::PatchPreview {
+                                                        session_id: None,
+                                                        path: display_path,
+                                                        operation: "file_edit".into(),
+                                                        diff_summary: diff.as_deref()
+                                                            .unwrap_or("mutation without captured diff")
+                                                            .lines().next()
+                                                            .unwrap_or("mutation without captured diff")
+                                                            .to_string(),
+                                                        diff: file_edit_patch_payload(diff.as_ref()),
+                                                    }));
+                                                }
+                                                zhongshu_core::harness::trace::event::HarnessEvent::ContextIncluded {
+                                                    description, estimated_tokens,
+                                                } => {
+                                                    eb.publish(Event::Harness(HarnessUiEvent::ContextIncluded {
+                                                        description: description.clone(),
+                                                        estimated_tokens: *estimated_tokens,
+                                                    }));
+                                                }
+                                                zhongshu_core::harness::trace::event::HarnessEvent::ContextPressure {
+                                                    pressure_percent, dropped_evidence, dropped_recent,
+                                                } => {
+                                                    eb.publish(Event::Harness(HarnessUiEvent::ContextPressure {
+                                                        pressure_percent: *pressure_percent,
+                                                        dropped_evidence: *dropped_evidence,
+                                                        dropped_recent: *dropped_recent,
+                                                    }));
+                                                }
+                                                zhongshu_core::harness::trace::event::HarnessEvent::ReplayAvailable {
+                                                    conversation_id, replay_execution_id,
+                                                } => {
+                                                    eb.publish(Event::Harness(HarnessUiEvent::ReplayAvailable {
+                                                        conversation_id: *conversation_id,
+                                                        replay_execution_id: replay_execution_id.clone(),
+                                                    }));
+                                                }
+                                                zhongshu_core::harness::trace::event::HarnessEvent::Verification {
+                                                    command, success, exit_code, step,
+                                                } => {
+                                                    eb.publish(Event::Harness(HarnessUiEvent::Verification {
+                                                        command: command.clone(),
+                                                        success: *success,
+                                                        exit_code: *exit_code,
+                                                        step: *step,
+                                                    }));
+                                                }
+                                                zhongshu_core::harness::trace::event::HarnessEvent::RecoveryFeedback {
+                                                    rule_id, message,
+                                                } => {
+                                                    eb.publish(Event::Harness(HarnessUiEvent::RecoveryFeedback {
+                                                        rule_id: rule_id.clone(),
+                                                        message: message.clone(),
+                                                    }));
+                                                }
+                                                zhongshu_core::harness::trace::event::HarnessEvent::PhaseTransition { from, to } => {
+                                                    eb.publish(Event::Harness(HarnessUiEvent::PhaseTransition {
+                                                        from: from.clone(),
+                                                        to: to.clone(),
+                                                    }));
+                                                }
+                                                _ => {}
+                                            }
                                         }
-                                        let badge = deduped.iter()
-                                            .map(|(n, c)| if *c > 1 { format!("✓ {n} ×{c}") } else { format!("✓ {n}") })
-                                            .collect::<Vec<_>>().join(" · ");
-                                        format!("[工具: {badge}]\n\n{last}")
-                                    };
-                                    history_arc.lock().unwrap().push(("assistant".to_string(), history_content));
+                                        let last = rr.messages.last().map(|x| x.content.as_str()).unwrap_or("");
+                                        history_arc.lock().unwrap().push(("user".to_string(), input.clone()));
+                                        if !last.is_empty() {
+                                            let tools_used = new_tn.lock().unwrap();
+                                            let history_content = if tools_used.is_empty() {
+                                                last.to_string()
+                                            } else {
+                                                let mut deduped: Vec<(&str, u32)> = Vec::new();
+                                                for name in tools_used.iter().map(|s| s.as_str()) {
+                                                    if let Some(last) = deduped.last_mut() {
+                                                        if last.0 == name { last.1 += 1; continue; }
+                                                    }
+                                                    deduped.push((name, 1));
+                                                }
+                                                let badge = deduped.iter()
+                                                    .map(|(n, c)| if *c > 1 { format!("✓ {n} ×{c}") } else { format!("✓ {n}") })
+                                                    .collect::<Vec<_>>().join(" · ");
+                                                format!("[工具: {badge}]\n\n{last}")
+                                            };
+                                            history_arc.lock().unwrap().push(("assistant".to_string(), history_content));
+                                        }
+                                        memory.extract_todos(last);
+                                        memory.extract_goal_completions(last);
+                                        memory.archive_completed_goals(KEEP_COMPLETED_GOALS);
+                                        let _ = tx.send(ResponseEvent::MessageCompleted { id: aid, run_id }).await;
+                                        eb.publish(Event::Agent(AgentEvent::StateChanged {
+                                            from: AgentState::Thinking,
+                                            to: AgentState::Done { success: true },
+                                        }));
+                                    }
+                                    Ok(Err(e)) => {
+                                        tracing::error!("recovery agent run failed: {e:#}");
+                                        stop_reason = "recovery_failed".to_string();
+                                        overall_success = false;
+                                        let _ = tx.send(ResponseEvent::MessageDelta {
+                                            id: aid,
+                                            delta: format!("{e:#}"),
+                                            run_id,
+                                        }).await;
+                                        let _ = tx.send(ResponseEvent::MessageCompleted { id: aid, run_id }).await;
+                                        eb.publish(Event::Agent(AgentEvent::StateChanged {
+                                            from: AgentState::Thinking,
+                                            to: AgentState::Done { success: false },
+                                        }));
+                                    }
+                                    Err(_) => {
+                                        tracing::warn!("recovery agent task timed out");
+                                        stop_reason = "recovery_timeout".to_string();
+                                        overall_success = false;
+                                        let _ = tx.send(ResponseEvent::MessageDelta {
+                                            id: aid,
+                                            delta: "[恢复超时]".into(),
+                                            run_id,
+                                        }).await;
+                                        let _ = tx.send(ResponseEvent::MessageCompleted { id: aid, run_id }).await;
+                                        eb.publish(Event::Agent(AgentEvent::StateChanged {
+                                            from: AgentState::Thinking,
+                                            to: AgentState::Done { success: false },
+                                        }));
+                                    }
                                 }
-                                memory.extract_todos(last);
-                                memory.extract_goal_completions(last);
-                                memory.archive_completed_goals(KEEP_COMPLETED_GOALS);
-                                let _ = tx.send(ResponseEvent::MessageCompleted { id: aid, run_id }).await;
-                                eb.publish(Event::Agent(AgentEvent::StateChanged {
-                                    from: AgentState::Thinking,
-                                    to: AgentState::Done { success: true },
-                                }));
-                            }
-                            Ok(Err(e)) => {
-                                tracing::error!("recovery agent run failed: {e:#}");
-                                let _ = tx.send(ResponseEvent::MessageDelta {
-                                    id: aid,
-                                    delta: format!("{e:#}"),
-                                    run_id,
-                                }).await;
-                                let _ = tx.send(ResponseEvent::MessageCompleted { id: aid, run_id }).await;
-                                eb.publish(Event::Agent(AgentEvent::StateChanged {
-                                    from: AgentState::Thinking,
-                                    to: AgentState::Done { success: false },
-                                }));
-                            }
-                            Err(_) => {
-                                tracing::warn!("recovery agent task timed out");
-                                let _ = tx.send(ResponseEvent::MessageDelta {
-                                    id: aid,
-                                    delta: "[恢复超时]".into(),
-                                    run_id,
-                                }).await;
-                                let _ = tx.send(ResponseEvent::MessageCompleted { id: aid, run_id }).await;
-                                eb.publish(Event::Agent(AgentEvent::StateChanged {
-                                    from: AgentState::Thinking,
-                                    to: AgentState::Done { success: false },
-                                }));
                             }
                         }
+                    }
+                    Some(zhongshu_core::agent::run::InterruptionAction::CancelAndReplan { reason }) => {
+                        tracing::info!("interruption cancelled: {reason}");
+                        stop_reason = "cancelled".to_string();
+                        overall_success = false;
+                        let _ = tx.send(ResponseEvent::MessageDelta {
+                            id: aid,
+                            delta: format!("[已停止: {reason}]"),
+                            run_id,
+                        }).await;
+                        let _ = tx.send(ResponseEvent::MessageCompleted { id: aid, run_id }).await;
+                        eb.publish(Event::Agent(AgentEvent::StateChanged {
+                            from: AgentState::Thinking,
+                            to: AgentState::Done { success: false },
+                        }));
+                    }
+                    Some(zhongshu_core::agent::run::InterruptionAction::PauseAndRespond { summary }) => {
+                        tracing::info!("interruption paused: {summary}");
+                        stop_reason = "paused".to_string();
+                        overall_success = true;
+                        let _ = tx.send(ResponseEvent::MessageDelta {
+                            id: aid,
+                            delta: format!("[已暂停: {summary}]"),
+                            run_id,
+                        }).await;
+                        let _ = tx.send(ResponseEvent::MessageCompleted { id: aid, run_id }).await;
+                        eb.publish(Event::Agent(AgentEvent::StateChanged {
+                            from: AgentState::Thinking,
+                            to: AgentState::Done { success: true },
+                        }));
+                    }
+                    Some(zhongshu_core::agent::run::InterruptionAction::RequireConfirmation { question }) => {
+                        tracing::info!("interruption requires confirmation: {question}");
+                        stop_reason = "awaiting_confirmation".to_string();
+                        overall_success = false;
+                        let _ = tx.send(ResponseEvent::MessageDelta {
+                            id: aid,
+                            delta: format!("[需要确认: {question}]"),
+                            run_id,
+                        }).await;
+                        let _ = tx.send(ResponseEvent::MessageCompleted { id: aid, run_id }).await;
+                        eb.publish(Event::Agent(AgentEvent::StateChanged {
+                            from: AgentState::Thinking,
+                            to: AgentState::Done { success: false },
+                        }));
+                    }
+                    None => {
+                        tracing::warn!("interrupted but no action stored — assuming CancelAndReplan");
+                        stop_reason = "cancelled".to_string();
+                        overall_success = false;
                     }
                 }
             }
 
             // Notify run controller of completion (handles state cleanup and events)
-            rc.finish_run("completed").await;
+            rc.finish_run(&stop_reason).await;
 
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             *state_arc.write().await = AgentState::Idle;
             eb.publish(Event::Agent(AgentEvent::StateChanged {
-                from: AgentState::Done { success: true },
+                from: AgentState::Done { success: overall_success },
                 to: AgentState::Idle,
             }));
         });

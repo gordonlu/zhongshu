@@ -67,15 +67,14 @@ pub struct RunController {
     interruption_ctx: Arc<Mutex<Option<InterruptionCtx>>>,
     original_goal: Arc<RwLock<String>>,
     event_bus: Arc<EventBus>,
-    #[allow(dead_code)]
-    response_tx: mpsc::Sender<ResponseEvent>,
+    last_action: std::sync::Mutex<Option<InterruptionAction>>,
     interrupted: Arc<AtomicBool>,
 }
 
 impl RunController {
     pub fn new(
         event_bus: Arc<EventBus>,
-        response_tx: mpsc::Sender<ResponseEvent>,
+        _response_tx: mpsc::Sender<ResponseEvent>,
     ) -> Self {
         Self {
             run_id: Arc::new(RwLock::new(None)),
@@ -87,9 +86,13 @@ impl RunController {
             interruption_ctx: Arc::new(Mutex::new(None)),
             original_goal: Arc::new(RwLock::new(String::new())),
             event_bus,
-            response_tx,
+            last_action: std::sync::Mutex::new(None),
             interrupted: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn take_last_action(&self) -> Option<InterruptionAction> {
+        self.last_action.lock().unwrap().take()
     }
 
     pub fn start_run(&self, goal: &str) -> Uuid {
@@ -201,7 +204,9 @@ impl RunController {
         let intent = intent_classify(user_message);
 
         // Determine action
-        self.determine_action(intent, &state_str, tool.as_ref())
+        let action = self.determine_action(intent, &state_str, tool.as_ref());
+        *self.last_action.lock().unwrap() = Some(action.clone());
+        action
     }
 
     fn determine_action(
@@ -316,8 +321,7 @@ impl RunController {
     }
 
     pub fn begin_resume(&self) -> Uuid {
-        let run_id = Uuid::new_v4();
-        *self.run_id.blocking_write() = Some(run_id);
+        let run_id = self.run_id.blocking_read().unwrap_or_else(Uuid::new_v4);
         *self.cancel_token.blocking_write() = CancellationToken::new();
         self.interrupted.store(false, Ordering::SeqCst);
         run_id

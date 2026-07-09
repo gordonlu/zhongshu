@@ -1,5 +1,6 @@
 pub mod attention;
 pub mod intent;
+pub mod run;
 pub mod attention_manager;
 pub mod dispatcher;
 pub mod llm;

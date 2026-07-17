@@ -1,4 +1,5 @@
 use crate::agent::attention::AttentionLevel;
+use crate::agent::RunOutcome;
 use crate::harness::trace::event::HarnessEvent;
 
 /// Worker 执行的唯一产出。
@@ -15,6 +16,10 @@ pub struct Report {
     pub summary: String,
     /// 详细发现（Worker 的完整输出）
     pub findings: String,
+    /// 是否成功完成
+    pub success: bool,
+    /// 运行结果
+    pub outcome: RunOutcome,
     /// 置信度（0.0–1.0）
     pub confidence: f64,
     /// 通知层级

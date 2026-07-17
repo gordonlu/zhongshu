@@ -408,6 +408,21 @@ pub fn spawn_task_executor(
                             report.findings
                         };
 
+                        let step_status = match report.outcome {
+                            zhongshu_core::agent::RunOutcome::CompletedVerified
+                            | zhongshu_core::agent::RunOutcome::CompletedUnverified => {
+                                StepStatus::Completed
+                            }
+                            zhongshu_core::agent::RunOutcome::Blocked => StepStatus::ToolBlocked,
+                            zhongshu_core::agent::RunOutcome::BudgetExhausted
+                            | zhongshu_core::agent::RunOutcome::Failed
+                            | zhongshu_core::agent::RunOutcome::Interrupted => StepStatus::Failed,
+                        };
+                        if !report.success {
+                            step_failed = true;
+                            step_error = format!("Worker 未成功完成: {:?}", report.outcome);
+                        }
+
                         let _ = tokio::task::spawn_blocking({
                             let trepo = task_repo.clone();
                             let sid = step.id.clone();
@@ -422,7 +437,7 @@ pub fn spawn_task_executor(
                                 if !vf.is_empty() {
                                     let _ = trepo.set_step_verification(&sid, &vf);
                                 }
-                                let _ = trepo.update_step_status(&sid, StepStatus::Completed);
+                                let _ = trepo.update_step_status(&sid, step_status);
                             }
                         })
                         .await;

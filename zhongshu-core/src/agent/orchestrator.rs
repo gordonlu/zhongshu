@@ -1150,6 +1150,8 @@ impl Orchestrator {
                 content.clone()
             },
             findings: content,
+            success: false,
+            outcome: crate::agent::RunOutcome::CompletedUnverified,
             confidence: 0.7,
             attention: AttentionLevel::Digest,
             trace_events: Vec::new(),
@@ -1606,6 +1608,8 @@ mod tests {
             summary: "".into(),
             findings: "".into(),
             confidence: 0.5,
+            success: true,
+            outcome: crate::agent::RunOutcome::CompletedVerified,
             attention: AttentionLevel::Digest,
             trace_events: vec![HarnessEvent::FileEdit {
                 path: PathBuf::from("a.rs"),
@@ -1619,6 +1623,8 @@ mod tests {
             summary: "".into(),
             findings: "".into(),
             confidence: 0.5,
+            success: true,
+            outcome: crate::agent::RunOutcome::CompletedVerified,
             attention: AttentionLevel::Digest,
             trace_events: vec![HarnessEvent::FileEdit {
                 path: PathBuf::from("b.rs"),
@@ -1640,6 +1646,8 @@ mod tests {
             summary: "".into(),
             findings: "".into(),
             confidence: 0.5,
+            success: true,
+            outcome: crate::agent::RunOutcome::CompletedVerified,
             attention: AttentionLevel::Digest,
             trace_events: vec![HarnessEvent::FileEdit {
                 path: PathBuf::from("shared.rs"),
@@ -1653,6 +1661,8 @@ mod tests {
             summary: "".into(),
             findings: "".into(),
             confidence: 0.5,
+            success: true,
+            outcome: crate::agent::RunOutcome::CompletedVerified,
             attention: AttentionLevel::Digest,
             trace_events: vec![HarnessEvent::FileEdit {
                 path: PathBuf::from("shared.rs"),
@@ -1681,6 +1691,8 @@ mod tests {
             summary: "".into(),
             findings: "".into(),
             confidence: 0.5,
+            success: true,
+            outcome: crate::agent::RunOutcome::CompletedVerified,
             attention: AttentionLevel::Digest,
             trace_events: vec![HarnessEvent::FileEdit {
                 path: PathBuf::from("src/a.rs"),
@@ -1709,6 +1721,8 @@ mod tests {
             summary: "".into(),
             findings: "".into(),
             confidence: 0.5,
+            success: true,
+            outcome: crate::agent::RunOutcome::CompletedVerified,
             attention: AttentionLevel::Digest,
             trace_events: vec![HarnessEvent::FileEdit {
                 path: PathBuf::from("src/b.rs"),
@@ -1739,6 +1753,8 @@ mod tests {
             summary: "".into(),
             findings: "".into(),
             confidence: 0.5,
+            success: true,
+            outcome: crate::agent::RunOutcome::CompletedVerified,
             attention: AttentionLevel::Digest,
             trace_events: vec![HarnessEvent::FileEdit {
                 path: PathBuf::from("src/anything.rs"),
@@ -1761,6 +1777,8 @@ mod tests {
             summary: "".into(),
             findings: "".into(),
             confidence: 0.5,
+            success: true,
+            outcome: crate::agent::RunOutcome::CompletedVerified,
             attention: AttentionLevel::Digest,
             trace_events: vec![HarnessEvent::FileEdit {
                 path: PathBuf::from("src/a.rs"),

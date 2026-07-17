@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use crate::agent::llm::{Message, StreamEvent, StreamToolCall, ToolCall};
 use crate::agent::runtime::AgentRuntime;
+use crate::authority::CheckResult;
 use crate::core::context::ContextPack;
 use crate::harness::trace::event::HarnessEvent;
 use crate::tool::{infer_side_effect, SideEffect, ToolOutput, ToolStatus};
@@ -74,12 +75,37 @@ pub enum StopReason {
     MaxStepsReached,
     MaxToolCallsReached,
     ToolFailurePersistent,
+    Interrupted,
+}
+
+/// Unified outcome for a run, consumed by UI, Worker, Task, Runbook, Replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RunOutcome {
+    CompletedVerified,
+    CompletedUnverified,
+    Blocked,
+    Interrupted,
+    BudgetExhausted,
+    Failed,
+}
+
+impl From<StopReason> for RunOutcome {
+    fn from(s: StopReason) -> Self {
+        match s {
+            StopReason::Finished => RunOutcome::CompletedVerified,
+            StopReason::BudgetExhausted { .. } => RunOutcome::BudgetExhausted,
+            StopReason::MaxStepsReached | StopReason::MaxToolCallsReached => RunOutcome::Blocked,
+            StopReason::ToolFailurePersistent => RunOutcome::Failed,
+            StopReason::Interrupted => RunOutcome::Interrupted,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct LoopResult {
     pub messages: Vec<Message>,
     pub stop_reason: StopReason,
+    pub outcome: RunOutcome,
     pub tool_calls_made: usize,
     pub estimated_tokens: usize,
     pub trace_events: Vec<HarnessEvent>,
@@ -142,7 +168,14 @@ pub async fn run_agent(
         }
 
         if cancel_token.is_cancelled() {
-            break;
+            let tokens = estimate_total_tokens(&messages);
+            return Ok(finish_loop_result(
+                runtime,
+                &mut messages,
+                StopReason::Interrupted,
+                tool_calls_made,
+                tokens,
+            ));
         }
 
         // Per-step progress tracking for recovery no-progress detection
@@ -188,7 +221,14 @@ pub async fn run_agent(
         debug!(step, tokens = current_tokens, "agent loop iteration");
 
         if cancel_token.is_cancelled() {
-            break;
+            let tokens = estimate_total_tokens(&messages);
+            return Ok(finish_loop_result(
+                runtime,
+                &mut messages,
+                StopReason::Interrupted,
+                tool_calls_made,
+                tokens,
+            ));
         }
 
         let (content, tool_calls) = if let Some(ref cb) = callbacks {
@@ -465,24 +505,61 @@ pub async fn run_agent(
                     &tc.id,
                     output.render_observation(&tc.function.name),
                 ));
-                loop {
-                    tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_millis(200)) => {
-                            if !crate::authority::is_pending() {
+
+                // Snapshot pending info before waiting
+                let pending_info = crate::authority::peek_pending()
+                    .map(|r| (r.id.clone(), r.command.clone(), r.program.clone()));
+                let mut approval_outcome = "approved";
+                // Only wait if there's an actual pending request
+                if pending_info.is_some() {
+                    let mut auth_rx = crate::authority::subscribe_auth();
+                    loop {
+                        tokio::select! {
+                            result = auth_rx.changed() => {
+                                if result.is_err() {
+                                    break;
+                                }
+                                if auth_rx.borrow().is_none() {
+                                    break;
+                                }
+                            }
+                            _ = cancel_token.cancelled() => {
+                                crate::authority::take_pending();
+                                messages.push(Message::system("用户已中断当前操作，之前的审批请求已取消。"));
+                                approval_outcome = "cancelled";
                                 break;
                             }
                         }
-                        _ = cancel_token.cancelled() => {
-                            crate::authority::deny_pending(source);
-                            messages.push(Message::system("用户已中断当前操作，之前的审批请求已取消。"));
-                            break;
+                    }
+                }
+                // Determine actual outcome by checking the gate cache.
+                if approval_outcome != "cancelled" {
+                    if let Some((_, ref cmd, _)) = pending_info {
+                        let is_approved = matches!(
+                            crate::authority::check(&tc.function.name, cmd),
+                            CheckResult::Allow
+                        ) || matches!(
+                            crate::authority::check_tool(&tc.function.name),
+                            CheckResult::Allow
+                        );
+                        if is_approved {
+                            approval_outcome = "approved";
+                        } else {
+                            approval_outcome = "denied";
                         }
                     }
                 }
-                // User approved — update the stale auth_required observation so
-                // the LLM sees "approved" rather than concluding the request was denied.
+                // Generate correct observation.
                 if let Some(last) = messages.last_mut() {
-                    last.content = format!("<observation tool=\"{}\" status=\"approved\">用户已授权，可以执行此工具。</observation>", tc.function.name);
+                    match approval_outcome {
+                        "approved" => {
+                            last.content = format!("<observation tool=\"{}\" status=\"approved\">用户已授权，可以执行此工具。</observation>", tc.function.name);
+                        }
+                        "denied" => {
+                            last.content = format!("<observation tool=\"{}\" status=\"denied\">用户已拒绝此工具执行，请换其他方法。</observation>", tc.function.name);
+                        }
+                        _ => {}
+                    }
                 }
                 continue;
             }
@@ -838,6 +915,7 @@ fn finish_loop_result(
     tool_calls_made: usize,
     estimated_tokens: usize,
 ) -> LoopResult {
+    let outcome = RunOutcome::from(stop_reason);
     record_trace(
         runtime,
         HarnessEvent::RunCompleted {
@@ -849,6 +927,7 @@ fn finish_loop_result(
     LoopResult {
         messages: std::mem::take(messages),
         stop_reason,
+        outcome,
         tool_calls_made,
         estimated_tokens,
         trace_events: runtime.harness_state.trace.events.clone(),
@@ -926,6 +1005,12 @@ fn verification_command_text(tc: &ToolCall) -> Option<String> {
 }
 
 fn tool_exit_code(output: &ToolOutput) -> Option<i32> {
+    // Read real exit_code from tool data if available (e.g. ShellTool)
+    if let Some(ref data) = output.data {
+        if let Some(code) = data.get("exit_code").and_then(|c| c.as_i64()) {
+            return Some(code as i32);
+        }
+    }
     match output.status {
         ToolStatus::Success => Some(0),
         ToolStatus::Error => Some(1),

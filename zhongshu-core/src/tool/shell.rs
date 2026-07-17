@@ -1,8 +1,8 @@
 use crate::authority::{self, CheckResult};
-use crate::tool::{Tool, ToolOutput};
+use crate::tool::{Tool, ToolOutput, ToolStatus};
 use async_trait::async_trait;
 use serde_json::json;
-use std::process::Command;
+use tokio::process::Command;
 use tracing::info;
 
 pub struct ShellTool;
@@ -56,18 +56,34 @@ impl Tool for ShellTool {
 
         let mut cmd = Command::new(shell);
         cmd.arg(flag).arg(command);
+        cmd.kill_on_drop(true);
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
         }
 
         info!("shell: {command}");
 
-        match cmd.output() {
-            Ok(output) => ToolOutput::success(json!({
-                "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
-                "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
-                "exit_code": output.status.code().unwrap_or(-1),
-            })),
+        match cmd.output().await {
+            Ok(output) => {
+                let exit_code = output.status.code().unwrap_or(-1);
+                let data = json!({
+                    "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
+                    "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
+                    "exit_code": exit_code,
+                });
+                if output.status.success() {
+                    ToolOutput::success(data)
+                } else {
+                    ToolOutput {
+                        status: ToolStatus::Error,
+                        data: Some(data),
+                        error: Some(format!("命令失败，退出码: {exit_code}")),
+                        auth_program: None,
+                        auth_command: None,
+                        external_source: false,
+                    }
+                }
+            }
             Err(e) => ToolOutput::error(format!("命令执行失败: {e}")),
         }
     }

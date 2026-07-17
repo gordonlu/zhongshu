@@ -144,6 +144,8 @@ mod tests {
             worker: "test".into(),
             summary: "test".into(),
             findings: "test".into(),
+            success: true,
+            outcome: crate::agent::RunOutcome::CompletedVerified,
             confidence: 0.5,
             attention: level,
             trace_events: vec![],

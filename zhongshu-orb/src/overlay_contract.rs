@@ -77,6 +77,24 @@ pub struct SettingsConfig {
     pub mode: Option<String>,
 }
 
+/// Partial settings update sent from UI (mirrors TS `Partial<SettingsConfig>`).
+/// All fields are `Option` — `None` means "don't change".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SettingsUpdate {
+    pub api_key: Option<String>,
+    pub api_key_saved: Option<bool>,
+    pub api_base: Option<String>,
+    pub model: Option<String>,
+    pub personality: Option<String>,
+    pub proxy_port: Option<String>,
+    pub bg_enabled: Option<bool>,
+    pub bg_interval: Option<String>,
+    pub bg_prompt: Option<String>,
+    pub auto_evolve: Option<bool>,
+    pub max_context_tokens: Option<u32>,
+    pub mode: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OverlayToUiEvent {
@@ -226,7 +244,7 @@ pub enum UiToOverlayCommand {
     Approve(String),
     Deny(String),
     PickPersonality(String),
-    SaveSettings(SettingsConfig),
+    SaveSettings(SettingsUpdate),
     OpenSettings,
     DeleteHistory,
     LoadMore,
@@ -367,55 +385,21 @@ pub fn parse_ui_command(body: &str) -> UiToOverlayCommand {
     }
 }
 
-fn settings_from_value(value: &serde_json::Value) -> Option<SettingsConfig> {
+fn settings_from_value(value: &serde_json::Value) -> Option<SettingsUpdate> {
     let cfg = value.as_object()?;
-    Some(SettingsConfig {
-        api_key: cfg
-            .get("api_key")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        api_key_saved: cfg
-            .get("api_key_saved")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        api_base: cfg
-            .get("api_base")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        model: cfg
-            .get("model")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        personality: cfg
-            .get("personality")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        proxy_port: cfg
-            .get("proxy_port")
-            .and_then(|v| v.as_str())
-            .map(ToString::to_string),
+    Some(SettingsUpdate {
+        api_key: cfg.get("api_key").and_then(|v| v.as_str()).map(String::from),
+        api_key_saved: cfg.get("api_key_saved").and_then(|v| v.as_bool()),
+        api_base: cfg.get("api_base").and_then(|v| v.as_str()).map(String::from),
+        model: cfg.get("model").and_then(|v| v.as_str()).map(String::from),
+        personality: cfg.get("personality").and_then(|v| v.as_str()).map(String::from),
+        proxy_port: cfg.get("proxy_port").and_then(|v| v.as_str()).map(String::from),
         bg_enabled: cfg.get("bg_enabled").and_then(|v| v.as_bool()),
-        bg_interval: cfg
-            .get("bg_interval")
-            .and_then(|v| v.as_str())
-            .map(ToString::to_string),
-        bg_prompt: cfg
-            .get("bg_prompt")
-            .and_then(|v| v.as_str())
-            .map(ToString::to_string),
+        bg_interval: cfg.get("bg_interval").and_then(|v| v.as_str()).map(String::from),
+        bg_prompt: cfg.get("bg_prompt").and_then(|v| v.as_str()).map(String::from),
         auto_evolve: cfg.get("auto_evolve").and_then(|v| v.as_bool()),
-        max_context_tokens: cfg
-            .get("max_context_tokens")
-            .and_then(|v| v.as_u64())
-            .map(|n| n as u32),
-        mode: cfg
-            .get("mode")
-            .and_then(|v| v.as_str())
-            .map(ToString::to_string),
+        max_context_tokens: cfg.get("max_context_tokens").and_then(|v| v.as_u64()).map(|n| n as u32),
+        mode: cfg.get("mode").and_then(|v| v.as_str()).map(String::from),
     })
 }
 
@@ -438,8 +422,8 @@ mod tests {
 
         match cmd {
             UiToOverlayCommand::SaveSettings(settings) => {
-                assert_eq!(settings.api_base, "https://example.test");
-                assert_eq!(settings.model, "m");
+                assert_eq!(settings.api_base.as_deref(), Some("https://example.test"));
+                assert_eq!(settings.model.as_deref(), Some("m"));
                 assert_eq!(settings.mode.as_deref(), Some("coding"));
                 assert_eq!(settings.max_context_tokens, Some(100000));
             }

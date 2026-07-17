@@ -173,6 +173,8 @@ fn worker_patch_outside_owned_files_detected() {
         summary: "".into(),
         findings: "".into(),
         confidence: 0.5,
+        success: true,
+        outcome: zhongshu_core::agent::RunOutcome::CompletedVerified,
         attention: AttentionLevel::Digest,
         trace_events: vec![HarnessEvent::FileEdit {
             path: PathBuf::from("src/b.rs"),
@@ -214,6 +216,8 @@ fn worker_patch_inside_owned_files_allowed() {
         summary: "".into(),
         findings: "".into(),
         confidence: 0.5,
+        success: true,
+        outcome: zhongshu_core::agent::RunOutcome::CompletedVerified,
         attention: AttentionLevel::Digest,
         trace_events: vec![HarnessEvent::FileEdit {
             path: PathBuf::from("src/a.rs"),

@@ -58,6 +58,22 @@ pub struct SettingsConfig {
     pub mode: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsUpdate {
+    pub api_key: Option<String>,
+    pub api_key_saved: Option<bool>,
+    pub api_base: Option<String>,
+    pub model: Option<String>,
+    pub personality: Option<String>,
+    pub proxy_port: Option<String>,
+    pub bg_enabled: Option<bool>,
+    pub bg_interval: Option<String>,
+    pub bg_prompt: Option<String>,
+    pub auto_evolve: Option<bool>,
+    pub max_context_tokens: Option<u32>,
+    pub mode: Option<String>,
+}
+
 pub struct OverlayHandle {
     pub state: OverlayState,
 }

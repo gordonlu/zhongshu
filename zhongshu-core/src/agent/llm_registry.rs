@@ -42,6 +42,7 @@ pub struct LlmClient {
 /// Registry of named LLM profiles. The orb layer populates this from config.
 pub struct LlmRegistry {
     profiles: HashMap<String, LlmProfileConfig>,
+    resolved_keys: HashMap<String, String>,
     role_mapping: HashMap<String, String>,
     default_profile: String,
 }
@@ -50,6 +51,7 @@ impl Default for LlmRegistry {
     fn default() -> Self {
         LlmRegistry {
             profiles: HashMap::new(),
+            resolved_keys: HashMap::new(),
             role_mapping: HashMap::new(),
             default_profile: "default".into(),
         }
@@ -75,6 +77,7 @@ impl LlmRegistry {
     }
 
     /// Register a profile from its raw config.
+    /// If `resolved_key` is provided, it takes priority over the env var.
     pub fn register_raw(
         &mut self,
         name: &str,
@@ -85,6 +88,7 @@ impl LlmRegistry {
         embedding_model: Option<String>,
         temperature: Option<f32>,
         max_context_tokens: Option<u32>,
+        resolved_key: Option<&str>,
     ) {
         self.profiles.insert(
             name.to_string(),
@@ -98,6 +102,11 @@ impl LlmRegistry {
                 max_context_tokens,
             },
         );
+        if let Some(key) = resolved_key {
+            if !key.is_empty() {
+                self.resolved_keys.insert(name.to_string(), key.to_string());
+            }
+        }
     }
 
     /// Resolve a role to a profile name, with fallback chain.
@@ -117,7 +126,8 @@ impl LlmRegistry {
             .unwrap_or(&self.default_profile)
     }
 
-    /// Build an LlmClient for a given profile, resolving API key from env.
+    /// Build an LlmClient for a given profile.
+    /// API key resolution order: resolved key > env var.
     pub fn build_client(&self, profile_name: &str) -> Result<LlmClient, String> {
         let config = self
             .profiles
@@ -126,8 +136,12 @@ impl LlmRegistry {
         let provider: Arc<dyn LlmProvider> = if offline_llm_enabled(&config.api_base) {
             Arc::new(ScriptedProvider::new(&config.chat_model))
         } else {
-            let api_key = std::env::var(&config.api_key_env)
-                .map_err(|_| format!("env {} not set", config.api_key_env))?;
+            let api_key = self
+                .resolved_keys
+                .get(profile_name)
+                .cloned()
+                .or_else(|| std::env::var(&config.api_key_env).ok())
+                .ok_or_else(|| format!("env {} not set", config.api_key_env))?;
             Arc::new(
                 OpenAiProvider::new(&api_key, &config.chat_model).with_base_url(&config.api_base),
             )
@@ -179,6 +193,7 @@ mod tests {
             "ZHONGSHU_KEY_THAT_DOES_NOT_EXIST",
             "mock://offline",
             "offline-scripted",
+            None,
             None,
             None,
             None,

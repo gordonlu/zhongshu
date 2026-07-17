@@ -12,7 +12,7 @@ use crate::overlay_assets::{
     OverlayAsset,
 };
 use crate::overlay_contract::{
-    parse_ui_command, AuthRequest, ChatEntry, SettingsConfig, UiToOverlayCommand,
+    parse_ui_command, AuthRequest, ChatEntry, SettingsConfig, SettingsUpdate, UiToOverlayCommand,
 };
 
 pub fn log_selected_asset(platform: &str, asset: &OverlayAsset) {
@@ -89,7 +89,7 @@ pub struct IpcClones {
     pub pa: Arc<Mutex<Option<String>>>,
     pub pd: Arc<Mutex<Option<String>>>,
     pub pp: Arc<Mutex<Option<String>>>,
-    pub ps: Arc<Mutex<Option<SettingsConfig>>>,
+    pub ps: Arc<Mutex<Option<SettingsUpdate>>>,
     pub rnc: Arc<Mutex<bool>>,
     pub rs: Arc<Mutex<bool>>,
     pub pos: Arc<Mutex<bool>>,
@@ -113,7 +113,7 @@ pub struct OverlayState {
     pub pending_approve: Arc<Mutex<Option<String>>>,
     pub pending_deny: Arc<Mutex<Option<String>>>,
     pub pending_personality: Arc<Mutex<Option<String>>>,
-    pub pending_settings: Arc<Mutex<Option<SettingsConfig>>>,
+    pub pending_settings: Arc<Mutex<Option<SettingsUpdate>>>,
     pub request_new_conversation: Arc<Mutex<bool>>,
     pub request_stop: Arc<Mutex<bool>>,
     pub pending_open_settings: Arc<Mutex<bool>>,
@@ -187,7 +187,7 @@ impl OverlayState {
     pub fn take_personality(&self) -> Option<String> {
         self.pending_personality.lock().unwrap().take()
     }
-    pub fn take_settings(&self) -> Option<SettingsConfig> {
+    pub fn take_settings(&self) -> Option<SettingsUpdate> {
         self.pending_settings.lock().unwrap().take()
     }
     pub fn take_new_conversation(&self) -> bool {

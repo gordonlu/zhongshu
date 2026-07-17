@@ -274,6 +274,8 @@ async fn smoke_attention_manager_drains_digest_queue() {
             summary: "sum".into(),
             findings: "findings".into(),
             confidence: 0.5,
+            success: true,
+            outcome: zhongshu_core::agent::RunOutcome::CompletedVerified,
             attention: AttentionLevel::Digest,
             trace_events: vec![],
         });
@@ -542,14 +544,12 @@ async fn smoke_token_cancellation_stops_agent_loop() {
     .await;
 
     let result = result.expect("run_agent should return Ok even if cancelled");
-    // The loop exits early via `break` on cancel check, falling through
-    // to the "max steps reached" path.
     assert!(
         matches!(
             result.stop_reason,
-            zhongshu_core::agent::StopReason::MaxStepsReached
+            zhongshu_core::agent::StopReason::Interrupted
         ),
-        "cancelled token should stop the agent loop early, got {:?}",
+        "cancelled token should produce Interrupted, got {:?}",
         result.stop_reason
     );
 }

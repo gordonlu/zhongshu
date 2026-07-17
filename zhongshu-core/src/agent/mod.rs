@@ -17,7 +17,8 @@ pub use attention::AttentionLevel;
 pub use attention_manager::AttentionManager;
 pub use dispatcher::AttentionDispatcher;
 pub use loop_::{
-    run_agent, run_agent_with_context, AgentBudget, AgentCallbacks, LoopResult, StopReason,
+    run_agent, run_agent_with_context, AgentBudget, AgentCallbacks, LoopResult, RunOutcome,
+    StopReason,
 };
 pub use orchestrator::{
     AssignmentFileOverlap, Conflict, FileClaimCoordinator, Orchestrator, OwnershipViolation,

@@ -69,13 +69,18 @@ impl Worker {
             last_content.to_string()
         };
         let attention = Worker::infer_attention(last_content);
+        let outcome = result.outcome;
+        let success = outcome == crate::agent::RunOutcome::CompletedVerified
+            || outcome == crate::agent::RunOutcome::CompletedUnverified;
 
         Ok(Report {
             task_id: task.id,
             worker: profile.name.clone(),
             summary,
             findings: last_content.to_string(),
-            confidence: 0.5,
+            success,
+            outcome,
+            confidence: if success { 0.5 } else { 0.0 },
             attention,
             trace_events: result.trace_events,
         })

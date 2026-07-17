@@ -1,7 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
-use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -58,38 +57,38 @@ pub enum InterruptionAction {
 }
 
 pub struct RunController {
-    run_id: Arc<RwLock<Option<Uuid>>>,
-    state: Arc<RwLock<RunState>>,
-    cancel_token: Arc<RwLock<CancellationToken>>,
-    partial_response: Arc<Mutex<String>>,
-    completed_steps: Arc<Mutex<Vec<String>>>,
-    current_tool: Arc<Mutex<Option<ToolCallInfo>>>,
-    interruption_ctx: Arc<Mutex<Option<InterruptionCtx>>>,
-    original_goal: Arc<RwLock<String>>,
+    run_id: RwLock<Option<Uuid>>,
+    state: RwLock<RunState>,
+    cancel_token: Mutex<CancellationToken>,
+    partial_response: Mutex<String>,
+    completed_steps: Mutex<Vec<String>>,
+    current_tool: Mutex<Option<ToolCallInfo>>,
+    interruption_ctx: Mutex<Option<InterruptionCtx>>,
+    original_goal: RwLock<String>,
     event_bus: Arc<EventBus>,
     last_action: std::sync::Mutex<Option<InterruptionAction>>,
-    interrupted: Arc<AtomicBool>,
+    interrupted: AtomicBool,
 }
 
 impl RunController {
     pub fn new(event_bus: Arc<EventBus>, _response_tx: mpsc::Sender<ResponseEvent>) -> Self {
         Self {
-            run_id: Arc::new(RwLock::new(None)),
-            state: Arc::new(RwLock::new(RunState::Idle)),
-            cancel_token: Arc::new(RwLock::new(CancellationToken::new())),
-            partial_response: Arc::new(Mutex::new(String::new())),
-            completed_steps: Arc::new(Mutex::new(Vec::new())),
-            current_tool: Arc::new(Mutex::new(None)),
-            interruption_ctx: Arc::new(Mutex::new(None)),
-            original_goal: Arc::new(RwLock::new(String::new())),
+            run_id: RwLock::new(None),
+            state: RwLock::new(RunState::Idle),
+            cancel_token: Mutex::new(CancellationToken::new()),
+            partial_response: Mutex::new(String::new()),
+            completed_steps: Mutex::new(Vec::new()),
+            current_tool: Mutex::new(None),
+            interruption_ctx: Mutex::new(None),
+            original_goal: RwLock::new(String::new()),
             event_bus,
             last_action: std::sync::Mutex::new(None),
-            interrupted: Arc::new(AtomicBool::new(false)),
+            interrupted: AtomicBool::new(false),
         }
     }
 
     pub fn interruption_ctx(&self) -> Option<InterruptionCtx> {
-        self.interruption_ctx.blocking_lock().clone()
+        self.interruption_ctx.lock().unwrap().clone()
     }
 
     pub fn take_last_action(&self) -> Option<InterruptionAction> {
@@ -98,13 +97,13 @@ impl RunController {
 
     pub fn start_run(&self, goal: &str) -> Uuid {
         let run_id = Uuid::new_v4();
-        *self.run_id.blocking_write() = Some(run_id);
-        *self.state.blocking_write() = RunState::Thinking;
-        *self.original_goal.blocking_write() = goal.to_string();
+        *self.run_id.write().unwrap() = Some(run_id);
+        *self.state.write().unwrap() = RunState::Thinking;
+        *self.original_goal.write().unwrap() = goal.to_string();
         self.interrupted.store(false, Ordering::SeqCst);
-        self.partial_response.blocking_lock().clear();
-        self.completed_steps.blocking_lock().clear();
-        self.interruption_ctx.blocking_lock().take();
+        self.partial_response.lock().unwrap().clear();
+        self.completed_steps.lock().unwrap().clear();
+        self.interruption_ctx.lock().unwrap().take();
 
         self.event_bus.publish(Event::Run(RunEvent::Started {
             run_id: run_id.to_string(),
@@ -112,53 +111,53 @@ impl RunController {
         }));
 
         // Reset the cancellation token
-        *self.cancel_token.blocking_write() = CancellationToken::new();
+        *self.cancel_token.lock().unwrap() = CancellationToken::new();
 
         run_id
     }
 
     pub fn run_id(&self) -> Option<Uuid> {
-        *self.run_id.blocking_read()
+        *self.run_id.read().unwrap()
     }
 
     pub fn active_run_id(&self) -> Uuid {
-        self.run_id.blocking_read().unwrap_or_else(Uuid::new_v4)
+        self.run_id.read().unwrap().unwrap_or_else(Uuid::new_v4)
     }
 
     pub fn state(&self) -> RunState {
-        self.state.blocking_read().clone()
+        self.state.read().unwrap().clone()
     }
 
     pub fn set_state(&self, state: RunState) {
-        *self.state.blocking_write() = state;
+        *self.state.write().unwrap() = state;
     }
 
     pub fn cancel_token(&self) -> CancellationToken {
-        self.cancel_token.blocking_read().clone()
+        self.cancel_token.lock().unwrap().clone()
     }
 
     pub fn record_partial(&self, delta: &str) {
-        self.partial_response.blocking_lock().push_str(delta);
+        self.partial_response.lock().unwrap().push_str(delta);
     }
 
     pub fn take_partial_response(&self) -> String {
-        self.partial_response.blocking_lock().drain(..).collect()
+        self.partial_response.lock().unwrap().drain(..).collect()
     }
 
     pub fn record_completed_step(&self, step: String) {
-        self.completed_steps.blocking_lock().push(step);
+        self.completed_steps.lock().unwrap().push(step);
     }
 
     pub fn take_completed_steps(&self) -> Vec<String> {
-        self.completed_steps.blocking_lock().drain(..).collect()
+        self.completed_steps.lock().unwrap().drain(..).collect()
     }
 
     pub fn set_current_tool(&self, tool: Option<ToolCallInfo>) {
-        *self.current_tool.blocking_lock() = tool;
+        *self.current_tool.lock().unwrap() = tool;
     }
 
     pub fn current_tool(&self) -> Option<ToolCallInfo> {
-        self.current_tool.blocking_lock().clone()
+        self.current_tool.lock().unwrap().clone()
     }
 
     pub fn is_interrupted(&self) -> bool {
@@ -169,10 +168,10 @@ impl RunController {
     pub fn interrupt(&self, user_message: &str) -> InterruptionAction {
         // If already interrupted, append message instead of overwriting context.
         if self.interrupted.load(Ordering::SeqCst) {
-            if let Some(ref mut ctx) = *self.interruption_ctx.blocking_lock() {
+            if let Some(ref mut ctx) = *self.interruption_ctx.lock().unwrap() {
                 ctx.user_message = format!("{}\n{}", ctx.user_message, user_message);
                 let intent = intent_classify(&ctx.user_message);
-                let state = self.state.blocking_read().clone();
+                let state = self.state.read().unwrap().clone();
                 let tool = self.current_tool();
                 let action = self.determine_action(intent, &state, tool.as_ref());
                 *self.last_action.lock().unwrap() = Some(action.clone());
@@ -182,7 +181,8 @@ impl RunController {
 
         let rid = self
             .run_id
-            .blocking_read()
+            .read()
+            .unwrap()
             .map(|r| r.to_string())
             .unwrap_or_default();
 
@@ -190,20 +190,20 @@ impl RunController {
         let partial = self.take_partial_response();
         let steps = self.take_completed_steps();
         let tool = self.current_tool();
-        let goal = self.original_goal.blocking_read().clone();
-        let state_str = format!("{:?}", self.state.blocking_read());
+        let goal = self.original_goal.read().unwrap().clone();
+        let state_str = format!("{:?}", self.state.read().unwrap());
 
         // Mark interrupted
         self.interrupted.store(true, Ordering::SeqCst);
-        *self.state.blocking_write() = RunState::Interrupted {
+        *self.state.write().unwrap() = RunState::Interrupted {
             reason: "user_interjection".into(),
         };
 
         // Cancel current LLM request (best-effort)
-        self.cancel_token.blocking_read().cancel();
+        self.cancel_token.lock().unwrap().cancel();
 
         // Store interruption context
-        *self.interruption_ctx.blocking_lock() = Some(InterruptionCtx {
+        *self.interruption_ctx.lock().unwrap() = Some(InterruptionCtx {
             original_goal: goal.clone(),
             completed_steps: steps.clone(),
             current_state: state_str.clone(),
@@ -222,7 +222,7 @@ impl RunController {
         let intent = intent_classify(user_message);
 
         // Determine action
-        let state_snapshot = self.state.blocking_read().clone();
+        let state_snapshot = self.state.read().unwrap().clone();
         let action = self.determine_action(intent, &state_snapshot, tool.as_ref());
         *self.last_action.lock().unwrap() = Some(action.clone());
         action
@@ -283,7 +283,7 @@ impl RunController {
 
     /// Build recovery context system message for the agent loop.
     pub fn build_recovery_prompt(&self) -> Option<String> {
-        let ctx = self.interruption_ctx.blocking_lock().take()?;
+        let ctx = self.interruption_ctx.lock().unwrap().take()?;
 
         if ctx.partial_response.is_empty()
             && ctx.completed_steps.is_empty()
@@ -337,10 +337,10 @@ impl RunController {
     }
 
     pub fn begin_resume(&self) -> Uuid {
-        let run_id = self.run_id.blocking_read().unwrap_or_else(Uuid::new_v4);
-        *self.cancel_token.blocking_write() = CancellationToken::new();
+        let run_id = self.run_id.read().unwrap().unwrap_or_else(Uuid::new_v4);
+        *self.cancel_token.lock().unwrap() = CancellationToken::new();
         self.interrupted.store(false, Ordering::SeqCst);
-        *self.state.blocking_write() = RunState::Resuming;
+        *self.state.write().unwrap() = RunState::Resuming;
         self.event_bus.publish(Event::Run(RunEvent::Resuming {
             run_id: run_id.to_string(),
         }));
@@ -348,11 +348,11 @@ impl RunController {
     }
 
     pub async fn finish_run(&self, stop_reason: &str) {
-        *self.state.blocking_write() = RunState::Finished {
+        *self.state.write().unwrap() = RunState::Finished {
             stop_reason: stop_reason.into(),
         };
         self.interrupted.store(false, Ordering::SeqCst);
-        if let Some(rid) = *self.run_id.blocking_read() {
+        if let Some(rid) = *self.run_id.read().unwrap() {
             self.event_bus.publish(Event::Run(RunEvent::Finished {
                 run_id: rid.to_string(),
                 stop_reason: stop_reason.into(),
@@ -361,8 +361,7 @@ impl RunController {
     }
 }
 
-unsafe impl Send for RunController {}
-unsafe impl Sync for RunController {}
+
 
 #[cfg(test)]
 mod tests {
@@ -416,7 +415,7 @@ mod tests {
         assert!(matches!(action, InterruptionAction::CancelAndReplan { .. }));
 
         // Interruption context should contain partial response
-        let ctx_set = ctrl.interruption_ctx.blocking_lock().is_some();
+        let ctx_set = ctrl.interruption_ctx.lock().unwrap().is_some();
         assert!(ctx_set);
 
         // RunInterrupted event published

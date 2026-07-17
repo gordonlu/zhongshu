@@ -16,7 +16,7 @@ use crate::overlay_host::{
 
 #[allow(unused_imports)]
 pub use crate::overlay_contract::{
-    AuthRequest, ChatEntry, EntryRole, OverlayToUiEvent, SettingsConfig, ToolCallEntry, ToolStatus,
+    AuthRequest, ChatEntry, EntryRole, OverlayToUiEvent, SettingsConfig, SettingsUpdate, ToolCallEntry, ToolStatus,
 };
 
 pub struct OverlayHandle {
@@ -320,12 +320,12 @@ mod tests {
     #[test]
     fn take_settings_happy_path() {
         let handle = create_handle();
-        let config = SettingsConfig {
-            api_key: "sk-xxx".into(),
-            api_key_saved: true,
-            api_base: "https://api.example.com".into(),
-            model: "gpt-4".into(),
-            personality: "default".into(),
+        let config = SettingsUpdate {
+            api_key: Some("sk-xxx".into()),
+            api_key_saved: Some(true),
+            api_base: Some("https://api.example.com".into()),
+            model: Some("gpt-4".into()),
+            personality: Some("default".into()),
             proxy_port: None,
             bg_enabled: None,
             bg_interval: None,

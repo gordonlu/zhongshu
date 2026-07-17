@@ -157,6 +157,8 @@ impl LlmConfig {
             } else {
                 &cfg.api_base
             };
+            let api_key_val = self.api_key();
+            let resolved_key = if force_offline { None } else { Some(api_key_val.as_str()) };
             reg.register_raw(
                 name,
                 &cfg.api_key_env,
@@ -166,6 +168,7 @@ impl LlmConfig {
                 cfg.embedding_model.clone(),
                 cfg.temperature,
                 cfg.max_context_tokens,
+                resolved_key,
             );
         }
         reg
@@ -234,6 +237,23 @@ fn default_max_context_tokens() -> u32 {
 const KEYRING_SERVICE: &str = "zhongshu";
 const KEYRING_USER: &str = "deepseek_api_key";
 
+/// Test-only: override the keyring store to avoid external dependencies.
+/// `None` = use real keyring; `Some(None)` = no key; `Some(Some(k))` = use k.
+#[cfg(test)]
+pub fn mock_keyring_for_test(key: Option<&str>) {
+    *MOCK_KEYRING.lock().unwrap() = Some(key.map(String::from));
+}
+
+/// Read the mock keyring value set by `mock_keyring_for_test`.
+/// Returns `None` if no mock set (use real keyring).
+fn mock_keyring_value() -> Option<Option<String>> {
+    MOCK_KEYRING.lock().ok().and_then(|g| g.clone())
+}
+
+use std::sync::Mutex;
+/// `None` = no mock (use real keyring); `Some(...)` = override.
+static MOCK_KEYRING: Mutex<Option<Option<String>>> = Mutex::new(None);
+
 fn keyring_entry() -> Result<keyring::Entry> {
     keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
         .context("cannot open system credential store")
@@ -250,6 +270,12 @@ pub fn store_api_key(api_key: &str) -> Result<()> {
 }
 
 pub fn load_stored_api_key() -> Option<String> {
+    if let Some(Some(key)) = mock_keyring_value() {
+        return Some(key);
+    }
+    if let Some(None) = mock_keyring_value() {
+        return None;
+    }
     match keyring_entry().and_then(|entry| {
         entry
             .get_password()
@@ -1031,6 +1057,7 @@ mod tests {
 
     #[test]
     fn api_key_resolves_from_env() {
+        mock_keyring_for_test(None);
         std::env::set_var("TEST_ZHONGSHU_KEY", "sk-test-123");
         let cfg = LlmConfig {
             api_key_env: "TEST_ZHONGSHU_KEY".into(),
@@ -1042,6 +1069,7 @@ mod tests {
 
     #[test]
     fn api_key_empty_when_env_missing() {
+        mock_keyring_for_test(None);
         let cfg = LlmConfig {
             api_key_env: "ZHONGSHU_NONEXISTENT_KEY".into(),
             ..Default::default()
@@ -1051,6 +1079,7 @@ mod tests {
 
     #[test]
     fn offline_config_does_not_require_api_key() {
+        mock_keyring_for_test(None);
         let cfg = LlmConfig {
             api_key_env: "ZHONGSHU_NONEXISTENT_OFFLINE_KEY".into(),
             api_base: "mock://offline".into(),

@@ -17,7 +17,7 @@ use crate::overlay_host::{
 
 #[allow(unused_imports)]
 pub use crate::overlay_contract::{
-    AuthRequest, ChatEntry, EntryRole, OverlayToUiEvent, SettingsConfig, ToolCallEntry, ToolStatus,
+    AuthRequest, ChatEntry, EntryRole, OverlayToUiEvent, SettingsConfig, SettingsUpdate, ToolCallEntry, ToolStatus,
 };
 
 // ── Message types ────────────────────────────────────────────────────

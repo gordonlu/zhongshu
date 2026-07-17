@@ -840,8 +840,9 @@ impl AgentController {
                     memory.extract_goal_completions(last);
                     // Archive old completed goals to keep the list bounded.
                     memory.archive_completed_goals(KEEP_COMPLETED_GOALS);
-                    stop_reason = "completed".to_string();
-                    overall_success = true;
+                    stop_reason = format!("{:?}", rr.stop_reason);
+                    overall_success = rr.outcome == zhongshu_core::agent::RunOutcome::CompletedVerified
+                        || rr.outcome == zhongshu_core::agent::RunOutcome::CompletedUnverified;
                     let _ = tx
                         .send(ResponseEvent::MessageCompleted { id: aid, run_id })
                         .await;
@@ -1196,9 +1197,13 @@ impl AgentController {
                                                 run_id,
                                             })
                                             .await;
+                                        let recovery_success = rr.outcome == zhongshu_core::agent::RunOutcome::CompletedVerified
+                                            || rr.outcome == zhongshu_core::agent::RunOutcome::CompletedUnverified;
+                                        stop_reason = format!("{:?}", rr.stop_reason);
+                                        overall_success = recovery_success;
                                         eb.publish(Event::Agent(AgentEvent::StateChanged {
                                             from: AgentState::Thinking,
-                                            to: AgentState::Done { success: true },
+                                            to: AgentState::Done { success: recovery_success },
                                         }));
                                     }
                                     Ok(Err(e)) => {

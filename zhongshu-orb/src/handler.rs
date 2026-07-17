@@ -283,21 +283,27 @@ impl ZhongshuApp {
             let mut cfg = crate::config::load();
             let old_api_base = cfg.llm.api_base.clone();
             let old_proxy_port = cfg.deeplossless.proxy_port;
-            if !settings.api_key.is_empty() {
-                if let Err(e) = crate::config::store_api_key(&settings.api_key) {
-                    tracing::warn!("save API key failed: {e:#}");
-                    ov.toast("API Key 保存失败");
-                } else {
-                    ov.toast("API Key 已保存到系统凭据库");
+            if let Some(key) = &settings.api_key {
+                if !key.is_empty() {
+                    if let Err(e) = crate::config::store_api_key(key) {
+                        tracing::warn!("save API key failed: {e:#}");
+                        ov.toast("API Key 保存失败");
+                    } else {
+                        ov.toast("API Key 已保存到系统凭据库");
+                    }
                 }
             }
-            if !settings.api_base.is_empty() {
-                cfg.llm.api_base = settings.api_base;
+            if let Some(base) = &settings.api_base {
+                if !base.is_empty() {
+                    cfg.llm.api_base.clone_from(base);
+                }
             }
-            if !settings.model.is_empty() {
-                cfg.llm.model = settings.model;
+            if let Some(model) = &settings.model {
+                if !model.is_empty() {
+                    cfg.llm.model.clone_from(model);
+                }
             }
-            if let Some(port) = settings.proxy_port {
+            if let Some(port) = &settings.proxy_port {
                 if !port.is_empty() {
                     cfg.deeplossless.proxy_port = port.parse().unwrap_or(8081);
                 }
@@ -305,13 +311,13 @@ impl ZhongshuApp {
             if let Some(enabled) = settings.bg_enabled {
                 cfg.agent.background.enabled = enabled;
             }
-            if let Some(interval) = settings.bg_interval {
+            if let Some(interval) = &settings.bg_interval {
                 if !interval.is_empty() {
                     cfg.agent.background.interval_secs = interval.parse().unwrap_or(600);
                 }
             }
-            if let Some(prompt) = settings.bg_prompt {
-                cfg.agent.background.prompt = prompt;
+            if let Some(prompt) = &settings.bg_prompt {
+                cfg.agent.background.prompt.clone_from(prompt);
             }
             if let Some(evolve) = settings.auto_evolve {
                 cfg.agent.auto_evolve = evolve;
@@ -323,18 +329,20 @@ impl ZhongshuApp {
                     self.controller.set_max_context_tokens(ctx);
                 }
             }
-            if let Some(ref mode) = settings.mode {
-                cfg.agent.mode = mode.clone();
+            if let Some(mode) = &settings.mode {
+                cfg.agent.mode.clone_from(mode);
                 self.controller.set_mode(mode.clone());
                 if let Some(ref ov) = self.overlay {
                     ov.send(&serde_json::json!({"type":"mode_change","mode":mode}));
                 }
             }
-            if settings.personality != "默认" && !settings.personality.is_empty() {
-                cfg.agent.personality = settings.personality;
-                cfg.agent.personality_selected = true;
-                self.controller
-                    .set_system_prompt(cfg.agent.effective_system_prompt());
+            if let Some(personality) = &settings.personality {
+                if personality != "默认" && !personality.is_empty() {
+                    cfg.agent.personality.clone_from(personality);
+                    cfg.agent.personality_selected = true;
+                    self.controller
+                        .set_system_prompt(cfg.agent.effective_system_prompt());
+                }
             }
             crate::config::save(&cfg);
             self.config = cfg.clone();

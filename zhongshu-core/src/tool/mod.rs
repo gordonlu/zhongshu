@@ -43,6 +43,8 @@ pub struct ToolOutput {
     pub auth_command: Option<String>,
     #[serde(default)]
     pub external_source: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,6 +64,7 @@ impl ToolOutput {
             auth_program: None,
             auth_command: None,
             external_source: false,
+            request_id: None,
         }
     }
 
@@ -73,6 +76,7 @@ impl ToolOutput {
             auth_program: None,
             auth_command: None,
             external_source: false,
+            request_id: None,
         }
     }
 
@@ -84,7 +88,13 @@ impl ToolOutput {
             auth_program: Some(program.to_string()),
             auth_command: Some(command.to_string()),
             external_source: false,
+            request_id: None,
         }
+    }
+
+    pub fn with_request_id(mut self, id: String) -> Self {
+        self.request_id = Some(id);
+        self
     }
 
     pub fn is_auth_required(&self) -> bool {

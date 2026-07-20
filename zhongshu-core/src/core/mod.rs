@@ -1,8 +1,10 @@
 pub mod context;
 
 pub mod artifact;
+pub mod checkpoint;
 pub mod db;
 pub mod event;
+pub mod ledger;
 pub mod goal;
 pub mod memory;
 pub mod models;
@@ -14,6 +16,7 @@ pub mod task;
 pub use artifact::ArtifactRepository;
 pub use db::Database;
 pub use event::EventLogStore;
+pub use ledger::RunLedger;
 pub use goal::{GoalRepository, GoalTool};
 pub use memory::{MemoryCandidateStore, MemoryPolicy, MemoryQueryTool};
 pub use models::*;

@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use crate::agent::llm::{Message, StreamEvent, StreamToolCall, ToolCall};
 use crate::agent::runtime::AgentRuntime;
-use crate::authority::CheckResult;
+use crate::core::checkpoint::AgentCheckpoint;
 use crate::core::context::ContextPack;
 use crate::harness::trace::event::HarnessEvent;
 use crate::tool::{infer_side_effect, SideEffect, ToolOutput, ToolStatus};
@@ -92,7 +92,7 @@ pub enum RunOutcome {
 impl From<StopReason> for RunOutcome {
     fn from(s: StopReason) -> Self {
         match s {
-            StopReason::Finished => RunOutcome::CompletedVerified,
+            StopReason::Finished => RunOutcome::CompletedUnverified,
             StopReason::BudgetExhausted { .. } => RunOutcome::BudgetExhausted,
             StopReason::MaxStepsReached | StopReason::MaxToolCallsReached => RunOutcome::Blocked,
             StopReason::ToolFailurePersistent => RunOutcome::Failed,
@@ -114,8 +114,8 @@ pub struct LoopResult {
 /// Streaming callbacks forwarded to the UI layer.
 pub struct AgentCallbacks {
     pub on_text: Box<dyn Fn(&str) + Send + Sync>,
-    pub on_tool_start: Box<dyn Fn(&str) + Send + Sync>,
-    pub on_tool_done: Box<dyn Fn(&str, bool) + Send + Sync>,
+    pub on_tool_start: Box<dyn Fn(&str, &str) + Send + Sync>,
+    pub on_tool_done: Box<dyn Fn(&str, &str, bool) + Send + Sync>,
     pub run_id: Uuid,
 }
 
@@ -148,8 +148,61 @@ pub async fn run_agent(
     let mut consecutive_tool_failures = 0u32;
     let mut tool_call_counts: std::collections::HashMap<String, u32> =
         std::collections::HashMap::new();
+    let run_id = callbacks
+        .as_ref()
+        .map(|c| c.run_id.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
 
-    for step in 0..runtime.budget.max_steps {
+    // ── Restore from checkpoint if available ──────────────────────────
+    // If the process crashed mid-run, the last checkpoint contains the
+    // exact messages and counters from before the interrupted tool call.
+    let mut start_step = 0u32;
+    if let Some(ref cs) = runtime.checkpoint_store {
+        match cs.load_latest(&run_id) {
+            Ok(Some(cp)) => {
+                info!(
+                    step = cp.step,
+                    tool_calls = cp.tool_calls_made,
+                    "restored agent checkpoint, resuming from step {}",
+                    cp.step,
+                );
+                messages = cp.messages;
+                tool_calls_made = cp.tool_calls_made;
+                consecutive_tool_failures = cp.consecutive_failures;
+                tool_call_counts = cp.tool_call_counts;
+                start_step = cp.step;
+
+                // Reconcile any tools that were in-flight at crash time.
+                // These started but never completed/failed — their side
+                // effects are unknown. Inject a system message so the
+                // agent knows to re-evaluate.
+                if let Some(ref ledger) = runtime.ledger {
+                    if let Ok(inflight) = ledger.reconcile_inflight_tools(&run_id) {
+                        for (tool_name, _args, _key) in &inflight {
+                            warn!(
+                                tool = %tool_name,
+                                "in-flight tool at crash time — outcome unknown"
+                            );
+                        }
+                        if !inflight.is_empty() {
+                            messages.push(Message::system(
+                                "【恢复警告】以下工具在前一次运行中已开始但未能完成：",
+                            ));
+                            for (tool_name, _args, _key) in &inflight {
+                                messages.push(Message::system(
+                                    &format!("- {tool_name}：执行状态未知，请检查是否需要重做"),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(None) => { /* no checkpoint, start fresh */ }
+            Err(e) => warn!(error = %e, "failed to load agent checkpoint"),
+        }
+    }
+
+    for step in start_step..runtime.budget.max_steps {
         // Harness records use 1-based steps so "0" can remain the
         // sentinel for "no edit/verification has happened yet".
         let harness_step = step + 1;
@@ -164,6 +217,7 @@ pub async fn run_agent(
                 stop_reason,
                 tool_calls_made,
                 tokens,
+                &run_id,
             ));
         }
 
@@ -175,6 +229,7 @@ pub async fn run_agent(
                 StopReason::Interrupted,
                 tool_calls_made,
                 tokens,
+                &run_id,
             ));
         }
 
@@ -215,6 +270,7 @@ pub async fn run_agent(
                 },
                 tool_calls_made,
                 tokens,
+                &run_id,
             ));
         }
 
@@ -228,6 +284,7 @@ pub async fn run_agent(
                 StopReason::Interrupted,
                 tool_calls_made,
                 tokens,
+                &run_id,
             ));
         }
 
@@ -331,6 +388,7 @@ pub async fn run_agent(
                     StopReason::Finished,
                     tool_calls_made,
                     tokens,
+                    &run_id,
                 ));
             }
             continue;
@@ -402,43 +460,71 @@ pub async fn run_agent(
                 }
             }
 
-            let mut tool_timed_out = false;
-            let output = {
-                let cancel = cancel_token.clone();
-                tokio::select! {
-                    result = tokio::time::timeout(
-                        runtime.budget.tool_timeout,
-                        runtime.registry.execute(&tc.function.name, &tc.function.arguments),
-                    ) => {
-                        match result {
-                            Ok(output) => output,
-                            Err(_elapsed) => {
-                                tracing::warn!(
-                                    "Tool '{}' timed out after {:?}",
-                                    tc.function.name,
-                                    runtime.budget.tool_timeout
-                                );
-                                tool_timed_out = true;
-                                ToolOutput::error(format!(
-                                    "tool '{}' timed out after {:?}",
-                                    tc.function.name, runtime.budget.tool_timeout
-                                ))
-                            }
-                        }
-                    }
-                    _ = cancel.cancelled() => {
-                        tool_timed_out = true;
-                        ToolOutput::error("执行被用户中断")
-                    }
+            // Idempotency check: see if this tool call was already completed
+            // in a previous run (survives restarts via the append-only ledger).
+            if let Some(ref check) = runtime.idempotency_checker {
+                if (check)(&tc.function.name, &tc.function.arguments) {
+                    info!(tool = %tc.function.name, "tool already completed, skipping");
+                    messages.push(Message::tool_result(
+                        &tc.id,
+                        format!(
+                            "<observation tool=\"{}\" status=\"completed\">此操作用于上次中断前已完成，跳过重复执行。</observation>",
+                            tc.function.name
+                        ),
+                    ));
+                    continue;
                 }
-            };
+            }
+
+            // ── Record tool start ────────────────────────────────────
+            // Notify the ledger and UI that execution is beginning, with
+            // the real arguments so the start/end keys match.
+            if let Some(ref cb) = callbacks {
+                (cb.on_tool_start)(&tc.function.name, &tc.function.arguments);
+            }
+
+            // ── Checkpoint before tool execution ──────────────────────
+            // Save the full agent state so a crash during the tool call
+            // can be recovered.  The checkpoint is overwritten on each
+            // tool call so only the latest one matters.
+            if let Some(ref cs) = runtime.checkpoint_store {
+                let cp = AgentCheckpoint {
+                    run_id: run_id.clone(),
+                    step,
+                    tool_calls_made,
+                    consecutive_failures: consecutive_tool_failures,
+                    tool_call_counts: tool_call_counts.clone(),
+                    messages: messages.clone(),
+                    created_at: 0,
+                };
+                if let Err(e) = cs.save(&cp, true) {
+                    warn!(error = %e, "failed to save agent checkpoint");
+                }
+            }
+
+            let executor = crate::tool::ToolExecutor::with_policy(
+                &runtime.registry,
+                crate::tool::ToolExecutionPolicy {
+                    timeout: runtime.budget.tool_timeout,
+                    ..Default::default()
+                },
+            );
+            let execution = executor
+                .execute(
+                    &tc.function.name,
+                    &tc.function.arguments,
+                    Some(cancel_token.clone()),
+                )
+                .await;
+            let tool_timed_out = execution.timed_out;
+            let output = execution.output;
 
             // Interruption handling: check cancellation status and side effect
-            if cancel_token.is_cancelled() {
-                let side_effect = runtime
-                    .registry
-                    .get(&tc.function.name)
-                    .map(|t| t.spec().side_effect)
+            if tool_timed_out {
+                let side_effect = execution
+                    .spec
+                    .as_ref()
+                    .map(|s| s.side_effect)
                     .unwrap_or_else(|| infer_side_effect(&tc.function.name));
                 match side_effect {
                     SideEffect::ReadOnly => {
@@ -448,12 +534,14 @@ pub async fn run_agent(
                     | SideEffect::SystemChange
                     | SideEffect::ExternalAction
                     | SideEffect::Irreversible => {
-                        // Force pause: tool output is NOT applied automatically
-                        // Override output to signal interruption — loop continues but
-                        // the LLM sees a failure observation.
+                        // Timeout/cancellation only proves the wait ended; it does
+                        // NOT prove no side effect occurred. Report unknown effect
+                        // so the agent does not assume the operation was skipped.
+                        let original = output.error.as_deref()
+                            .unwrap_or("未知原因");
                         let interrupted = ToolOutput::error(format!(
-                            "{} 被用户中断。此操作未执行。",
-                            tc.function.name
+                            "{}。实际执行状态未知，此操作可能已部分或完全执行，请核实系统状态。",
+                            original,
                         ));
                         // Interrupted tools do not count as tool failures for recovery
                         // (consecutive_failures is not incremented for these)
@@ -500,53 +588,36 @@ pub async fn run_agent(
                     harness_step,
                 );
                 emit_recovery_feedback(runtime, &mut messages, recovery_feedback);
-                crate::authority::set_pending_source(source);
                 messages.push(Message::tool_result(
                     &tc.id,
                     output.render_observation(&tc.function.name),
                 ));
 
-                // Snapshot pending info before waiting
-                let pending_info = crate::authority::peek_pending()
-                    .map(|r| (r.id.clone(), r.command.clone(), r.program.clone()));
-                let mut approval_outcome = "approved";
-                // Only wait if there's an actual pending request
-                if pending_info.is_some() {
-                    let mut auth_rx = crate::authority::subscribe_auth();
-                    loop {
-                        tokio::select! {
-                            result = auth_rx.changed() => {
-                                if result.is_err() {
-                                    break;
-                                }
-                                if auth_rx.borrow().is_none() {
-                                    break;
+                // Create a request-scoped oneshot channel for the approval outcome.
+                // Use the request_id embedded by the tool at creation time.
+                let rid = output.request_id.clone();
+                let mut approval_outcome = "cancelled";
+                if let Some(ref rid) = rid {
+                    let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
+                    // Atomically check the request still exists and register.
+                    // If the request was already resolved (user approved/denied
+                    // before we could register), default to cancelled.
+                    if crate::authority::register_waiter_if_pending(rid, outcome_tx).is_ok() {
+                        let outcome = tokio::select! {
+                            result = outcome_rx => {
+                                match result {
+                                    Ok(crate::authority::AuthOutcome::Approved) => "approved",
+                                    Ok(crate::authority::AuthOutcome::Denied) => "denied",
+                                    _ => "cancelled",
                                 }
                             }
                             _ = cancel_token.cancelled() => {
-                                crate::authority::take_pending();
+                                crate::authority::take_pending(rid);
                                 messages.push(Message::system("用户已中断当前操作，之前的审批请求已取消。"));
-                                approval_outcome = "cancelled";
-                                break;
+                                "cancelled"
                             }
-                        }
-                    }
-                }
-                // Determine actual outcome by checking the gate cache.
-                if approval_outcome != "cancelled" {
-                    if let Some((_, ref cmd, _)) = pending_info {
-                        let is_approved = matches!(
-                            crate::authority::check(&tc.function.name, cmd),
-                            CheckResult::Allow
-                        ) || matches!(
-                            crate::authority::check_tool(&tc.function.name),
-                            CheckResult::Allow
-                        );
-                        if is_approved {
-                            approval_outcome = "approved";
-                        } else {
-                            approval_outcome = "denied";
-                        }
+                        };
+                        approval_outcome = outcome;
                     }
                 }
                 // Generate correct observation.
@@ -577,6 +648,7 @@ pub async fn run_agent(
                     StopReason::MaxToolCallsReached,
                     tool_calls_made,
                     tokens,
+                    &run_id,
                 ));
             }
 
@@ -589,7 +661,7 @@ pub async fn run_agent(
                         output.render_observation(&tc.function.name),
                     ));
                     if let Some(ref cb) = callbacks {
-                        (cb.on_tool_done)(&tc.function.name, true);
+                        (cb.on_tool_done)(&tc.function.name, &tc.function.arguments, true);
                     }
                 }
                 ToolStatus::Error => {
@@ -600,7 +672,7 @@ pub async fn run_agent(
                         output.render_observation(&tc.function.name),
                     ));
                     if let Some(ref cb) = callbacks {
-                        (cb.on_tool_done)(&tc.function.name, false);
+                        (cb.on_tool_done)(&tc.function.name, &tc.function.arguments, false);
                     }
 
                     if consecutive_tool_failures >= 3 {
@@ -609,11 +681,12 @@ pub async fn run_agent(
                             runtime,
                             &mut messages,
                             StopReason::ToolFailurePersistent,
-                            tool_calls_made,
-                            tokens,
-                        ));
-                    }
-                }
+                    tool_calls_made,
+                    tokens,
+                    &run_id,
+                ));
+            }
+        }
                 _ => {
                     messages.push(Message::tool_result(
                         &tc.id,
@@ -881,6 +954,7 @@ pub async fn run_agent(
         StopReason::MaxStepsReached,
         tool_calls_made,
         tokens,
+        &run_id,
     ))
 }
 
@@ -914,8 +988,19 @@ fn finish_loop_result(
     stop_reason: StopReason,
     tool_calls_made: usize,
     estimated_tokens: usize,
+    run_id: &str,
 ) -> LoopResult {
     let outcome = RunOutcome::from(stop_reason);
+    // Only delete checkpoint for clean finishes. For interrupted/failed/
+    // blocked/budget-exhausted the checkpoint is preserved so the user
+    // can recover or re-examine the state.
+    if matches!(stop_reason, StopReason::Finished) {
+        if let Some(ref cs) = runtime.checkpoint_store {
+            if let Err(e) = cs.delete_run(run_id) {
+                warn!(error = %e, "failed to delete agent checkpoint on finish");
+            }
+        }
+    }
     record_trace(
         runtime,
         HarnessEvent::RunCompleted {
@@ -1702,12 +1787,12 @@ async fn stream_step(
                 StreamEvent::ToolCallDelta {
                     index: _,
                     id: _,
-                    name,
+                    name: _,
                     arguments: _,
                 } => {
-                    if let Some(n) = name {
-                        (cb.on_tool_start)(&n);
-                    }
+                    // Tool start notifications are deferred to the main loop
+                    // where the full arguments are available, ensuring the
+                    // ledger key matches between start and completion.
                 }
                 StreamEvent::Finished {
                     tool_calls: tcs, ..

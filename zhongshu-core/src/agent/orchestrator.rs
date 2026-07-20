@@ -254,11 +254,16 @@ impl FileClaimCoordinator for DeeplosslessProxy {
 pub struct Orchestrator {
     pub runtime: AgentRuntime,
     pub registry: LlmRegistry,
+    pub max_concurrent_workers: usize,
 }
 
 impl Orchestrator {
     pub fn new(runtime: AgentRuntime, registry: LlmRegistry) -> Self {
-        Orchestrator { runtime, registry }
+        Orchestrator {
+            runtime,
+            registry,
+            max_concurrent_workers: 2,
+        }
     }
 
     /// Split a high-level task into file-scoped worker assignments.
@@ -464,10 +469,19 @@ impl Orchestrator {
                 .iter()
                 .map(|assignment| worker_started_event(assignment, session_id.clone()))
                 .collect::<Vec<_>>();
+            let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(
+                self.max_concurrent_workers.max(1),
+            ));
             let results = futures::future::join_all(
                 assignments
                     .iter()
-                    .map(|assignment| self.execute_assignment(assignment)),
+                    .map(|assignment| {
+                        let sem = sem.clone();
+                        async move {
+                            let _permit = sem.acquire().await.expect("semaphore closed");
+                            self.execute_assignment(assignment).await
+                        }
+                    }),
             )
             .await;
             let mut reports = Vec::new();
@@ -1319,7 +1333,8 @@ fn overlap_key(left: &PathBuf, right: &PathBuf) -> PathBuf {
 }
 
 #[cfg(test)]
-mod tests {
+#[cfg(test)]
+pub mod tests {
     use super::*;
     use crate::agent::llm::{ChatCompletionResponse, FinalChoice, LlmProvider};
     use crate::agent::AgentBudget;
@@ -1331,18 +1346,18 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::time::Duration;
+    pub struct MockProvider;
 
-    struct MockProvider;
     #[derive(Clone)]
-    struct ConcurrentMockProvider {
-        in_flight: Arc<AtomicUsize>,
-        max_in_flight: Arc<AtomicUsize>,
+    pub struct ConcurrentMockProvider {
+        pub in_flight: Arc<AtomicUsize>,
+        pub max_in_flight: Arc<AtomicUsize>,
     }
-    struct MockFileClaimCoordinator {
-        conflict_files: BTreeSet<String>,
-        missing_releases: BTreeSet<String>,
-        claimed: Mutex<Vec<(String, String)>>,
-        released: Mutex<Vec<(String, String)>>,
+    pub struct MockFileClaimCoordinator {
+        pub conflict_files: BTreeSet<String>,
+        pub missing_releases: BTreeSet<String>,
+        pub claimed: Mutex<Vec<(String, String)>>,
+        pub released: Mutex<Vec<(String, String)>>,
     }
 
     #[async_trait]
@@ -1411,7 +1426,7 @@ mod tests {
     }
 
     impl MockFileClaimCoordinator {
-        fn new() -> Self {
+        pub fn new() -> Self {
             Self {
                 conflict_files: BTreeSet::new(),
                 missing_releases: BTreeSet::new(),
@@ -1420,21 +1435,21 @@ mod tests {
             }
         }
 
-        fn with_conflict(mut self, file_path: &str) -> Self {
+        pub fn with_conflict(mut self, file_path: &str) -> Self {
             self.conflict_files.insert(test_file_key(file_path));
             self
         }
 
-        fn with_missing_release(mut self, file_path: &str) -> Self {
+        pub fn with_missing_release(mut self, file_path: &str) -> Self {
             self.missing_releases.insert(test_file_key(file_path));
             self
         }
 
-        fn claimed(&self) -> Vec<(String, String)> {
+        pub fn claimed(&self) -> Vec<(String, String)> {
             self.claimed.lock().unwrap().clone()
         }
 
-        fn released(&self) -> Vec<(String, String)> {
+        pub fn released(&self) -> Vec<(String, String)> {
             self.released.lock().unwrap().clone()
         }
     }
@@ -1513,7 +1528,7 @@ mod tests {
         )
     }
 
-    fn dummy_runtime() -> AgentRuntime {
+    pub fn dummy_runtime() -> AgentRuntime {
         AgentRuntime::new(
             MockProvider,
             ToolRegistry::new(),

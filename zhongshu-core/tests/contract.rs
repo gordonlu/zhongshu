@@ -179,9 +179,10 @@ fn scripted(entries: &[(&str, &str)]) -> ScriptedProvider {
 
 // ── Contract tests ─────────────────────────────────────────────────────
 
-/// Full turn (tool call → final text) produces RunOutcome::CompletedVerified.
+/// Full turn (tool call → final text) produces RunOutcome::CompletedUnverified
+/// when no verification evidence is provided.
 #[tokio::test]
-async fn completed_turn_has_completed_verified_outcome() {
+async fn completed_turn_has_completed_unverified_outcome() {
     let result = run_agent_with(
         scripted(&[("noop", "{}")]),
         ToolRegistry::new().register(OkTool),
@@ -190,7 +191,7 @@ async fn completed_turn_has_completed_verified_outcome() {
     )
     .await;
 
-    assert_eq!(result.outcome, RunOutcome::CompletedVerified);
+    assert_eq!(result.outcome, RunOutcome::CompletedUnverified);
     assert!(matches!(result.stop_reason, StopReason::Finished));
 }
 
@@ -377,7 +378,7 @@ async fn two_consecutive_runs_produce_independent_results() {
     )
     .await
     .unwrap();
-    assert_eq!(r1.outcome, RunOutcome::CompletedVerified);
+    assert_eq!(r1.outcome, RunOutcome::CompletedUnverified);
 
     let r2 = run_agent(
         &mut runtime,
@@ -388,7 +389,7 @@ async fn two_consecutive_runs_produce_independent_results() {
     )
     .await
     .unwrap();
-    assert_eq!(r2.outcome, RunOutcome::CompletedVerified);
+    assert_eq!(r2.outcome, RunOutcome::CompletedUnverified);
 }
 
 /// Pre-cancelled token skips the loop and returns Interrupted immediately.

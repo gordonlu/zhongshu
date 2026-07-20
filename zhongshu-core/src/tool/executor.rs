@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
 use crate::tool::spec::{ObservableToolInput, ToolReplayKey, ToolResultSummary, ToolSpec};
 use crate::tool::{ToolOutput, ToolRegistry, ToolStatus};
@@ -50,28 +51,64 @@ impl<'a> ToolExecutor<'a> {
         Self { registry, policy }
     }
 
-    pub async fn execute(&self, name: &str, arguments: &str) -> ToolExecution {
+    pub async fn execute(
+        &self,
+        name: &str,
+        arguments: &str,
+        cancel_token: Option<CancellationToken>,
+    ) -> ToolExecution {
         let args = parse_arguments(arguments);
-        let observable_input = ObservableToolInput::new(name, args.clone());
+        let args_string = args.to_string();
+        let observable_input = ObservableToolInput::new(name, args);
         let replay_key = ToolReplayKey::from_observable(&observable_input);
         let spec = self.registry.get(name).map(|tool| tool.spec());
         let started = Instant::now();
 
-        let result = tokio::time::timeout(
-            self.policy.timeout,
-            self.registry.execute(name, &args.to_string()),
-        )
-        .await;
-
-        let (output, timed_out) = match result {
-            Ok(output) => (output, false),
-            Err(_) => (
-                ToolOutput::error(format!(
-                    "tool '{name}' timed out after {:?}",
-                    self.policy.timeout
-                )),
-                true,
-            ),
+        let (output, timed_out) = match cancel_token {
+            Some(ct) => {
+                tokio::select! {
+                    result = tokio::time::timeout(
+                        self.policy.timeout,
+                        self.registry.execute(name, &args_string),
+                    ) => {
+                        match result {
+                            Ok(output) => (output, false),
+                            Err(_) => (
+                                ToolOutput::error(format!(
+                                    "tool '{name}' timed out after {:?}",
+                                    self.policy.timeout
+                                )),
+                                true,
+                            ),
+                        }
+                    }
+                    _ = ct.cancelled() => {
+                        (
+                            ToolOutput::error(format!(
+                                "tool '{name}' was cancelled",
+                            )),
+                            true,
+                        )
+                    }
+                }
+            }
+            None => {
+                let result = tokio::time::timeout(
+                    self.policy.timeout,
+                    self.registry.execute(name, &args_string),
+                )
+                .await;
+                match result {
+                    Ok(output) => (output, false),
+                    Err(_) => (
+                        ToolOutput::error(format!(
+                            "tool '{name}' timed out after {:?}",
+                            self.policy.timeout
+                        )),
+                        true,
+                    ),
+                }
+            }
         };
 
         let summary = ToolResultSummary::from_output(&output, self.policy.result_preview_chars);
@@ -88,7 +125,11 @@ impl<'a> ToolExecutor<'a> {
         }
     }
 
-    pub async fn execute_plan(&self, calls: Vec<ToolCallRequest>) -> ToolExecutionPlan {
+    pub async fn execute_plan(
+        &self,
+        calls: Vec<ToolCallRequest>,
+        cancel_token: Option<CancellationToken>,
+    ) -> ToolExecutionPlan {
         let mut results = Vec::with_capacity(calls.len());
         let mut read_group = Vec::new();
         let mut used_parallel_read_group = false;
@@ -101,14 +142,14 @@ impl<'a> ToolExecutor<'a> {
             }
 
             let (flushed_parallel, should_stop) = self
-                .flush_concurrent_read_group(&mut read_group, &mut results)
+                .flush_concurrent_read_group(&mut read_group, &mut results, cancel_token.clone())
                 .await;
             used_parallel_read_group |= flushed_parallel;
             if should_stop {
                 break;
             }
 
-            let execution = self.execute(&call.name, &call.arguments).await;
+            let execution = self.execute(&call.name, &call.arguments, cancel_token.clone()).await;
             used_serial_boundary = true;
             let should_stop = execution.output.status != ToolStatus::Success
                 || execution.timed_out
@@ -121,7 +162,7 @@ impl<'a> ToolExecutor<'a> {
 
         if !read_group.is_empty() {
             let (flushed_parallel, _) = self
-                .flush_concurrent_read_group(&mut read_group, &mut results)
+                .flush_concurrent_read_group(&mut read_group, &mut results, None)
                 .await;
             used_parallel_read_group |= flushed_parallel;
         }
@@ -149,6 +190,7 @@ impl<'a> ToolExecutor<'a> {
         &self,
         read_group: &mut Vec<ToolCallRequest>,
         results: &mut Vec<ToolExecution>,
+        cancel_token: Option<CancellationToken>,
     ) -> (bool, bool) {
         if read_group.is_empty() {
             return (false, false);
@@ -159,7 +201,7 @@ impl<'a> ToolExecutor<'a> {
         let executions = join_all(
             calls
                 .iter()
-                .map(|call| self.execute(&call.name, &call.arguments)),
+                .map(|call| self.execute(&call.name, &call.arguments, cancel_token.clone())),
         )
         .await;
         let should_stop = executions.iter().any(Self::is_failed_execution);
@@ -364,7 +406,7 @@ mod tests {
     async fn executor_returns_structured_execution_record() {
         let registry = ToolRegistry::new().register(EchoTool);
         let execution = ToolExecutor::new(&registry)
-            .execute("echo", r#"{"b":1,"a":2}"#)
+            .execute("echo", r#"{"b":1,"a":2}"#, None)
             .await;
 
         assert_eq!(execution.tool_name, "echo");
@@ -380,7 +422,7 @@ mod tests {
     #[tokio::test]
     async fn executor_records_parse_error_as_observable_input() {
         let registry = ToolRegistry::new().register(EchoTool);
-        let execution = ToolExecutor::new(&registry).execute("echo", "{").await;
+        let execution = ToolExecutor::new(&registry).execute("echo", "{", None).await;
 
         assert!(execution
             .observable_input
@@ -393,10 +435,13 @@ mod tests {
     async fn execution_plan_stops_after_mutation_when_requested() {
         let registry = ToolRegistry::new().register(WriteTool).register(EchoTool);
         let plan = ToolExecutor::new(&registry)
-            .execute_plan(vec![
-                ToolCallRequest::new("fs", r#"{"path":"a.txt"}"#).stop_after_mutation(true),
-                ToolCallRequest::new("echo", r#"{"a":1}"#),
-            ])
+            .execute_plan(
+                vec![
+                    ToolCallRequest::new("fs", r#"{"path":"a.txt"}"#).stop_after_mutation(true),
+                    ToolCallRequest::new("echo", r#"{"a":1}"#),
+                ],
+                None,
+            )
             .await;
 
         assert_eq!(plan.scheduling, ToolScheduling::Serial);
@@ -409,10 +454,13 @@ mod tests {
         let (search, _current, max, _writes_seen) = concurrent_search_tool();
         let registry = ToolRegistry::new().register(search);
         let plan = ToolExecutor::new(&registry)
-            .execute_plan(vec![
-                ToolCallRequest::new("search_files", r#"{"query":"a"}"#),
-                ToolCallRequest::new("search_files", r#"{"query":"b"}"#),
-            ])
+            .execute_plan(
+                vec![
+                    ToolCallRequest::new("search_files", r#"{"query":"a"}"#),
+                    ToolCallRequest::new("search_files", r#"{"query":"b"}"#),
+                ],
+                None,
+            )
             .await;
 
         assert_eq!(plan.scheduling, ToolScheduling::ConcurrentReadOnly);
@@ -425,12 +473,15 @@ mod tests {
         let (search, _current, max, _writes_seen) = concurrent_search_tool();
         let registry = ToolRegistry::new().register(search).register(WriteTool);
         let plan = ToolExecutor::new(&registry)
-            .execute_plan(vec![
-                ToolCallRequest::new("search_files", r#"{"query":"a"}"#),
-                ToolCallRequest::new("search_files", r#"{"query":"b"}"#),
-                ToolCallRequest::new("fs", r#"{"path":"a.txt"}"#),
-                ToolCallRequest::new("search_files", r#"{"query":"c"}"#),
-            ])
+            .execute_plan(
+                vec![
+                    ToolCallRequest::new("search_files", r#"{"query":"a"}"#),
+                    ToolCallRequest::new("search_files", r#"{"query":"b"}"#),
+                    ToolCallRequest::new("fs", r#"{"path":"a.txt"}"#),
+                    ToolCallRequest::new("search_files", r#"{"query":"c"}"#),
+                ],
+                None,
+            )
             .await;
 
         assert_eq!(plan.scheduling, ToolScheduling::Mixed);
@@ -447,11 +498,14 @@ mod tests {
         let (search, _current, _max, _writes_seen) = concurrent_search_tool();
         let registry = ToolRegistry::new().register(search).register(WriteTool);
         let plan = ToolExecutor::new(&registry)
-            .execute_plan(vec![
-                ToolCallRequest::new("search_files", r#"{"query":"a"}"#),
-                ToolCallRequest::new("search_files", r#"{"fail":true}"#),
-                ToolCallRequest::new("fs", r#"{"path":"a.txt"}"#),
-            ])
+            .execute_plan(
+                vec![
+                    ToolCallRequest::new("search_files", r#"{"query":"a"}"#),
+                    ToolCallRequest::new("search_files", r#"{"fail":true}"#),
+                    ToolCallRequest::new("fs", r#"{"path":"a.txt"}"#),
+                ],
+                None,
+            )
             .await;
 
         assert_eq!(plan.scheduling, ToolScheduling::ConcurrentReadOnly);

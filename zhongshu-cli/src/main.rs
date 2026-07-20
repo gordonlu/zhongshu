@@ -127,10 +127,10 @@ async fn main() -> anyhow::Result<()> {
                 print!("{text}");
                 io::stdout().flush().ok();
             }),
-            on_tool_start: Box::new(move |tool| {
+            on_tool_start: Box::new(move |tool, _args| {
                 status_line(tool, true);
             }),
-            on_tool_done: Box::new(move |_tool, success| {
+            on_tool_done: Box::new(move |_tool, _args, success| {
                 if !success {
                     status_line(_tool, false);
                 }

@@ -1,9 +1,11 @@
 use crate::agent::attention::AttentionLevel;
+use crate::agent::contract::{AcceptanceCriteria, DelegationContract, PatchRecord, VerificationRecord, CommandRecord, WorkerArtifacts, WorkerOutcome};
 use crate::agent::llm::{LlmProvider, Message};
 use crate::agent::loop_::{run_agent, AgentCallbacks};
 use crate::agent::profile::AgentProfile;
 use crate::agent::report::Report;
 use crate::agent::runtime::AgentRuntime;
+use crate::harness::trace::event::HarnessEvent;
 use crate::task::Task;
 use tokio_util::sync::CancellationToken;
 
@@ -114,6 +116,122 @@ impl Worker {
                 .unwrap_or_else(|| runtime.model.clone()),
             reasoning_effort: profile.llm_reasoning_effort.clone(),
             harness_state: crate::harness::HarnessState::new(),
+            idempotency_checker: None,
+            checkpoint_store: None,
+            ledger: None,
+        }
+    }
+
+    /// Execute a worker with a structured DelegationContract.
+    ///
+    /// Converts the contract into a Task + AgentProfile, runs the worker,
+    /// and returns a structured WorkerOutcome with artifacts extracted from
+    /// trace events.
+    pub async fn execute_with_contract(
+        runtime: &AgentRuntime,
+        contract: &DelegationContract,
+        callbacks: Option<std::sync::Arc<AgentCallbacks>>,
+    ) -> anyhow::Result<WorkerOutcome> {
+        let task = Task::from(contract);
+        let profile = AgentProfile::from(contract);
+        let report = Self::execute(runtime, &profile, task, callbacks).await?;
+        let mut outcome = WorkerOutcome::from(report);
+        outcome.artifacts = Self::extract_artifacts(&outcome.trace_events);
+        // Verify acceptance criteria and downgrade status if unmet.
+        if outcome.status.is_success() {
+            let issues = Self::check_acceptance(&outcome.artifacts, &contract.acceptance);
+            if !issues.is_empty() {
+                outcome.summary = format!("{} (验收问题: {})", outcome.summary, issues.join("; "));
+                outcome.status = crate::agent::contract::WorkerStatus::CompletedWithIssues;
+            }
+        }
+        Ok(outcome)
+    }
+
+    /// Check acceptance criteria against the extracted artifacts.
+    /// Returns a list of unmet criteria descriptions.
+    fn check_acceptance(
+        artifacts: &WorkerArtifacts,
+        criteria: &AcceptanceCriteria,
+    ) -> Vec<String> {
+        let mut issues = Vec::new();
+        if criteria.verification_required && artifacts.verification_results.is_empty() {
+            issues.push("需要验证但无验证记录".into());
+        }
+        if criteria.tests_must_pass {
+            let failed: Vec<&str> = artifacts
+                .verification_results
+                .iter()
+                .filter(|v| !v.success)
+                .map(|v| v.command.as_str())
+                .collect();
+            if !failed.is_empty() {
+                issues.push(format!(
+                    "以下验证未通过: {}",
+                    failed.join(", ")
+                ));
+            }
+        }
+        if criteria.no_ownership_violations {
+            // Ownership violations are detected at the orchestrator level;
+            // here we have no access to the project index. The orchestrator
+            // must enforce this before accepting the outcome.
+        }
+        if !criteria.custom_rules.is_empty() {
+            issues.push(format!(
+                "以下自定义规则需人工确认: {}",
+                criteria.custom_rules.join("; "),
+            ));
+        }
+        issues
+    }
+
+    /// Extract structured artifacts from trace events.
+    fn extract_artifacts(events: &[HarnessEvent]) -> WorkerArtifacts {
+        let mut patches = Vec::new();
+        let mut verification_results = Vec::new();
+        let mut commands_run = Vec::new();
+
+        for event in events {
+            match event {
+                HarnessEvent::PatchApplied { path, .. } => {
+                    patches.push(PatchRecord {
+                        path: path.clone(),
+                        diff_summary: String::new(),
+                        applied: true,
+                    });
+                }
+                HarnessEvent::PatchPreview { path, diff_summary, .. } => {
+                    if !patches.iter().any(|p: &PatchRecord| p.path == *path) {
+                        patches.push(PatchRecord {
+                            path: path.clone(),
+                            diff_summary: diff_summary.clone(),
+                            applied: false,
+                        });
+                    }
+                }
+                HarnessEvent::Verification { command, success: v_success, exit_code, .. } => {
+                    verification_results.push(VerificationRecord {
+                        command: command.clone(),
+                        success: *v_success,
+                        exit_code: *exit_code,
+                    });
+                }
+                HarnessEvent::ToolCall { tool_name, success: t_success, .. } => {
+                    commands_run.push(CommandRecord {
+                        command: tool_name.clone(),
+                        exit_code: None,
+                        success: *t_success,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        WorkerArtifacts {
+            patches,
+            verification_results,
+            commands_run,
         }
     }
 

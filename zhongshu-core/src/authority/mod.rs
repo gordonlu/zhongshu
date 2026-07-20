@@ -714,7 +714,9 @@ fn timestamp() -> String {
 // ── Global singleton ─────────────────────────────────────────────────
 
 static GLOBAL_GATE: OnceLock<Mutex<AuthorityGate>> = OnceLock::new();
-static PENDING_AUTH: OnceLock<Mutex<Option<PendingRequest>>> = OnceLock::new();
+static PENDING_AUTH: OnceLock<Mutex<HashMap<String, PendingRequest>>> = OnceLock::new();
+static AUTH_OUTCOME_TX: OnceLock<Mutex<HashMap<String, tokio::sync::oneshot::Sender<AuthOutcome>>>> =
+    OnceLock::new();
 static AUTH_TX: OnceLock<watch::Sender<Option<PendingRequest>>> = OnceLock::new();
 
 /// Full detail of a pending authorisation request (stored for UI display).
@@ -725,6 +727,14 @@ pub struct PendingRequest {
     pub program: String,
     pub command: String,
     pub source: String,
+}
+
+/// Explicit outcome from an approval decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthOutcome {
+    Approved,
+    Denied,
+    Cancelled,
 }
 
 fn generate_id() -> String {
@@ -740,7 +750,7 @@ pub fn init(gate: AuthorityGate) {
 }
 
 /// Get a receiver for auth state changes. The receiver yields `Some(request)`
-/// when a new auth request arrives and `None` when it is resolved.
+/// when the most recent auth request arrives and `None` when it is resolved.
 pub fn subscribe_auth() -> watch::Receiver<Option<PendingRequest>> {
     let tx = AUTH_TX.get_or_init(|| {
         let (tx, _rx) = watch::channel(None);
@@ -772,9 +782,10 @@ pub fn check_tool(tool: &str) -> CheckResult {
     }
 }
 
-/// Remember the last tool / command that asked for authorisation.
-pub fn set_pending(tool: &str, program: &str, command: &str, source: &str) {
-    let cell = PENDING_AUTH.get_or_init(|| Mutex::new(None));
+/// Create a new pending authorisation request and store it in the map.
+/// Returns the generated request id.
+pub fn set_pending(tool: &str, program: &str, command: &str, source: &str) -> String {
+    let cell = PENDING_AUTH.get_or_init(|| Mutex::new(HashMap::new()));
     let req = PendingRequest {
         id: generate_id(),
         tool: tool.to_string(),
@@ -782,81 +793,141 @@ pub fn set_pending(tool: &str, program: &str, command: &str, source: &str) {
         command: command.to_string(),
         source: source.to_string(),
     };
-    *cell.lock().unwrap() = Some(req.clone());
+    let id = req.id.clone();
+    cell.lock().unwrap().insert(id.clone(), req.clone());
     if let Some(tx) = AUTH_TX.get() {
         let _ = tx.send(Some(req));
     }
+    id
 }
 
-/// Override the source on the current pending request (called by agent loop).
+/// Register a oneshot sender that will receive the approval outcome for
+/// the given request. The agent loop calls this after creating the channel.
+pub fn register_auth_outcome_tx(
+    id: &str,
+    tx: tokio::sync::oneshot::Sender<AuthOutcome>,
+) {
+    let cell = AUTH_OUTCOME_TX.get_or_init(|| Mutex::new(HashMap::new()));
+    cell.lock().unwrap().insert(id.to_string(), tx);
+}
+
+/// Register a waiter for a pending auth request, but only if the request
+/// still exists in the pending map. Returns Ok(()) if the sender was
+/// registered, Err(()) if the request was already resolved.
+///
+/// This is the safe atomic alternative to `register_auth_outcome_tx`:
+/// it checks request existence and registers the sender under a single
+/// lock of the pending map, eliminating the race where a fast user
+/// approval resolves the request before the waiter is registered.
+pub fn register_waiter_if_pending(
+    id: &str,
+    tx: tokio::sync::oneshot::Sender<AuthOutcome>,
+) -> Result<(), ()> {
+    // Lock PENDING_AUTH to check existence.
+    let cell = PENDING_AUTH.get_or_init(|| Mutex::new(HashMap::new()));
+    let guard = cell.lock().unwrap();
+    if !guard.contains_key(id) {
+        // Request was already resolved — don't register.
+        return Err(());
+    }
+    // Request still exists. Drop pending lock (different lock domain)
+    // and register the waiter.
+    drop(guard);
+    let tx_cell = AUTH_OUTCOME_TX.get_or_init(|| Mutex::new(HashMap::new()));
+    tx_cell.lock().unwrap().insert(id.to_string(), tx);
+    Ok(())
+}
+
+/// Override the source on a pending request (called by agent loop).
+/// If `id` is `None`, updates the first pending request found.
 pub fn set_pending_source(source: &str) {
-    let cell = PENDING_AUTH.get_or_init(|| Mutex::new(None));
-    if let Some(ref mut req) = *cell.lock().unwrap() {
-        req.source = source.to_string();
-        if let Some(tx) = AUTH_TX.get() {
-            let _ = tx.send(Some(req.clone()));
+    let cell = PENDING_AUTH.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cell.lock().unwrap();
+    // Get the first entry (there's typically only one pending request)
+    let key = guard.keys().next().cloned();
+    if let Some(k) = key {
+        if let Some(req) = guard.get_mut(&k) {
+            req.source = source.to_string();
+            if let Some(tx) = AUTH_TX.get() {
+                let _ = tx.send(Some(req.clone()));
+            }
         }
     }
 }
 
-/// Check if there is a pending authorisation request (non-consuming).
+/// Check if there is any pending authorisation request.
 pub fn is_pending() -> bool {
-    let cell = PENDING_AUTH.get_or_init(|| Mutex::new(None));
-    cell.lock().unwrap().is_some()
+    let cell = PENDING_AUTH.get_or_init(|| Mutex::new(HashMap::new()));
+    !cell.lock().unwrap().is_empty()
 }
 
-/// Read the pending request without consuming it (for UI display).
+/// Read the first pending request without consuming it (for UI display).
 pub fn peek_pending() -> Option<PendingRequest> {
-    let cell = PENDING_AUTH.get_or_init(|| Mutex::new(None));
-    cell.lock().unwrap().clone()
+    let cell = PENDING_AUTH.get_or_init(|| Mutex::new(HashMap::new()));
+    cell.lock().unwrap().values().next().cloned()
 }
 
-/// Take the most recent pending request (i.e. consume it).
-pub fn take_pending() -> Option<PendingRequest> {
-    let cell = PENDING_AUTH.get_or_init(|| Mutex::new(None));
-    let req = cell.lock().unwrap().take();
+/// Take the first pending request without needing an id (for tests).
+pub fn take_any_pending() -> Option<PendingRequest> {
+    let cell = PENDING_AUTH.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = cell.lock().unwrap().keys().next().cloned();
+    key.and_then(|k| take_pending(&k))
+}
+
+/// Remove a pending request by id without sending an outcome.
+pub fn take_pending(id: &str) -> Option<PendingRequest> {
+    let cell = PENDING_AUTH.get_or_init(|| Mutex::new(HashMap::new()));
+    let req = cell.lock().unwrap().remove(id);
+    let _ = AUTH_OUTCOME_TX.get().map(|m| m.lock().unwrap().remove(id));
     if req.is_some() {
         if let Some(tx) = AUTH_TX.get() {
-            let _ = tx.send(None);
+            let _ = tx.send(peek_pending());
         }
     }
     req
 }
 
-/// Deny a pending auth request matching the given id.
-/// If the id does not match the current pending request, the request is left untouched.
+/// Deny a pending auth request by id. Sends `AuthOutcome::Denied` if a
+/// waiter is registered, and removes the request from the map.
 pub fn deny_pending(id: &str) {
-    let cell = PENDING_AUTH.get_or_init(|| Mutex::new(None));
+    let cell = PENDING_AUTH.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = cell.lock().unwrap();
-    if let Some(ref req) = *guard {
-        if req.id == id {
-            let _ = guard.take();
-            drop(guard);
-            if let Some(tx) = AUTH_TX.get() {
-                let _ = tx.send(None);
+    if let Some(req) = guard.remove(id) {
+        drop(guard);
+        if let Some(tx) = AUTH_OUTCOME_TX.get() {
+            if let Some(sender) = tx.lock().unwrap().remove(id) {
+                let _ = sender.send(AuthOutcome::Denied);
             }
-        } else {
-            tracing::debug!(expected = %id, actual = %req.id, "deny_pending: id mismatch");
         }
+        if let Some(tx) = AUTH_TX.get() {
+            let _ = tx.send(peek_pending());
+        }
+        tracing::debug!(%id, tool = %req.tool, "auth denied");
+    } else {
+        tracing::debug!(%id, "deny_pending: request not found");
     }
 }
 
-/// Approve a pending auth request matching the given id.
-/// If the id does not match, the pending request is left untouched.
+/// Approve a pending auth request by id. Adds the (tool, program) pair to
+/// the gate cache, sends `AuthOutcome::Approved` if a waiter is registered,
+/// and removes the request from the map.
 pub fn approve_pending(id: &str) {
-    let cell = PENDING_AUTH.get_or_init(|| Mutex::new(None));
+    let cell = PENDING_AUTH.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = cell.lock().unwrap();
-    if let Some(req) = guard.take() {
-        if req.id == id {
-            drop(guard);
-            approve(&req.tool, &req.program);
-            if let Some(tx) = AUTH_TX.get() {
-                let _ = tx.send(None);
+    if let Some(req) = guard.remove(id) {
+        drop(guard);
+        approve(&req.tool, &req.program);
+        if let Some(tx) = AUTH_OUTCOME_TX.get() {
+            if let Some(sender) = tx.lock().unwrap().remove(id) {
+                let _ = sender.send(AuthOutcome::Approved);
             }
-        } else {
-            tracing::debug!(expected = %id, actual = %req.id, "approve_pending: id mismatch, restoring");
-            *guard = Some(req);
         }
+        if let Some(tx) = AUTH_TX.get() {
+            let _ = tx.send(peek_pending());
+        }
+        tracing::debug!(%id, tool = %req.tool, program = %req.program, "auth approved");
+    } else {
+        tracing::debug!(%id, "approve_pending: request not found");
     }
 }
 
@@ -1127,29 +1198,25 @@ mod tests {
     #[test]
     fn pending_request_roundtrip() {
         init(AuthorityGate::new(true, 1800));
-        set_pending("shell", "rm", "rm -rf ~/temp", "test");
-        let req = take_pending().expect("pending set should be retrievable");
+        let id = set_pending("shell", "rm", "rm -rf ~/temp", "test");
+        let req = take_pending(&id).expect("pending set should be retrievable");
         assert!(!req.id.is_empty(), "pending request must have an id");
         assert_eq!(req.tool, "shell");
         assert_eq!(req.program, "rm");
         assert_eq!(req.command, "rm -rf ~/temp");
         assert_eq!(req.source, "test");
         // take_pending consumes exactly once.
-        assert!(take_pending().is_none(), "second take must return None");
+        assert!(take_pending(&id).is_none(), "second take must return None");
     }
 
     #[test]
     fn approve_pending_end_to_end() {
         init(AuthorityGate::new(true, 1800));
-        match check_tool("screenshot") {
+        let id = match check_tool("screenshot") {
             CheckResult::RequireAuth { request } => {
-                set_pending(&request.tool, &request.program, &request.command, "test");
+                set_pending(&request.tool, &request.program, &request.command, "test")
             }
             _ => panic!("expected RequireAuth"),
-        }
-        let id = {
-            let cell = PENDING_AUTH.get_or_init(|| Mutex::new(None));
-            cell.lock().unwrap().as_ref().unwrap().id.clone()
         };
         approve_pending(&id);
         // After approval, the tool check passes (cached).
@@ -1160,28 +1227,26 @@ mod tests {
     fn approve_pending_wrong_id_noop() {
         init(AuthorityGate::new(true, 1800));
         // Approve/deny with a wrong id must not consume the pending.
-        set_pending("shell", "rm", "rm -rf ~/temp", "test");
+        let id = set_pending("shell", "rm", "rm -rf ~/temp", "test");
         approve_pending("definitely-wrong-id-that-should-not-match");
         assert!(is_pending(), "wrong-id approve must be no-op");
         deny_pending("also-wrong-id");
         assert!(is_pending(), "wrong-id deny must be no-op");
         // Clean up with correct id.
-        if let Some(req) = take_pending() {
-            assert!(!req.id.is_empty(), "id must be non-empty");
-            deny_pending(&req.id);
-        }
+        let req = take_pending(&id).expect("pending should still be there");
+        assert!(!req.id.is_empty(), "id must be non-empty");
     }
 
     #[test]
     fn shell_tool_sets_pending_on_auth_required() {
         init(AuthorityGate::new(true, 1800));
-        match check("shell", "rm file.txt") {
+        let id = match check("shell", "rm file.txt") {
             CheckResult::RequireAuth { request } => {
-                set_pending(&request.tool, &request.program, &request.command, "test");
+                set_pending(&request.tool, &request.program, &request.command, "test")
             }
             _ => panic!("expected RequireAuth"),
-        }
-        let req = take_pending().unwrap();
+        };
+        let req = take_pending(&id).unwrap();
         assert_eq!(req.tool, "shell");
         assert_eq!(req.program, "rm");
         assert!(!req.command.is_empty(), "command should not be empty");

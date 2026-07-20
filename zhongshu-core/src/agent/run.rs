@@ -1,3 +1,5 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
@@ -5,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::agent::intent::{intent_classify, InterruptionIntent};
+use crate::core::RunLedger;
 use crate::event::{Event, EventBus, ResponseEvent, RunEvent};
 use crate::tool::spec::SideEffect;
 
@@ -68,6 +71,7 @@ pub struct RunController {
     event_bus: Arc<EventBus>,
     last_action: std::sync::Mutex<Option<InterruptionAction>>,
     interrupted: AtomicBool,
+    ledger: RwLock<Option<RunLedger>>,
 }
 
 impl RunController {
@@ -84,7 +88,16 @@ impl RunController {
             event_bus,
             last_action: std::sync::Mutex::new(None),
             interrupted: AtomicBool::new(false),
+            ledger: RwLock::new(None),
         }
+    }
+
+    pub fn set_ledger(&self, ledger: RunLedger) {
+        *self.ledger.write().unwrap() = Some(ledger);
+    }
+
+    pub fn get_ledger(&self) -> Option<RunLedger> {
+        self.ledger.read().unwrap().clone()
     }
 
     pub fn interruption_ctx(&self) -> Option<InterruptionCtx> {
@@ -112,6 +125,10 @@ impl RunController {
 
         // Reset the cancellation token
         *self.cancel_token.lock().unwrap() = CancellationToken::new();
+
+        if let Some(ref ledger) = *self.ledger.read().unwrap() {
+            let _ = ledger.record_run_started(&run_id.to_string(), goal);
+        }
 
         run_id
     }
@@ -214,9 +231,13 @@ impl RunController {
 
         // Publish event
         self.event_bus.publish(Event::Run(RunEvent::Interrupted {
-            run_id: rid,
+            run_id: rid.clone(),
             reason: "user_interjection".into(),
         }));
+
+        if let Some(ref ledger) = *self.ledger.read().unwrap() {
+            let _ = ledger.record_run_interrupted(&rid, "user_interjection");
+        }
 
         // Classify intent
         let intent = intent_classify(user_message);
@@ -344,6 +365,9 @@ impl RunController {
         self.event_bus.publish(Event::Run(RunEvent::Resuming {
             run_id: run_id.to_string(),
         }));
+        if let Some(ref ledger) = *self.ledger.read().unwrap() {
+            let _ = ledger.record_run_resumed(&run_id.to_string());
+        }
         run_id
     }
 
@@ -357,6 +381,73 @@ impl RunController {
                 run_id: rid.to_string(),
                 stop_reason: stop_reason.into(),
             }));
+            if let Some(ref ledger) = *self.ledger.read().unwrap() {
+                let _ = ledger.record_run_finished(&rid.to_string(), stop_reason, "");
+            }
+        }
+    }
+
+    pub fn idempotency_key(tool_name: &str, args: &str) -> String {
+        let mut hasher = DefaultHasher::new();
+        tool_name.hash(&mut hasher);
+        args.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    }
+
+    pub fn record_tool_call_start(&self, tool_name: &str, args: &str) {
+        if let Some(rid) = *self.run_id.read().unwrap() {
+            if let Some(ref ledger) = *self.ledger.read().unwrap() {
+                let key = Self::idempotency_key(tool_name, args);
+                let _ = ledger.record_tool_call(
+                    &rid.to_string(),
+                    tool_name,
+                    args,
+                    "started",
+                    None,
+                    Some(&key),
+                );
+            }
+        }
+    }
+
+    pub fn record_tool_call_end(&self, tool_name: &str, args: &str, status: &str, error: Option<&str>) {
+        if let Some(rid) = *self.run_id.read().unwrap() {
+            if let Some(ref ledger) = *self.ledger.read().unwrap() {
+                let key = Self::idempotency_key(tool_name, args);
+                let _ = ledger.record_tool_call(
+                    &rid.to_string(),
+                    tool_name,
+                    args,
+                    status,
+                    error,
+                    Some(&key),
+                );
+            }
+        }
+    }
+
+    /// Check if a tool call (identified by name + canonical args) was
+    /// already completed in this run.  Uses the ledger if available.
+    /// Returns `false` if the ledger is not set or query fails
+    /// (optimistically allows the tool to run).
+    pub fn is_tool_completed(&self, tool_name: &str, args: &str) -> bool {
+        let rid = match *self.run_id.read().unwrap() {
+            Some(rid) => rid.to_string(),
+            None => return false,
+        };
+        let ledger = match *self.ledger.read().unwrap() {
+            Some(ref l) => l.clone(),
+            None => return false,
+        };
+        let key = Self::idempotency_key(tool_name, args);
+        ledger.is_tool_completed(&rid, &key).unwrap_or(false)
+    }
+
+    pub fn record_approval(&self, tool: &str, decision: &str) {
+        if let Some(rid) = *self.run_id.read().unwrap() {
+            if let Some(ref ledger) = *self.ledger.read().unwrap() {
+                let _ = ledger.record_approval(&rid.to_string(), tool, decision);
+            }
         }
     }
 }

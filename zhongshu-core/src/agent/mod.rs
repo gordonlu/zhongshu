@@ -1,5 +1,7 @@
 pub mod attention;
 pub mod attention_manager;
+pub mod contract;
+pub mod delegation;
 pub mod dispatcher;
 pub mod intent;
 pub mod llm;

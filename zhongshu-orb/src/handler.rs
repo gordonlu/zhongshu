@@ -76,6 +76,9 @@ pub struct ZhongshuApp {
     pub worker_runtime: Arc<tokio::sync::RwLock<AgentRuntime>>,
     pub worker_base_tools: ToolRegistry,
     pub overlay_zoomed: bool,
+    /// Cursor for events already sent to the overlay, so reconnects only
+    /// replay events the overlay hasn't seen.
+    pub overlay_event_cursor: u64,
     pub auth_watch: watch::Receiver<Option<zhongshu_core::authority::PendingRequest>>,
     pub run_controller: Arc<RunController>,
     pub active_run_id: Option<Uuid>,
@@ -136,6 +139,7 @@ impl ZhongshuApp {
             worker_runtime,
             worker_base_tools,
             overlay_zoomed: false,
+            overlay_event_cursor: 0,
             auth_watch,
             run_controller,
             active_run_id: None,
@@ -180,9 +184,19 @@ impl ZhongshuApp {
             self.inbox.submit(text);
         }
         if let Some(rid) = ov.take_approve() {
+            if let Some(req) = authority::peek_pending() {
+                if req.id == rid {
+                    self.run_controller.record_approval(&req.tool, "approved");
+                }
+            }
             authority::approve_pending(&rid);
         }
         if let Some(rid) = ov.take_deny() {
+            if let Some(req) = authority::peek_pending() {
+                if req.id == rid {
+                    self.run_controller.record_approval(&req.tool, "denied");
+                }
+            }
             authority::deny_pending(&rid);
         }
         if let Some(p) = ov.take_personality() {
@@ -883,8 +897,9 @@ impl ZhongshuApp {
                     }
                 }
                 Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
-                    tracing::warn!("event bus lagged: {n} events dropped");
+                    tracing::warn!("event bus lagged: {n} events dropped, replaying snapshot");
                     active = true;
+                    self.replay_to_overlay();
                 }
                 Err(tokio::sync::broadcast::error::TryRecvError::Closed)
                 | Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
@@ -1061,6 +1076,281 @@ impl ZhongshuApp {
             ));
         }
         self.overlay = Some(ov);
+        // Replay buffered events so the newly-opened overlay catches up on
+        // tool calls, coding session state, run state, etc.
+        self.replay_to_overlay();
+    }
+
+    /// Send buffered events since the last cursor to the overlay.
+    /// Includes the cursor value so the UI can maintain its own cursor
+    /// and detect gaps.
+    fn replay_to_overlay(&mut self) {
+        let Some(ref ov) = self.overlay else {
+            return;
+        };
+        let cursor = self.overlay_event_cursor;
+        let events = self.event_bus.recent_since_cursor(cursor);
+        if events.is_empty() {
+            return;
+        }
+        tracing::info!(
+            count = events.len(),
+            from_cursor = cursor,
+            "replaying events to overlay"
+        );
+        // Send a snapshot of the current cursor before individual events,
+        // so the UI can gap-detect.
+        ov.send(&serde_json::json!({
+            "type": "cursor_snapshot",
+            "cursor": self.event_bus.current_cursor(),
+        }));
+        for (_seq, event) in &events {
+            match event {
+                Event::Agent(AgentEvent::StateChanged { from: _, to }) => {
+                    match to {
+                        AgentState::Thinking | AgentState::Executing => {
+                            ov.set_state("thinking");
+                        }
+                        AgentState::Done { success } => {
+                            ov.set_state(if *success { "done" } else { "stopped" });
+                        }
+                        AgentState::Idle => ov.set_state("idle"),
+                    }
+                }
+                Event::Tool(ToolEvent::Started { name, .. }) => {
+                    ov.send(&serde_json::json!({"type":"tool_call","name":name}));
+                }
+                Event::Tool(ToolEvent::Completed { name, success, .. }) => {
+                    ov.send(&serde_json::json!({
+                        "type": "tool_result",
+                        "name": name.clone(),
+                        "success": success,
+                    }));
+                }
+                Event::Tool(ToolEvent::Interrupted { name, .. }) => {
+                    ov.send(&serde_json::json!({
+                        "type": "tool_result",
+                        "name": name.clone(),
+                        "success": false,
+                    }));
+                }
+                Event::Harness(event) => match event {
+                    HarnessUiEvent::CodingSessionStarted { .. } => {}
+                    HarnessUiEvent::CodingPlanCreated {
+                        session_id,
+                        step_count,
+                        risk,
+                    } => {
+                        send_coding_event(
+                            ov,
+                            CodingUiEvent::PlanCreated {
+                                session_id: session_id.clone(),
+                                step_count: *step_count,
+                                risk: risk.clone(),
+                            },
+                        );
+                    }
+                    HarnessUiEvent::CodingStepStarted {
+                        session_id,
+                        step_id,
+                        title,
+                        ..
+                    } => {
+                        send_coding_event(
+                            ov,
+                            CodingUiEvent::PlanStepStarted {
+                                session_id: session_id.clone(),
+                                step_id: step_id.clone(),
+                                title: title.clone(),
+                            },
+                        );
+                    }
+                    HarnessUiEvent::CodingStepCompleted {
+                        session_id,
+                        step_id,
+                        status,
+                    } => {
+                        send_coding_event(
+                            ov,
+                            CodingUiEvent::PlanStepCompleted {
+                                session_id: session_id.clone(),
+                                step_id: step_id.clone(),
+                                status: status.clone(),
+                            },
+                        );
+                    }
+                    HarnessUiEvent::WorkerStarted {
+                        session_id,
+                        worker,
+                        task_id,
+                        owned_files,
+                    } => {
+                        send_coding_event(
+                            ov,
+                            CodingUiEvent::WorkerStarted {
+                                session_id: session_id.clone(),
+                                worker: worker.clone(),
+                                task_id: task_id.clone(),
+                                owned_files: owned_files
+                                    .iter()
+                                    .map(|path| path.display().to_string())
+                                    .collect(),
+                            },
+                        );
+                    }
+                    HarnessUiEvent::WorkerCompleted {
+                        session_id,
+                        worker,
+                        task_id,
+                        success,
+                        ..
+                    } => {
+                        send_coding_event(
+                            ov,
+                            CodingUiEvent::WorkerCompleted {
+                                session_id: session_id.clone(),
+                                worker: worker.clone(),
+                                task_id: task_id.clone(),
+                                success: *success,
+                            },
+                        );
+                    }
+                    HarnessUiEvent::WorkerConflict {
+                        session_id,
+                        worker,
+                        task_id,
+                        reason,
+                    } => {
+                        send_coding_event(
+                            ov,
+                            CodingUiEvent::WorkerConflict {
+                                session_id: session_id.clone(),
+                                worker: worker.clone(),
+                                task_id: task_id.clone(),
+                                reason: reason.clone(),
+                            },
+                        );
+                    }
+                    HarnessUiEvent::PatchPreview {
+                        session_id,
+                        path,
+                        operation,
+                        diff_summary,
+                        diff,
+                    } => {
+                        send_coding_event(
+                            ov,
+                            CodingUiEvent::PatchPreview {
+                                session_id: session_id.clone(),
+                                path: path.display().to_string(),
+                                operation: operation.clone(),
+                                diff_summary: diff_summary.clone(),
+                                diff: diff.clone().map(Into::into),
+                            },
+                        );
+                    }
+                    HarnessUiEvent::PatchApplied {
+                        session_id,
+                        path,
+                        operation,
+                        changed,
+                    } => {
+                        send_coding_event(
+                            ov,
+                            CodingUiEvent::PatchApplied {
+                                session_id: session_id.clone(),
+                                path: path.display().to_string(),
+                                operation: operation.clone(),
+                                changed: *changed,
+                            },
+                        );
+                    }
+                    HarnessUiEvent::ContextIncluded { .. } => {}
+                    HarnessUiEvent::ContextPressure {
+                        pressure_percent,
+                        dropped_evidence,
+                        dropped_recent,
+                    } => {
+                        send_coding_event(
+                            ov,
+                            CodingUiEvent::ContextPressure {
+                                pressure_percent: *pressure_percent,
+                                dropped_evidence: *dropped_evidence,
+                                dropped_recent: *dropped_recent,
+                            },
+                        );
+                    }
+                    HarnessUiEvent::ReplayAvailable {
+                        conversation_id,
+                        replay_execution_id,
+                    } => {
+                        send_coding_event(
+                            ov,
+                            CodingUiEvent::ReplayAvailable {
+                                conversation_id: *conversation_id,
+                                replay_execution_id: replay_execution_id.clone(),
+                            },
+                        );
+                    }
+                    HarnessUiEvent::Verification {
+                        command,
+                        success,
+                        exit_code,
+                        step,
+                    } => {
+                        send_coding_event(
+                            ov,
+                            CodingUiEvent::Verification {
+                                command: command.clone(),
+                                success: *success,
+                                exit_code: *exit_code,
+                            },
+                        );
+                        ov.send(&serde_json::json!({
+                            "type": "verification",
+                            "command": command.clone(),
+                            "success": success,
+                            "exit_code": exit_code,
+                            "step": step,
+                        }));
+                    }
+                    HarnessUiEvent::RecoveryFeedback { rule_id, message } => {
+                        ov.send(&serde_json::json!({
+                            "type": "recovery_feedback",
+                            "rule_id": rule_id.clone(),
+                            "message": message.clone(),
+                        }));
+                    }
+                    HarnessUiEvent::PhaseTransition { from, to } => {
+                        ov.send(&serde_json::json!({
+                            "type": "phase_transition",
+                            "from": from.clone(),
+                            "to": to.clone(),
+                        }));
+                    }
+                },
+                Event::Run(run_event) => match run_event {
+                    RunEvent::Interrupted { .. } => {
+                        ov.toast("已按你的新消息暂停当前步骤。");
+                        ov.set_state("paused");
+                    }
+                    RunEvent::Resuming { .. } => {
+                        ov.toast("正在按新约束重新调整。");
+                        ov.set_state("thinking");
+                    }
+                    RunEvent::Cancelled { .. } => {
+                        ov.toast("已停止后续操作。");
+                        ov.set_state("idle");
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        // Update the stored cursor so subsequent replays skip seen events.
+        if let Some(last_seq) = events.last().map(|(seq, _)| *seq) {
+            self.overlay_event_cursor = last_seq + 1;
+        }
     }
 
     pub fn new_conversation(&mut self, _el: &ActiveEventLoop) {

@@ -1,5 +1,8 @@
 use crate::agent::report::Report;
+use std::collections::VecDeque;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
@@ -347,20 +350,84 @@ pub enum HarnessUiEvent {
     },
 }
 
+// ── SnapshotStore (ring buffer with sequence numbers) ───────────────
+
+const SNAPSHOT_CAPACITY: usize = 500;
+
+/// An in-memory ring buffer that assigns a monotonic sequence number to every
+/// published event.  Lagged subscribers (or an overlay that was closed) can
+/// call `recent_since(cursor)` to recover missed events without relying on the
+/// broadcast channel's capacity.
+#[derive(Clone)]
+pub struct SnapshotStore {
+    recent: Arc<Mutex<VecDeque<(u64, Event)>>>,
+    seq: Arc<AtomicU64>,
+    capacity: usize,
+}
+
+impl SnapshotStore {
+    pub fn new(capacity: usize) -> Self {
+        SnapshotStore {
+            recent: Arc::new(Mutex::new(VecDeque::with_capacity(capacity + 1))),
+            seq: Arc::new(AtomicU64::new(0)),
+            capacity,
+        }
+    }
+
+    /// Record an event and return its sequence number.
+    pub fn push(&self, event: Event) -> u64 {
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        let mut guard = self.recent.lock().unwrap();
+        guard.push_back((seq, event));
+        if guard.len() > self.capacity {
+            guard.pop_front();
+        }
+        seq
+    }
+
+    /// Current cursor (next sequence number that will be assigned).
+    pub fn current_cursor(&self) -> u64 {
+        self.seq.load(Ordering::Relaxed)
+    }
+
+    /// Return all buffered events whose sequence number >= `cursor`.
+    /// Returns an empty vec when `cursor >= current_cursor()`.
+    pub fn recent_since(&self, cursor: u64) -> Vec<(u64, Event)> {
+        let guard = self.recent.lock().unwrap();
+        if cursor >= self.seq.load(Ordering::Relaxed) {
+            return Vec::new();
+        }
+        // Binary search because VecDeque is not slice-friendly; linear scan
+        // over a small buffer is fine (<= 500 entries).
+        let mut out = Vec::with_capacity(guard.len());
+        for entry in guard.iter() {
+            if entry.0 >= cursor {
+                out.push(entry.clone());
+            }
+        }
+        out
+    }
+}
+
 // ── EventBus ────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 pub struct EventBus {
     tx: broadcast::Sender<Event>,
+    snapshot: SnapshotStore,
 }
 
 impl EventBus {
     pub fn new(capacity: usize) -> Self {
         let (tx, _) = broadcast::channel(capacity);
-        EventBus { tx }
+        EventBus {
+            tx,
+            snapshot: SnapshotStore::new(SNAPSHOT_CAPACITY),
+        }
     }
 
     pub fn publish(&self, event: Event) {
+        self.snapshot.push(event.clone());
         if self.tx.receiver_count() == 0 {
             tracing::warn!("event published with no receivers");
         }
@@ -369,6 +436,20 @@ impl EventBus {
 
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.tx.subscribe()
+    }
+
+    pub fn snapshot_store(&self) -> &SnapshotStore {
+        &self.snapshot
+    }
+
+    /// Convenience: return events since `cursor` for UI catch-up.
+    pub fn recent_since_cursor(&self, cursor: u64) -> Vec<(u64, Event)> {
+        self.snapshot.recent_since(cursor)
+    }
+
+    /// Current cursor value (next sequence number).
+    pub fn current_cursor(&self) -> u64 {
+        self.snapshot.current_cursor()
     }
 }
 
@@ -379,7 +460,6 @@ pub type EventRx = broadcast::Receiver<Event>;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 const EVENT_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
 const EVENT_LOG_KEEP_LINES: usize = 10_000;

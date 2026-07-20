@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::agent::llm::LlmProvider;
 use crate::agent::loop_::AgentBudget;
+use crate::core::checkpoint::CheckpointStore;
 use crate::harness::HarnessState;
 use crate::tool::ToolRegistry;
 
@@ -21,6 +22,16 @@ pub struct AgentRuntime {
     pub budget: AgentBudget,
     pub reasoning_effort: Option<String>,
     pub harness_state: HarnessState,
+    /// Optional check to see if a tool call (name, args) has already been
+    /// completed in the current run.  Returns true if the tool was already
+    /// completed and should be skipped (survives restarts via the ledger).
+    pub idempotency_checker: Option<Arc<dyn Fn(&str, &str) -> bool + Send + Sync>>,
+    /// Optional checkpoint store for durable agent state persistence.
+    /// When set, the agent loop saves a checkpoint before each tool call
+    /// so a crashed process can restore from the last known-good state.
+    pub checkpoint_store: Option<CheckpointStore>,
+    /// Optional ledger for reconciling in-flight tools after a crash.
+    pub ledger: Option<crate::core::ledger::RunLedger>,
 }
 
 impl AgentRuntime {
@@ -37,6 +48,9 @@ impl AgentRuntime {
             budget,
             reasoning_effort: None,
             harness_state: HarnessState::new(),
+            idempotency_checker: None,
+            checkpoint_store: None,
+            ledger: None,
         }
     }
 
@@ -54,6 +68,9 @@ impl AgentRuntime {
             budget,
             reasoning_effort: None,
             harness_state: HarnessState::new(),
+            idempotency_checker: None,
+            checkpoint_store: None,
+            ledger: None,
         }
     }
 

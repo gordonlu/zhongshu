@@ -29,6 +29,220 @@ use zhongshu_core::patch::PatchDiffPayload;
 use zhongshu_core::task::TaskQueue;
 use zhongshu_core::tool::ToolRegistry;
 
+fn publish_harness_events(eb: &EventBus, events: &[zhongshu_core::harness::trace::event::HarnessEvent]) {
+    for event in events {
+        match event {
+            zhongshu_core::harness::trace::event::HarnessEvent::CodingSessionStarted {
+                session_id,
+                trace_id,
+                intent,
+                model,
+                deeplossless_conversation_id,
+                deeplossless_replay_execution_id,
+                ..
+            } => {
+                eb.publish(Event::Harness(HarnessUiEvent::CodingSessionStarted {
+                    session_id: session_id.clone(),
+                    trace_id: trace_id.clone(),
+                    intent: intent.clone(),
+                    model: model.clone(),
+                    deeplossless_conversation_id: *deeplossless_conversation_id,
+                    deeplossless_replay_execution_id: deeplossless_replay_execution_id.clone(),
+                }));
+            }
+            zhongshu_core::harness::trace::event::HarnessEvent::CodingPlanCreated {
+                session_id,
+                step_count,
+                risk,
+            } => {
+                eb.publish(Event::Harness(HarnessUiEvent::CodingPlanCreated {
+                    session_id: session_id.clone(),
+                    step_count: *step_count,
+                    risk: risk.clone(),
+                }));
+            }
+            zhongshu_core::harness::trace::event::HarnessEvent::CodingStepStarted {
+                session_id,
+                step_id,
+                kind,
+                title,
+            } => {
+                eb.publish(Event::Harness(HarnessUiEvent::CodingStepStarted {
+                    session_id: session_id.clone(),
+                    step_id: step_id.clone(),
+                    kind: kind.clone(),
+                    title: title.clone(),
+                }));
+            }
+            zhongshu_core::harness::trace::event::HarnessEvent::CodingStepCompleted {
+                session_id,
+                step_id,
+                status,
+            } => {
+                eb.publish(Event::Harness(HarnessUiEvent::CodingStepCompleted {
+                    session_id: session_id.clone(),
+                    step_id: step_id.clone(),
+                    status: status.clone(),
+                }));
+            }
+            zhongshu_core::harness::trace::event::HarnessEvent::WorkerStarted {
+                session_id,
+                worker,
+                task_id,
+                owned_files,
+            } => {
+                eb.publish(Event::Harness(HarnessUiEvent::WorkerStarted {
+                    session_id: session_id.clone(),
+                    worker: worker.clone(),
+                    task_id: task_id.clone(),
+                    owned_files: owned_files.clone(),
+                }));
+            }
+            zhongshu_core::harness::trace::event::HarnessEvent::WorkerCompleted {
+                session_id,
+                worker,
+                task_id,
+                success,
+                trace_event_count,
+            } => {
+                eb.publish(Event::Harness(HarnessUiEvent::WorkerCompleted {
+                    session_id: session_id.clone(),
+                    worker: worker.clone(),
+                    task_id: task_id.clone(),
+                    success: *success,
+                    trace_event_count: *trace_event_count,
+                }));
+            }
+            zhongshu_core::harness::trace::event::HarnessEvent::WorkerConflict {
+                session_id,
+                worker,
+                task_id,
+                reason,
+            } => {
+                eb.publish(Event::Harness(HarnessUiEvent::WorkerConflict {
+                    session_id: session_id.clone(),
+                    worker: worker.clone(),
+                    task_id: task_id.clone(),
+                    reason: reason.clone(),
+                }));
+            }
+            zhongshu_core::harness::trace::event::HarnessEvent::PatchPreview {
+                session_id,
+                path,
+                operation,
+                diff_summary,
+                diff,
+            } => {
+                eb.publish(Event::Harness(HarnessUiEvent::PatchPreview {
+                    session_id: session_id.clone(),
+                    path: path.clone(),
+                    operation: operation.clone(),
+                    diff_summary: diff_summary.clone(),
+                    diff: diff.clone(),
+                }));
+            }
+            zhongshu_core::harness::trace::event::HarnessEvent::PatchApplied {
+                session_id,
+                path,
+                operation,
+                changed,
+            } => {
+                eb.publish(Event::Harness(HarnessUiEvent::PatchApplied {
+                    session_id: session_id.clone(),
+                    path: path.clone(),
+                    operation: operation.clone(),
+                    changed: *changed,
+                }));
+            }
+            zhongshu_core::harness::trace::event::HarnessEvent::FileEdit {
+                path,
+                diff,
+                ..
+            } => {
+                let display_path = if path.as_os_str().is_empty() {
+                    PathBuf::from("workspace")
+                } else {
+                    path.clone()
+                };
+                eb.publish(Event::Harness(HarnessUiEvent::PatchPreview {
+                    session_id: None,
+                    path: display_path,
+                    operation: "file_edit".into(),
+                    diff_summary: diff
+                        .as_deref()
+                        .unwrap_or("mutation without captured diff")
+                        .lines()
+                        .next()
+                        .unwrap_or("mutation without captured diff")
+                        .to_string(),
+                    diff: file_edit_patch_payload(diff.as_ref()),
+                }));
+            }
+            zhongshu_core::harness::trace::event::HarnessEvent::ContextIncluded {
+                description,
+                estimated_tokens,
+            } => {
+                eb.publish(Event::Harness(HarnessUiEvent::ContextIncluded {
+                    description: description.clone(),
+                    estimated_tokens: *estimated_tokens,
+                }));
+            }
+            zhongshu_core::harness::trace::event::HarnessEvent::ContextPressure {
+                pressure_percent,
+                dropped_evidence,
+                dropped_recent,
+            } => {
+                eb.publish(Event::Harness(HarnessUiEvent::ContextPressure {
+                    pressure_percent: *pressure_percent,
+                    dropped_evidence: *dropped_evidence,
+                    dropped_recent: *dropped_recent,
+                }));
+            }
+            zhongshu_core::harness::trace::event::HarnessEvent::ReplayAvailable {
+                conversation_id,
+                replay_execution_id,
+            } => {
+                eb.publish(Event::Harness(HarnessUiEvent::ReplayAvailable {
+                    conversation_id: *conversation_id,
+                    replay_execution_id: replay_execution_id.clone(),
+                }));
+            }
+            zhongshu_core::harness::trace::event::HarnessEvent::Verification {
+                command,
+                success,
+                exit_code,
+                step,
+            } => {
+                eb.publish(Event::Harness(HarnessUiEvent::Verification {
+                    command: command.clone(),
+                    success: *success,
+                    exit_code: *exit_code,
+                    step: *step,
+                }));
+            }
+            zhongshu_core::harness::trace::event::HarnessEvent::RecoveryFeedback {
+                rule_id,
+                message,
+            } => {
+                eb.publish(Event::Harness(HarnessUiEvent::RecoveryFeedback {
+                    rule_id: rule_id.clone(),
+                    message: message.clone(),
+                }));
+            }
+            zhongshu_core::harness::trace::event::HarnessEvent::PhaseTransition {
+                from,
+                to,
+            } => {
+                eb.publish(Event::Harness(HarnessUiEvent::PhaseTransition {
+                    from: from.clone(),
+                    to: to.clone(),
+                }));
+            }
+            _ => {}
+        }
+    }
+}
+
 fn file_edit_patch_payload(diff: Option<&String>) -> Option<PatchDiffPayload> {
     diff.map(|diff| {
         if diff.starts_with('<') && diff.ends_with('>') {
@@ -274,6 +488,7 @@ impl AgentController {
             "yes" | "y" | "可以" | "确认" | "同意" | "好" | "是"
         ) {
             if let Some(req) = zhongshu_core::authority::peek_pending() {
+                self.run_controller.record_approval(&req.tool, "approved");
                 zhongshu_core::authority::approve_pending(&req.id);
             }
         }
@@ -512,6 +727,23 @@ impl AgentController {
 
             let mut runtime = AgentRuntime::with_llm(p, m, t, budget);
             runtime.reasoning_effort = reasoning_str;
+            // Checkpoint store: saves the agent state before each tool call
+            // so a crashed process can recover from the last good state.
+            runtime.checkpoint_store = Some(
+                zhongshu_core::core::checkpoint::CheckpointStore::new(
+                    zhongshu_core::core::Database::new(core_db_path.clone()),
+                ),
+            );
+            // Ledger: needed for reconciling in-flight tools after crash recovery.
+            runtime.ledger = rc.get_ledger();
+            // Idempotency checker: queries the ledger to see if a tool call
+            // was already completed. Returns true if the tool should be skipped.
+            {
+                let rc = rc.clone();
+                runtime.idempotency_checker = Some(Arc::new(move |name: &str, args: &str| {
+                    rc.is_tool_completed(name, args)
+                }));
+            }
 
             let tool_names = Arc::new(Mutex::new(Vec::<String>::new()));
             let callbacks = {
@@ -536,8 +768,10 @@ impl AgentController {
                     },
                     on_tool_start: {
                         let run_id = run_id.to_string();
-                        Box::new(move |name: &str| {
+                        let rc = rc.clone();
+                        Box::new(move |name: &str, args: &str| {
                             tn.lock().unwrap().push(name.to_string());
+                            rc.record_tool_call_start(name, args);
                             eb1.publish(Event::Tool(ToolEvent::Started {
                                 name: name.to_string(),
                                 run_id: run_id.clone(),
@@ -546,7 +780,10 @@ impl AgentController {
                     },
                     on_tool_done: {
                         let run_id = run_id.to_string();
-                        Box::new(move |name: &str, ok: bool| {
+                        let rc = rc.clone();
+                        Box::new(move |name: &str, args: &str, ok: bool| {
+                            let status = if ok { "completed" } else { "failed" };
+                            rc.record_tool_call_end(name, args, status, None);
                             eb2.publish(Event::Tool(ToolEvent::Completed {
                                 name: name.to_string(),
                                 success: ok,
@@ -571,8 +808,12 @@ impl AgentController {
             )
             .await;
 
-            let mut stop_reason = "completed".to_string();
-            let mut overall_success = true;
+            // Initial values are always overwritten before first use,
+            // but are kept as a fallback for unexpected code paths.
+            #[allow(unused_assignments)]
+            let mut stop_reason = String::new();
+            #[allow(unused_assignments)]
+            let mut overall_success = false;
 
             match r {
                 Ok(Ok(rr)) => {
@@ -583,218 +824,7 @@ impl AgentController {
                         &rr.trace_events,
                         conversation_id,
                     );
-                    // Publish harness trace events to EventBus for UI forwarding.
-                    for event in &rr.trace_events {
-                        match event {
-                            zhongshu_core::harness::trace::event::HarnessEvent::CodingSessionStarted {
-                                session_id,
-                                trace_id,
-                                intent,
-                                model,
-                                deeplossless_conversation_id,
-                                deeplossless_replay_execution_id,
-                                ..
-                            } => {
-                                eb.publish(Event::Harness(HarnessUiEvent::CodingSessionStarted {
-                                    session_id: session_id.clone(),
-                                    trace_id: trace_id.clone(),
-                                    intent: intent.clone(),
-                                    model: model.clone(),
-                                    deeplossless_conversation_id: *deeplossless_conversation_id,
-                                    deeplossless_replay_execution_id: deeplossless_replay_execution_id.clone(),
-                                }));
-                            }
-                            zhongshu_core::harness::trace::event::HarnessEvent::CodingPlanCreated {
-                                session_id,
-                                step_count,
-                                risk,
-                            } => {
-                                eb.publish(Event::Harness(HarnessUiEvent::CodingPlanCreated {
-                                    session_id: session_id.clone(),
-                                    step_count: *step_count,
-                                    risk: risk.clone(),
-                                }));
-                            }
-                            zhongshu_core::harness::trace::event::HarnessEvent::CodingStepStarted {
-                                session_id,
-                                step_id,
-                                kind,
-                                title,
-                            } => {
-                                eb.publish(Event::Harness(HarnessUiEvent::CodingStepStarted {
-                                    session_id: session_id.clone(),
-                                    step_id: step_id.clone(),
-                                    kind: kind.clone(),
-                                    title: title.clone(),
-                                }));
-                            }
-                            zhongshu_core::harness::trace::event::HarnessEvent::CodingStepCompleted {
-                                session_id,
-                                step_id,
-                                status,
-                            } => {
-                                eb.publish(Event::Harness(HarnessUiEvent::CodingStepCompleted {
-                                    session_id: session_id.clone(),
-                                    step_id: step_id.clone(),
-                                    status: status.clone(),
-                                }));
-                            }
-                            zhongshu_core::harness::trace::event::HarnessEvent::WorkerStarted {
-                                session_id,
-                                worker,
-                                task_id,
-                                owned_files,
-                            } => {
-                                eb.publish(Event::Harness(HarnessUiEvent::WorkerStarted {
-                                    session_id: session_id.clone(),
-                                    worker: worker.clone(),
-                                    task_id: task_id.clone(),
-                                    owned_files: owned_files.clone(),
-                                }));
-                            }
-                            zhongshu_core::harness::trace::event::HarnessEvent::WorkerCompleted {
-                                session_id,
-                                worker,
-                                task_id,
-                                success,
-                                trace_event_count,
-                            } => {
-                                eb.publish(Event::Harness(HarnessUiEvent::WorkerCompleted {
-                                    session_id: session_id.clone(),
-                                    worker: worker.clone(),
-                                    task_id: task_id.clone(),
-                                    success: *success,
-                                    trace_event_count: *trace_event_count,
-                                }));
-                            }
-                            zhongshu_core::harness::trace::event::HarnessEvent::WorkerConflict {
-                                session_id,
-                                worker,
-                                task_id,
-                                reason,
-                            } => {
-                                eb.publish(Event::Harness(HarnessUiEvent::WorkerConflict {
-                                    session_id: session_id.clone(),
-                                    worker: worker.clone(),
-                                    task_id: task_id.clone(),
-                                    reason: reason.clone(),
-                                }));
-                            }
-                            zhongshu_core::harness::trace::event::HarnessEvent::PatchPreview {
-                                session_id,
-                                path,
-                                operation,
-                                diff_summary,
-                                diff,
-                            } => {
-                                eb.publish(Event::Harness(HarnessUiEvent::PatchPreview {
-                                    session_id: session_id.clone(),
-                                    path: path.clone(),
-                                    operation: operation.clone(),
-                                    diff_summary: diff_summary.clone(),
-                                    diff: diff.clone(),
-                                }));
-                            }
-                            zhongshu_core::harness::trace::event::HarnessEvent::PatchApplied {
-                                session_id,
-                                path,
-                                operation,
-                                changed,
-                            } => {
-                                eb.publish(Event::Harness(HarnessUiEvent::PatchApplied {
-                                    session_id: session_id.clone(),
-                                    path: path.clone(),
-                                    operation: operation.clone(),
-                                    changed: *changed,
-                                }));
-                            }
-                            zhongshu_core::harness::trace::event::HarnessEvent::FileEdit {
-                                path,
-                                diff,
-                                ..
-                            } => {
-                                let display_path = if path.as_os_str().is_empty() {
-                                    PathBuf::from("workspace")
-                                } else {
-                                    path.clone()
-                                };
-                                eb.publish(Event::Harness(HarnessUiEvent::PatchPreview {
-                                    session_id: None,
-                                    path: display_path,
-                                    operation: "file_edit".into(),
-                                    diff_summary: diff
-                                        .as_deref()
-                                        .unwrap_or("mutation without captured diff")
-                                        .lines()
-                                        .next()
-                                        .unwrap_or("mutation without captured diff")
-                                        .to_string(),
-                                    diff: file_edit_patch_payload(diff.as_ref()),
-                                }));
-                            }
-                            zhongshu_core::harness::trace::event::HarnessEvent::ContextIncluded {
-                                description,
-                                estimated_tokens,
-                            } => {
-                                eb.publish(Event::Harness(HarnessUiEvent::ContextIncluded {
-                                    description: description.clone(),
-                                    estimated_tokens: *estimated_tokens,
-                                }));
-                            }
-                            zhongshu_core::harness::trace::event::HarnessEvent::ContextPressure {
-                                pressure_percent,
-                                dropped_evidence,
-                                dropped_recent,
-                            } => {
-                                eb.publish(Event::Harness(HarnessUiEvent::ContextPressure {
-                                    pressure_percent: *pressure_percent,
-                                    dropped_evidence: *dropped_evidence,
-                                    dropped_recent: *dropped_recent,
-                                }));
-                            }
-                            zhongshu_core::harness::trace::event::HarnessEvent::ReplayAvailable {
-                                conversation_id,
-                                replay_execution_id,
-                            } => {
-                                eb.publish(Event::Harness(HarnessUiEvent::ReplayAvailable {
-                                    conversation_id: *conversation_id,
-                                    replay_execution_id: replay_execution_id.clone(),
-                                }));
-                            }
-                            zhongshu_core::harness::trace::event::HarnessEvent::Verification {
-                                command,
-                                success,
-                                exit_code,
-                                step,
-                            } => {
-                                eb.publish(Event::Harness(HarnessUiEvent::Verification {
-                                    command: command.clone(),
-                                    success: *success,
-                                    exit_code: *exit_code,
-                                    step: *step,
-                                }));
-                            }
-                            zhongshu_core::harness::trace::event::HarnessEvent::RecoveryFeedback {
-                                rule_id,
-                                message,
-                            } => {
-                                eb.publish(Event::Harness(HarnessUiEvent::RecoveryFeedback {
-                                    rule_id: rule_id.clone(),
-                                    message: message.clone(),
-                                }));
-                            }
-                            zhongshu_core::harness::trace::event::HarnessEvent::PhaseTransition {
-                                from,
-                                to,
-                            } => {
-                                eb.publish(Event::Harness(HarnessUiEvent::PhaseTransition {
-                                    from: from.clone(),
-                                    to: to.clone(),
-                                }));
-                            }
-                            _ => {}
-                        }
-                    }
+                    publish_harness_events(&eb, &rr.trace_events);
                     let last = rr.messages.last().map(|x| x.content.as_str()).unwrap_or("");
                     // Append to conversation history for next turn.
                     history_arc
@@ -848,7 +878,9 @@ impl AgentController {
                         .await;
                     eb.publish(Event::Agent(AgentEvent::StateChanged {
                         from: AgentState::Thinking,
-                        to: AgentState::Done { success: true },
+                        to: AgentState::Done {
+                            success: overall_success,
+                        },
                     }));
                 }
                 Ok(Err(e)) => {
@@ -930,7 +962,7 @@ impl AgentController {
                                     on_tool_start: {
                                         let run_id = run_id.to_string();
                                         let eb1 = eb.clone();
-                                        Box::new(move |name: &str| {
+                                        Box::new(move |name: &str, _args: &str| {
                                             eb1.publish(Event::Tool(ToolEvent::Started {
                                                 name: name.to_string(),
                                                 run_id: run_id.clone(),
@@ -940,7 +972,7 @@ impl AgentController {
                                     on_tool_done: {
                                         let run_id = run_id.to_string();
                                         let eb2 = eb.clone();
-                                        Box::new(move |name: &str, ok: bool| {
+                                        Box::new(move |name: &str, _args: &str, ok: bool| {
                                             eb2.publish(Event::Tool(ToolEvent::Completed {
                                                 name: name.to_string(),
                                                 success: ok,
@@ -958,6 +990,18 @@ impl AgentController {
                                     recovery_budget,
                                 );
                                 recovery_runtime.reasoning_effort = recovery_reasoning;
+                                recovery_runtime.checkpoint_store = Some(
+                                    zhongshu_core::core::checkpoint::CheckpointStore::new(
+                                        zhongshu_core::core::Database::new(core_db_path.clone()),
+                                    ),
+                                );
+                                recovery_runtime.ledger = rc.get_ledger();
+                                {
+                                    let rc = rc.clone();
+                                    recovery_runtime.idempotency_checker = Some(Arc::new(move |name: &str, args: &str| {
+                                        rc.is_tool_completed(name, args)
+                                    }));
+                                }
                                 let r2 = tokio::time::timeout(
                                     AGENT_TIMEOUT,
                                     run_agent_with_context(
@@ -979,173 +1023,7 @@ impl AgentController {
                                             &rr.trace_events,
                                             conversation_id,
                                         );
-                                        for event in &rr.trace_events {
-                                            match event {
-                                                zhongshu_core::harness::trace::event::HarnessEvent::CodingSessionStarted {
-                                                    session_id, trace_id, intent, model,
-                                                    deeplossless_conversation_id,
-                                                    deeplossless_replay_execution_id, ..
-                                                } => {
-                                                    eb.publish(Event::Harness(HarnessUiEvent::CodingSessionStarted {
-                                                        session_id: session_id.clone(),
-                                                        trace_id: trace_id.clone(),
-                                                        intent: intent.clone(),
-                                                        model: model.clone(),
-                                                        deeplossless_conversation_id: *deeplossless_conversation_id,
-                                                        deeplossless_replay_execution_id: deeplossless_replay_execution_id.clone(),
-                                                    }));
-                                                }
-                                                zhongshu_core::harness::trace::event::HarnessEvent::CodingPlanCreated {
-                                                    session_id, step_count, risk,
-                                                } => {
-                                                    eb.publish(Event::Harness(HarnessUiEvent::CodingPlanCreated {
-                                                        session_id: session_id.clone(),
-                                                        step_count: *step_count,
-                                                        risk: risk.clone(),
-                                                    }));
-                                                }
-                                                zhongshu_core::harness::trace::event::HarnessEvent::CodingStepStarted {
-                                                    session_id, step_id, kind: _, title,
-                                                } => {
-                                                    eb.publish(Event::Harness(HarnessUiEvent::CodingStepStarted {
-                                                        session_id: session_id.clone(),
-                                                        step_id: step_id.clone(),
-                                                        kind: String::new(),
-                                                        title: title.clone(),
-                                                    }));
-                                                }
-                                                zhongshu_core::harness::trace::event::HarnessEvent::CodingStepCompleted {
-                                                    session_id, step_id, status,
-                                                } => {
-                                                    eb.publish(Event::Harness(HarnessUiEvent::CodingStepCompleted {
-                                                        session_id: session_id.clone(),
-                                                        step_id: step_id.clone(),
-                                                        status: status.clone(),
-                                                    }));
-                                                }
-                                                zhongshu_core::harness::trace::event::HarnessEvent::WorkerStarted {
-                                                    session_id, worker, task_id, owned_files,
-                                                } => {
-                                                    eb.publish(Event::Harness(HarnessUiEvent::WorkerStarted {
-                                                        session_id: session_id.clone(),
-                                                        worker: worker.clone(),
-                                                        task_id: task_id.clone(),
-                                                        owned_files: owned_files.iter().map(|p| p.clone()).collect(),
-                                                    }));
-                                                }
-                                                zhongshu_core::harness::trace::event::HarnessEvent::WorkerCompleted {
-                                                    session_id, worker, task_id, success,
-                                                    trace_event_count,
-                                                } => {
-                                                    eb.publish(Event::Harness(HarnessUiEvent::WorkerCompleted {
-                                                        session_id: session_id.clone(),
-                                                        worker: worker.clone(),
-                                                        task_id: task_id.clone(),
-                                                        success: *success,
-                                                        trace_event_count: *trace_event_count,
-                                                    }));
-                                                }
-                                                zhongshu_core::harness::trace::event::HarnessEvent::WorkerConflict {
-                                                    session_id, worker, task_id, reason,
-                                                } => {
-                                                    eb.publish(Event::Harness(HarnessUiEvent::WorkerConflict {
-                                                        session_id: session_id.clone(),
-                                                        worker: worker.clone(),
-                                                        task_id: task_id.clone(),
-                                                        reason: reason.clone(),
-                                                    }));
-                                                }
-                                                zhongshu_core::harness::trace::event::HarnessEvent::PatchPreview {
-                                                    session_id, path, operation, diff_summary, diff,
-                                                } => {
-                                                    eb.publish(Event::Harness(HarnessUiEvent::PatchPreview {
-                                                        session_id: session_id.clone(),
-                                                        path: path.clone(),
-                                                        operation: operation.clone(),
-                                                        diff_summary: diff_summary.clone(),
-                                                        diff: diff.clone().map(Into::into),
-                                                    }));
-                                                }
-                                                zhongshu_core::harness::trace::event::HarnessEvent::PatchApplied {
-                                                    session_id, path, operation, changed,
-                                                } => {
-                                                    eb.publish(Event::Harness(HarnessUiEvent::PatchApplied {
-                                                        session_id: session_id.clone(),
-                                                        path: path.clone(),
-                                                        operation: operation.clone(),
-                                                        changed: *changed,
-                                                    }));
-                                                }
-                                                zhongshu_core::harness::trace::event::HarnessEvent::FileEdit { path, diff, .. } => {
-                                                    let display_path = if path.as_os_str().is_empty() {
-                                                        PathBuf::from("workspace")
-                                                    } else {
-                                                        path.clone()
-                                                    };
-                                                    eb.publish(Event::Harness(HarnessUiEvent::PatchPreview {
-                                                        session_id: None,
-                                                        path: display_path,
-                                                        operation: "file_edit".into(),
-                                                        diff_summary: diff.as_deref()
-                                                            .unwrap_or("mutation without captured diff")
-                                                            .lines().next()
-                                                            .unwrap_or("mutation without captured diff")
-                                                            .to_string(),
-                                                        diff: file_edit_patch_payload(diff.as_ref()),
-                                                    }));
-                                                }
-                                                zhongshu_core::harness::trace::event::HarnessEvent::ContextIncluded {
-                                                    description, estimated_tokens,
-                                                } => {
-                                                    eb.publish(Event::Harness(HarnessUiEvent::ContextIncluded {
-                                                        description: description.clone(),
-                                                        estimated_tokens: *estimated_tokens,
-                                                    }));
-                                                }
-                                                zhongshu_core::harness::trace::event::HarnessEvent::ContextPressure {
-                                                    pressure_percent, dropped_evidence, dropped_recent,
-                                                } => {
-                                                    eb.publish(Event::Harness(HarnessUiEvent::ContextPressure {
-                                                        pressure_percent: *pressure_percent,
-                                                        dropped_evidence: *dropped_evidence,
-                                                        dropped_recent: *dropped_recent,
-                                                    }));
-                                                }
-                                                zhongshu_core::harness::trace::event::HarnessEvent::ReplayAvailable {
-                                                    conversation_id, replay_execution_id,
-                                                } => {
-                                                    eb.publish(Event::Harness(HarnessUiEvent::ReplayAvailable {
-                                                        conversation_id: *conversation_id,
-                                                        replay_execution_id: replay_execution_id.clone(),
-                                                    }));
-                                                }
-                                                zhongshu_core::harness::trace::event::HarnessEvent::Verification {
-                                                    command, success, exit_code, step,
-                                                } => {
-                                                    eb.publish(Event::Harness(HarnessUiEvent::Verification {
-                                                        command: command.clone(),
-                                                        success: *success,
-                                                        exit_code: *exit_code,
-                                                        step: *step,
-                                                    }));
-                                                }
-                                                zhongshu_core::harness::trace::event::HarnessEvent::RecoveryFeedback {
-                                                    rule_id, message,
-                                                } => {
-                                                    eb.publish(Event::Harness(HarnessUiEvent::RecoveryFeedback {
-                                                        rule_id: rule_id.clone(),
-                                                        message: message.clone(),
-                                                    }));
-                                                }
-                                                zhongshu_core::harness::trace::event::HarnessEvent::PhaseTransition { from, to } => {
-                                                    eb.publish(Event::Harness(HarnessUiEvent::PhaseTransition {
-                                                        from: from.clone(),
-                                                        to: to.clone(),
-                                                    }));
-                                                }
-                                                _ => {}
-                                            }
-                                        }
+                                        publish_harness_events(&eb, &rr.trace_events);
                                         let last = rr
                                             .messages
                                             .last()
@@ -1280,7 +1158,7 @@ impl AgentController {
                     }) => {
                         tracing::info!("interruption paused: {summary}");
                         stop_reason = "paused".to_string();
-                        overall_success = true;
+                        overall_success = false;
                         let _ = tx
                             .send(ResponseEvent::MessageDelta {
                                 id: aid,
@@ -1293,7 +1171,7 @@ impl AgentController {
                             .await;
                         eb.publish(Event::Agent(AgentEvent::StateChanged {
                             from: AgentState::Thinking,
-                            to: AgentState::Done { success: true },
+                            to: AgentState::Done { success: false },
                         }));
                     }
                     Some(zhongshu_core::agent::run::InterruptionAction::RequireConfirmation {

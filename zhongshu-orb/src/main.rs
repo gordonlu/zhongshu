@@ -29,8 +29,8 @@ use zhongshu_core::agent::{
 use zhongshu_core::authority::{self, AuthorityGate};
 use zhongshu_core::core::{
     Database, EventLogStore, GoalRepository, GoalTool, MemoryCandidateStore, MemoryPolicy,
-    MemoryQueryTool, ObservationStore, RunbookStore, Scheduler, SuggestionEngine, SuggestionTool,
-    TaskRepository, TaskTool,
+    MemoryQueryTool, ObservationStore, RunLedger, RunbookStore, Scheduler, SuggestionEngine,
+    SuggestionTool, TaskRepository, TaskTool,
 };
 use zhongshu_core::digest::DigestBuilder;
 use zhongshu_core::equipment::EquipmentObserver;
@@ -352,6 +352,7 @@ fn main() {
         core_db_path.clone(),
     ));
     controller.set_auto_evolve(cfg.agent.auto_evolve);
+    controller.run_controller.set_ledger(RunLedger::new(Database::new(core_db_path.clone())));
     let run_controller = controller.run_controller.clone();
     let inbox = Arc::new(AgentInbox::new(controller.clone()));
     inbox.start();

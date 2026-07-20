@@ -35,8 +35,8 @@ impl Tool for AutomationTool {
                 return ToolOutput::error(format!("[BLOCKED] {reason}"))
             }
             CheckResult::RequireAuth { request } => {
-                authority::set_pending(&request.tool, &request.program, &request.command, "");
-                return ToolOutput::auth_required(&request.program, &request.command);
+                let rid = authority::set_pending(&request.tool, &request.program, &request.command, "");
+                return ToolOutput::auth_required(&request.program, &request.command).with_request_id(rid);
             }
             CheckResult::Allow => {}
         }

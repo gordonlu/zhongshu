@@ -34,6 +34,14 @@ impl Database {
             let _ = conn.execute_batch(sql);
         }
 
+        // Phase 6 migration: idempotency_key for tool dedup across restarts
+        let _ = conn.execute_batch(
+            "ALTER TABLE run_ledger ADD COLUMN idempotency_key TEXT;
+             CREATE INDEX IF NOT EXISTS idx_run_ledger_idempotency
+                 ON run_ledger(run_id, idempotency_key)
+                 WHERE idempotency_key IS NOT NULL;",
+        );
+
         // Phase 5 migration: claim/lease/retry/summary columns
         for sql in &[
             "ALTER TABLE tasks ADD COLUMN claimed_by TEXT",
@@ -48,6 +56,19 @@ impl Database {
 
         conn.execute_batch(
             "
+            CREATE TABLE IF NOT EXISTS run_ledger (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id          TEXT NOT NULL,
+                event_type      TEXT NOT NULL,
+                payload         TEXT NOT NULL,
+                created_at      INTEGER NOT NULL,
+                idempotency_key TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_run_ledger_run_id ON run_ledger(run_id);
+            CREATE INDEX IF NOT EXISTS idx_run_ledger_idempotency
+                ON run_ledger(run_id, idempotency_key)
+                WHERE idempotency_key IS NOT NULL;
+
             CREATE TABLE IF NOT EXISTS observations (
                 id          TEXT PRIMARY KEY,
                 type        TEXT NOT NULL,
@@ -186,6 +207,17 @@ impl Database {
                 output_status TEXT NOT NULL DEFAULT '',
                 output_preview TEXT NOT NULL DEFAULT '',
                 verification TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS agent_checkpoints (
+                run_id              TEXT NOT NULL,
+                step                INTEGER NOT NULL,
+                tool_calls_made     INTEGER NOT NULL DEFAULT 0,
+                consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                tool_call_counts    TEXT NOT NULL DEFAULT '{}',
+                messages            TEXT NOT NULL,
+                created_at          INTEGER NOT NULL,
+                PRIMARY KEY (run_id, step)
             );
             ",
         )?;

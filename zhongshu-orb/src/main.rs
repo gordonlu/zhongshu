@@ -1,6 +1,7 @@
 mod agent;
 mod app;
 mod config;
+mod delegation_service;
 mod handler;
 mod hotkey;
 mod indicator;
@@ -43,6 +44,7 @@ use zhongshu_core::task::{FileWatchTrigger, ReminderTrigger, TaskScheduler};
 use zhongshu_core::tool::default_registry;
 
 use app::{AgentController, AgentInbox, TaskWorkerDispatcher};
+use delegation_service::DelegationController;
 
 use handler::ZhongshuApp;
 use tokio::sync::mpsc;
@@ -352,7 +354,34 @@ fn main() {
         core_db_path.clone(),
     ));
     controller.set_auto_evolve(cfg.agent.auto_evolve);
-    controller.run_controller.set_ledger(RunLedger::new(Database::new(core_db_path.clone())));
+    controller
+        .run_controller
+        .set_ledger(RunLedger::new(Database::new(core_db_path.clone())));
+    let checkpoint_store =
+        zhongshu_core::core::checkpoint::CheckpointStore::new(Database::new(core_db_path.clone()));
+    match checkpoint_store.latest_unfinished() {
+        Ok(Some(checkpoint)) => match uuid::Uuid::parse_str(&checkpoint.run_id) {
+            Ok(run_id) => {
+                let goal = checkpoint
+                    .messages
+                    .iter()
+                    .find(|message| message.role == zhongshu_core::agent::llm::Role::User)
+                    .map(|message| message.content.as_str())
+                    .unwrap_or("恢复未完成任务");
+                controller
+                    .run_controller
+                    .restore_interrupted_run(run_id, goal);
+                tracing::warn!(%run_id, "unfinished agent run is ready for explicit recovery");
+            }
+            Err(error) => tracing::error!(
+                run_id = %checkpoint.run_id,
+                %error,
+                "cannot recover checkpoint with invalid run id"
+            ),
+        },
+        Ok(None) => {}
+        Err(error) => tracing::error!(%error, "failed to inspect unfinished agent checkpoints"),
+    }
     let run_controller = controller.run_controller.clone();
     let inbox = Arc::new(AgentInbox::new(controller.clone()));
     inbox.start();
@@ -420,7 +449,7 @@ fn main() {
             }
         }
     }
-    let worker_runtime = Arc::new(tokio::sync::RwLock::new(AgentRuntime::with_llm(
+    let mut worker_runtime_value = AgentRuntime::with_llm(
         provider.clone(),
         cfg.llm.model.clone(),
         worker_registry,
@@ -432,7 +461,42 @@ fn main() {
             llm_timeout: Duration::from_secs(240),
             tool_timeout: Duration::from_secs(120),
         },
-    )));
+    );
+    worker_runtime_value.ledger = Some(RunLedger::new(Database::new(core_db_path.clone())));
+    let worker_runtime = Arc::new(tokio::sync::RwLock::new(worker_runtime_value));
+
+    let review_tools = vec![
+        "read_file".into(),
+        "list_dir".into(),
+        "search_files".into(),
+        "grep".into(),
+        "glob".into(),
+    ];
+    let mut analyst_profile = AgentProfile::new(
+        "analysis-employee",
+        "你是中书安排的分析员工。只读审查用户目标和当前项目，引用具体事实，提交风险与建议；不得修改文件，不得声称已经验证。",
+        review_tools.clone(),
+        AgentBudget::assistant_default(),
+    );
+    analyst_profile.llm_model = Some(cfg.llm.model_routing.flash_model.clone());
+    let mut verifier_tools = review_tools;
+    verifier_tools.extend(["shell".into(), "self_test".into()]);
+    let mut verifier_profile = AgentProfile::new(
+        "verification-employee",
+        "你是中书安排的验证员工。基于分析员工的报告独立复核，只读检查并运行与目标直接相关的验证；不得修改文件。没有新鲜成功证据时必须明确未验证。",
+        verifier_tools,
+        AgentBudget::assistant_default(),
+    );
+    verifier_profile.llm_model = Some(cfg.llm.model_routing.flash_model.clone());
+    let delegation = Arc::new(DelegationController::new(
+        worker_runtime.clone(),
+        analyst_profile,
+        verifier_profile,
+        llm_registry.clone(),
+        eb.clone(),
+        response_tx.clone(),
+        run_controller.clone(),
+    ));
 
     services::spawn_task_executor(
         eb.clone(),
@@ -559,6 +623,7 @@ fn main() {
         cfg,
         controller,
         inbox.clone(),
+        delegation,
         eb,
         event_rx,
         response_tx,

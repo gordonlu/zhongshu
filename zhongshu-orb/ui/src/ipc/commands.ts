@@ -2,6 +2,7 @@ import type { SettingsConfig } from './events'
 
 export type UiToOverlayCommand =
   | { type: 'submit'; text: string }
+  | { type: 'delegate_review'; text: string }
   | { type: 'stop' }
   | { type: 'new_conversation' }
   | { type: 'approve'; request_id: string }
@@ -26,6 +27,7 @@ export type UiToOverlayCommand =
 export function validateCommand(command: UiToOverlayCommand): boolean {
   switch (command.type) {
     case 'submit':
+    case 'delegate_review':
       return command.text.trim().length > 0
     case 'approve':
     case 'deny':

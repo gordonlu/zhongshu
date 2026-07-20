@@ -98,30 +98,63 @@ impl AgentProfile {
     /// 转换为 Worker 运行时使用的 `AgentBudget`。
     pub fn to_worker_budget(&self) -> AgentBudget {
         AgentBudget {
+            max_steps: self.budget.max_steps,
+            max_tool_calls: self.budget.max_tool_calls,
+            per_tool_limit: self.budget.per_tool_limit,
             token_limit: self.budget.token_limit,
-            ..AgentBudget::assistant_default()
+            llm_timeout: std::time::Duration::from_secs(self.budget.llm_timeout_secs),
+            tool_timeout: std::time::Duration::from_secs(self.budget.tool_timeout_secs),
         }
     }
 }
 
 /// Profile 中可序列化的预算配置。
 ///
-/// 仅保留 `token_limit` 用于覆盖默认值，其余字段由 `AgentBudget` 的默认方法决定。
 /// 使用 `#[serde(default)]` 确保旧配置文件的向后兼容性。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentBudgetProfile {
+    #[serde(default = "default_max_steps")]
+    pub max_steps: u32,
+    #[serde(default = "default_max_tool_calls")]
+    pub max_tool_calls: u32,
+    #[serde(default = "default_per_tool_limit")]
+    pub per_tool_limit: u32,
     #[serde(default = "default_token_limit")]
     pub token_limit: usize,
+    #[serde(default = "default_llm_timeout_secs")]
+    pub llm_timeout_secs: u64,
+    #[serde(default = "default_tool_timeout_secs")]
+    pub tool_timeout_secs: u64,
 }
 
+fn default_max_steps() -> u32 {
+    AgentBudget::assistant_default().max_steps
+}
+fn default_max_tool_calls() -> u32 {
+    AgentBudget::assistant_default().max_tool_calls
+}
+fn default_per_tool_limit() -> u32 {
+    AgentBudget::assistant_default().per_tool_limit
+}
 fn default_token_limit() -> usize {
     32_000
+}
+fn default_llm_timeout_secs() -> u64 {
+    AgentBudget::assistant_default().llm_timeout.as_secs()
+}
+fn default_tool_timeout_secs() -> u64 {
+    AgentBudget::assistant_default().tool_timeout.as_secs()
 }
 
 impl AgentBudgetProfile {
     fn from_budget(budget: &AgentBudget) -> Self {
         AgentBudgetProfile {
+            max_steps: budget.max_steps,
+            max_tool_calls: budget.max_tool_calls,
+            per_tool_limit: budget.per_tool_limit,
             token_limit: budget.token_limit,
+            llm_timeout_secs: budget.llm_timeout.as_secs(),
+            tool_timeout_secs: budget.tool_timeout.as_secs(),
         }
     }
 }
@@ -129,7 +162,12 @@ impl AgentBudgetProfile {
 impl Default for AgentBudgetProfile {
     fn default() -> Self {
         AgentBudgetProfile {
+            max_steps: default_max_steps(),
+            max_tool_calls: default_max_tool_calls(),
+            per_tool_limit: default_per_tool_limit(),
             token_limit: default_token_limit(),
+            llm_timeout_secs: default_llm_timeout_secs(),
+            tool_timeout_secs: default_tool_timeout_secs(),
         }
     }
 }
@@ -227,9 +265,29 @@ mod tests {
             },
         );
         let b = p.to_worker_budget();
-        // Profile only overrides token_limit; other fields use assistant_default
-        assert_eq!(b.max_steps, 80);
-        assert_eq!(b.max_tool_calls, 160);
+        assert_eq!(b.max_steps, 3);
+        assert_eq!(b.max_tool_calls, 2);
+        assert_eq!(b.per_tool_limit, 2);
         assert_eq!(b.token_limit, 5000);
+        assert_eq!(b.llm_timeout, Duration::from_secs(60));
+        assert_eq!(b.tool_timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn legacy_profile_budget_fills_runtime_limits() {
+        let profile: AgentProfile = serde_json::from_value(serde_json::json!({
+            "name": "legacy",
+            "system_prompt": "prompt",
+            "tool_names": [],
+            "budget": { "token_limit": 4096 }
+        }))
+        .expect("legacy profile");
+        let budget = profile.to_worker_budget();
+        assert_eq!(budget.max_steps, AgentBudget::assistant_default().max_steps);
+        assert_eq!(
+            budget.max_tool_calls,
+            AgentBudget::assistant_default().max_tool_calls
+        );
+        assert_eq!(budget.token_limit, 4096);
     }
 }

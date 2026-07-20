@@ -1,0 +1,29 @@
+{
+  "id": "review-v1",
+  "cases": [
+    {
+      "id": "completion-admission-race",
+      "title": "Find a task-handle admission race",
+      "fixture": "fixtures/completion-admission-race",
+      "prompt": "Review this small Rust crate for a lifecycle correctness bug. Explain a concrete interleaving, cite the affected fields/method, and run focused verification without modifying files.",
+      "expected_keywords": ["busy", "current_task", "finish"],
+      "forbidden_keywords": ["no correctness issue"]
+    },
+    {
+      "id": "unverified-false-success",
+      "title": "Find unverified work accepted as success",
+      "fixture": "fixtures/unverified-false-success",
+      "prompt": "Review the outcome-to-acceptance logic. Identify any false-success path, cite the exact outcome involved, and run focused verification without modifying files.",
+      "expected_keywords": ["CompletedUnverified", "false", "verification"],
+      "forbidden_keywords": ["safe to merge"]
+    },
+    {
+      "id": "clean-acceptance-control",
+      "title": "Avoid inventing a bug in correct acceptance logic",
+      "fixture": "fixtures/clean-acceptance-control",
+      "prompt": "Review the outcome-to-acceptance logic for false-success behavior. This is a clean-control case: report concrete issues only if supported, explain the verified/submitted distinction, and run focused verification without modifying files.",
+      "expected_keywords": ["CompletedVerified", "Submitted", "verification"],
+      "forbidden_keywords": ["CompletedUnverified is accepted"]
+    }
+  ]
+}

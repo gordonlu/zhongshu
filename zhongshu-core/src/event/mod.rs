@@ -1,7 +1,7 @@
 use crate::agent::report::Report;
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
@@ -46,6 +46,7 @@ pub enum AgentState {
     Idle,
     Thinking,
     Executing,
+    Submitted,
     Done { success: bool },
 }
 
@@ -300,6 +301,7 @@ pub enum HarnessUiEvent {
         worker: String,
         task_id: String,
         success: bool,
+        status: String,
         trace_event_count: usize,
     },
     WorkerConflict {
@@ -407,6 +409,25 @@ impl SnapshotStore {
         }
         out
     }
+
+    /// Resolve the sequence number for a broadcast event starting at a
+    /// subscriber cursor. Broadcast carries the event payload for backward
+    /// compatibility; this lookup lets cursor-aware consumers acknowledge the
+    /// exact buffered occurrence and suppress replay duplicates.
+    pub fn sequence_for_event_since(&self, cursor: u64, event: &Event) -> Option<u64> {
+        let encoded = serde_json::to_vec(event).ok()?;
+        self.recent
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(sequence, candidate)| {
+                *sequence >= cursor
+                    && serde_json::to_vec(candidate)
+                        .map(|candidate| candidate == encoded)
+                        .unwrap_or(false)
+            })
+            .map(|(sequence, _)| *sequence)
+    }
 }
 
 // ── EventBus ────────────────────────────────────────────────────────
@@ -450,6 +471,10 @@ impl EventBus {
     /// Current cursor value (next sequence number).
     pub fn current_cursor(&self) -> u64 {
         self.snapshot.current_cursor()
+    }
+
+    pub fn sequence_for_event_since(&self, cursor: u64, event: &Event) -> Option<u64> {
+        self.snapshot.sequence_for_event_since(cursor, event)
     }
 }
 
@@ -730,7 +755,7 @@ mod tests {
         let bus = EventBus::new(4);
         let mut rx = bus.subscribe();
         // Fill the channel to near capacity, verify no hang.
-        for i in 0..3 {
+        for _ in 0..3 {
             bus.publish(Event::Memory(MemoryEvent::Compacted));
         }
         for _ in 0..3 {
@@ -738,6 +763,21 @@ mod tests {
                 .await
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn event_cursor_distinguishes_identical_occurrences() {
+        let store = SnapshotStore::new(8);
+        let event = Event::Memory(MemoryEvent::Compacted);
+        let first = store.push(event.clone());
+        let second = store.push(event.clone());
+
+        assert_eq!(store.sequence_for_event_since(first, &event), Some(first));
+        assert_eq!(
+            store.sequence_for_event_since(first + 1, &event),
+            Some(second)
+        );
+        assert_eq!(store.sequence_for_event_since(second + 1, &event), None);
     }
 
     #[tokio::test]

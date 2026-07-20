@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use crate::agent::attention::AttentionLevel;
+use crate::agent::loop_::{AgentBudget, RunOutcome};
 use crate::agent::profile::AgentProfile;
 use crate::agent::report::Report;
-use crate::agent::loop_::{AgentBudget, RunOutcome};
 use crate::harness::trace::event::HarnessEvent;
 use crate::task::Task;
 
@@ -121,9 +121,9 @@ fn default_true() -> bool {
 impl Default for AcceptanceCriteria {
     fn default() -> Self {
         AcceptanceCriteria {
-            verification_required: false,
+            verification_required: true,
             tests_must_pass: false,
-            no_ownership_violations: false,
+            no_ownership_violations: true,
             custom_rules: Vec::new(),
         }
     }
@@ -217,11 +217,7 @@ impl DelegationContract {
 
 impl From<&DelegationContract> for Task {
     fn from(contract: &DelegationContract) -> Self {
-        let id = format!(
-            "contract-{}-{}",
-            contract.worker,
-            uuid::Uuid::new_v4(),
-        );
+        let id = format!("contract-{}-{}", contract.worker, uuid::Uuid::new_v4(),);
         Task {
             id,
             source: "orchestrator".into(),
@@ -250,10 +246,7 @@ impl From<&DelegationContract> for AgentProfile {
 
         AgentProfile::new(
             &contract.worker,
-            format!(
-                "你是一个 AI 助手，任务是：{}",
-                contract.task_description
-            ),
+            format!("你是一个 AI 助手，任务是：{}", contract.task_description),
             effective_tools,
             AgentBudget {
                 max_steps: contract.budget.max_steps,
@@ -292,6 +285,8 @@ pub struct WorkerOutcome {
 pub enum WorkerStatus {
     /// 按契约要求完成。
     Completed,
+    /// Worker 已提交结果，但缺少完成验收所需的验证证据。
+    Submitted,
     /// 完成但存在问题（如验证失败但仍提供了产出）。
     CompletedWithIssues,
     /// 被阻塞（预算、步骤、工具调用次数上限）。
@@ -357,9 +352,8 @@ pub struct CommandRecord {
 impl From<Report> for WorkerOutcome {
     fn from(report: Report) -> Self {
         let status = match report.outcome {
-            RunOutcome::CompletedVerified | RunOutcome::CompletedUnverified => {
-                WorkerStatus::Completed
-            }
+            RunOutcome::CompletedVerified => WorkerStatus::Completed,
+            RunOutcome::CompletedUnverified => WorkerStatus::Submitted,
             RunOutcome::Blocked => WorkerStatus::Blocked,
             RunOutcome::Failed => WorkerStatus::Failed,
             RunOutcome::Interrupted => WorkerStatus::Interrupted,

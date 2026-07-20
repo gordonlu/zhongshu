@@ -1,5 +1,3 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
@@ -131,6 +129,30 @@ impl RunController {
         }
 
         run_id
+    }
+
+    /// Restore an unfinished run discovered during process startup. The next
+    /// user turn resumes this run ID instead of allocating a new one, allowing
+    /// the agent loop to load its durable checkpoint and reconcile tool state.
+    pub fn restore_interrupted_run(&self, run_id: Uuid, goal: &str) {
+        *self.run_id.write().unwrap() = Some(run_id);
+        *self.state.write().unwrap() = RunState::Interrupted {
+            reason: "process_restart_recovery".into(),
+        };
+        *self.original_goal.write().unwrap() = goal.to_string();
+        self.interrupted.store(true, Ordering::SeqCst);
+        *self.cancel_token.lock().unwrap() = CancellationToken::new();
+        self.event_bus.publish(Event::Run(RunEvent::Interrupted {
+            run_id: run_id.to_string(),
+            reason: "检测到上次进程退出时未完成的任务；下一条指令将恢复并对账".into(),
+        }));
+    }
+
+    pub fn has_startup_recovery(&self) -> bool {
+        matches!(
+            &*self.state.read().unwrap(),
+            RunState::Interrupted { reason } if reason == "process_restart_recovery"
+        )
     }
 
     pub fn run_id(&self) -> Option<Uuid> {
@@ -388,10 +410,15 @@ impl RunController {
     }
 
     pub fn idempotency_key(tool_name: &str, args: &str) -> String {
-        let mut hasher = DefaultHasher::new();
-        tool_name.hash(&mut hasher);
-        args.hash(&mut hasher);
-        format!("{:016x}", hasher.finish())
+        let arguments = if args.trim().is_empty() {
+            serde_json::Value::Object(serde_json::Map::new())
+        } else {
+            serde_json::from_str(args)
+                .unwrap_or_else(|_| serde_json::json!({"__parse_error_raw_arguments": args}))
+        };
+        let observable = crate::tool::ObservableToolInput::new(tool_name, arguments);
+        let key = crate::tool::ToolReplayKey::from_observable(&observable);
+        format!("{}:{}", key.tool_name, key.arguments_hash)
     }
 
     pub fn record_tool_call_start(&self, tool_name: &str, args: &str) {
@@ -410,7 +437,13 @@ impl RunController {
         }
     }
 
-    pub fn record_tool_call_end(&self, tool_name: &str, args: &str, status: &str, error: Option<&str>) {
+    pub fn record_tool_call_end(
+        &self,
+        tool_name: &str,
+        args: &str,
+        status: &str,
+        error: Option<&str>,
+    ) {
         if let Some(rid) = *self.run_id.read().unwrap() {
             if let Some(ref ledger) = *self.ledger.read().unwrap() {
                 let key = Self::idempotency_key(tool_name, args);
@@ -451,8 +484,6 @@ impl RunController {
         }
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -575,5 +606,24 @@ mod tests {
         assert!(p.contains("analyzed requirements"));
         assert!(p.contains("I have started working on"));
         assert!(p.contains("不要写文件"));
+    }
+
+    #[test]
+    fn idempotency_key_canonicalizes_json_object_order() {
+        assert_eq!(
+            RunController::idempotency_key("tool", r#"{"a":1,"b":2}"#),
+            RunController::idempotency_key("tool", r#"{"b":2,"a":1}"#),
+        );
+    }
+
+    #[test]
+    fn startup_recovery_preserves_run_id() {
+        let (ctrl, _) = make_controller();
+        let run_id = Uuid::new_v4();
+        ctrl.restore_interrupted_run(run_id, "recover me");
+
+        assert!(ctrl.has_startup_recovery());
+        assert_eq!(ctrl.begin_resume(), run_id);
+        assert_eq!(ctrl.run_id(), Some(run_id));
     }
 }

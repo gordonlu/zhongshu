@@ -640,6 +640,29 @@ impl AuthorityGate {
         }
     }
 
+    /// Require an explicit approval for any named tool, independent of the
+    /// built-in risk classifier. Used by delegation contracts that opt into
+    /// approval for every side-effecting action.
+    pub fn check_explicit_tool(&mut self, tool: &str) -> CheckResult {
+        if !self.enabled {
+            return CheckResult::Allow;
+        }
+        let key = (tool.to_string(), tool.to_string());
+        self.evict_expired();
+        if self.cache.contains_key(&key) {
+            CheckResult::Allow
+        } else {
+            CheckResult::RequireAuth {
+                request: AuthRequest {
+                    tool: tool.to_string(),
+                    program: tool.to_string(),
+                    command: tool.to_string(),
+                    risk: Risk::Dangerous,
+                },
+            }
+        }
+    }
+
     pub fn approve(&mut self, tool: &str, program: &str) {
         let key = (tool.to_string(), program.to_string());
         self.cache.insert(key, Instant::now() + self.ttl);
@@ -715,8 +738,10 @@ fn timestamp() -> String {
 
 static GLOBAL_GATE: OnceLock<Mutex<AuthorityGate>> = OnceLock::new();
 static PENDING_AUTH: OnceLock<Mutex<HashMap<String, PendingRequest>>> = OnceLock::new();
-static AUTH_OUTCOME_TX: OnceLock<Mutex<HashMap<String, tokio::sync::oneshot::Sender<AuthOutcome>>>> =
-    OnceLock::new();
+static AUTH_OUTCOME_TX: OnceLock<
+    Mutex<HashMap<String, tokio::sync::oneshot::Sender<AuthOutcome>>>,
+> = OnceLock::new();
+static AUTH_RESOLVED: OnceLock<Mutex<HashMap<String, AuthOutcome>>> = OnceLock::new();
 static AUTH_TX: OnceLock<watch::Sender<Option<PendingRequest>>> = OnceLock::new();
 
 /// Full detail of a pending authorisation request (stored for UI display).
@@ -782,6 +807,13 @@ pub fn check_tool(tool: &str) -> CheckResult {
     }
 }
 
+pub fn check_explicit_tool(tool: &str) -> CheckResult {
+    match GLOBAL_GATE.get() {
+        Some(g) => g.lock().unwrap().check_explicit_tool(tool),
+        None => CheckResult::Allow,
+    }
+}
+
 /// Create a new pending authorisation request and store it in the map.
 /// Returns the generated request id.
 pub fn set_pending(tool: &str, program: &str, command: &str, source: &str) -> String {
@@ -803,10 +835,7 @@ pub fn set_pending(tool: &str, program: &str, command: &str, source: &str) -> St
 
 /// Register a oneshot sender that will receive the approval outcome for
 /// the given request. The agent loop calls this after creating the channel.
-pub fn register_auth_outcome_tx(
-    id: &str,
-    tx: tokio::sync::oneshot::Sender<AuthOutcome>,
-) {
+pub fn register_auth_outcome_tx(id: &str, tx: tokio::sync::oneshot::Sender<AuthOutcome>) {
     let cell = AUTH_OUTCOME_TX.get_or_init(|| Mutex::new(HashMap::new()));
     cell.lock().unwrap().insert(id.to_string(), tx);
 }
@@ -827,14 +856,21 @@ pub fn register_waiter_if_pending(
     let cell = PENDING_AUTH.get_or_init(|| Mutex::new(HashMap::new()));
     let guard = cell.lock().unwrap();
     if !guard.contains_key(id) {
-        // Request was already resolved — don't register.
+        // A very fast UI response can resolve the request before the agent
+        // installs its waiter. Deliver that request-scoped result immediately.
+        let resolved_cell = AUTH_RESOLVED.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Some(outcome) = resolved_cell.lock().unwrap().remove(id) {
+            let _ = tx.send(outcome);
+            return Ok(());
+        }
         return Err(());
     }
-    // Request still exists. Drop pending lock (different lock domain)
-    // and register the waiter.
-    drop(guard);
+    // Keep the pending lock until the waiter is installed. approve/deny use
+    // the same PENDING_AUTH -> AUTH_OUTCOME_TX lock order, so resolution
+    // cannot slip between the existence check and registration.
     let tx_cell = AUTH_OUTCOME_TX.get_or_init(|| Mutex::new(HashMap::new()));
     tx_cell.lock().unwrap().insert(id.to_string(), tx);
+    drop(guard);
     Ok(())
 }
 
@@ -867,6 +903,12 @@ pub fn peek_pending() -> Option<PendingRequest> {
     cell.lock().unwrap().values().next().cloned()
 }
 
+/// Read one pending request by its stable request ID.
+pub fn get_pending(id: &str) -> Option<PendingRequest> {
+    let cell = PENDING_AUTH.get_or_init(|| Mutex::new(HashMap::new()));
+    cell.lock().unwrap().get(id).cloned()
+}
+
 /// Take the first pending request without needing an id (for tests).
 pub fn take_any_pending() -> Option<PendingRequest> {
     let cell = PENDING_AUTH.get_or_init(|| Mutex::new(HashMap::new()));
@@ -879,6 +921,7 @@ pub fn take_pending(id: &str) -> Option<PendingRequest> {
     let cell = PENDING_AUTH.get_or_init(|| Mutex::new(HashMap::new()));
     let req = cell.lock().unwrap().remove(id);
     let _ = AUTH_OUTCOME_TX.get().map(|m| m.lock().unwrap().remove(id));
+    let _ = AUTH_RESOLVED.get().map(|m| m.lock().unwrap().remove(id));
     if req.is_some() {
         if let Some(tx) = AUTH_TX.get() {
             let _ = tx.send(peek_pending());
@@ -893,12 +936,21 @@ pub fn deny_pending(id: &str) {
     let cell = PENDING_AUTH.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = cell.lock().unwrap();
     if let Some(req) = guard.remove(id) {
-        drop(guard);
-        if let Some(tx) = AUTH_OUTCOME_TX.get() {
-            if let Some(sender) = tx.lock().unwrap().remove(id) {
-                let _ = sender.send(AuthOutcome::Denied);
-            }
+        let sender = AUTH_OUTCOME_TX
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .remove(id);
+        if let Some(sender) = sender {
+            let _ = sender.send(AuthOutcome::Denied);
+        } else {
+            AUTH_RESOLVED
+                .get_or_init(|| Mutex::new(HashMap::new()))
+                .lock()
+                .unwrap()
+                .insert(id.to_string(), AuthOutcome::Denied);
         }
+        drop(guard);
         if let Some(tx) = AUTH_TX.get() {
             let _ = tx.send(peek_pending());
         }
@@ -915,13 +967,22 @@ pub fn approve_pending(id: &str) {
     let cell = PENDING_AUTH.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = cell.lock().unwrap();
     if let Some(req) = guard.remove(id) {
-        drop(guard);
         approve(&req.tool, &req.program);
-        if let Some(tx) = AUTH_OUTCOME_TX.get() {
-            if let Some(sender) = tx.lock().unwrap().remove(id) {
-                let _ = sender.send(AuthOutcome::Approved);
-            }
+        let sender = AUTH_OUTCOME_TX
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .remove(id);
+        if let Some(sender) = sender {
+            let _ = sender.send(AuthOutcome::Approved);
+        } else {
+            AUTH_RESOLVED
+                .get_or_init(|| Mutex::new(HashMap::new()))
+                .lock()
+                .unwrap()
+                .insert(id.to_string(), AuthOutcome::Approved);
         }
+        drop(guard);
         if let Some(tx) = AUTH_TX.get() {
             let _ = tx.send(peek_pending());
         }
@@ -1250,5 +1311,34 @@ mod tests {
         assert_eq!(req.tool, "shell");
         assert_eq!(req.program, "rm");
         assert!(!req.command.is_empty(), "command should not be empty");
+    }
+
+    #[tokio::test]
+    async fn request_scoped_waiter_receives_exact_denial() {
+        init(AuthorityGate::new(true, 1800));
+        let id = set_pending("shell", "test-program", "test-command", "test");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        register_waiter_if_pending(&id, tx).expect("request must still be pending");
+
+        deny_pending(&id);
+
+        assert_eq!(rx.await.unwrap(), AuthOutcome::Denied);
+    }
+
+    #[tokio::test]
+    async fn resolved_request_delivers_to_late_waiter() {
+        init(AuthorityGate::new(true, 1800));
+        let id = set_pending("shell", "test-program", "test-command", "test");
+        deny_pending(&id);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        register_waiter_if_pending(&id, tx).expect("resolved result must be retained");
+        assert_eq!(rx.await.unwrap(), AuthOutcome::Denied);
+    }
+
+    #[test]
+    fn unknown_request_cannot_install_waiter() {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        assert!(register_waiter_if_pending("missing-request", tx).is_err());
     }
 }

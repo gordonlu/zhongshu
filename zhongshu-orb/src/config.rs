@@ -158,7 +158,11 @@ impl LlmConfig {
                 &cfg.api_base
             };
             let api_key_val = self.api_key();
-            let resolved_key = if force_offline { None } else { Some(api_key_val.as_str()) };
+            let resolved_key = if force_offline {
+                None
+            } else {
+                Some(api_key_val.as_str())
+            };
             reg.register_raw(
                 name,
                 &cfg.api_key_env,

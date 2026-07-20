@@ -2,8 +2,8 @@ use crate::agent::contract::{
     AcceptanceCriteria, ArtifactRequirements, DelegationBudget, DelegationContract,
     DelegationPermissions, EscalationRules, WorkScope, WorkerOutcome,
 };
-use crate::agent::worker::Worker;
 use crate::agent::runtime::AgentRuntime;
+use crate::agent::worker::Worker;
 use crate::agent::AgentCallbacks;
 use std::path::PathBuf;
 
@@ -44,13 +44,13 @@ pub async fn delegate_with_contract(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::llm::{
+        ChatCompletionRequest, ChatCompletionResponse, FinalChoice, LlmProvider, Message,
+    };
     use crate::agent::loop_::AgentBudget;
+    use crate::agent::orchestrator::{Orchestrator, WorkerExecutionStatus};
     use crate::agent::profile::AgentProfile;
     use crate::agent::runtime::AgentRuntime;
-    use crate::agent::orchestrator::{
-        Orchestrator, WorkerExecutionStatus,
-    };
-    use crate::agent::llm::{ChatCompletionRequest, ChatCompletionResponse, FinalChoice, LlmProvider, Message};
     use crate::harness::architecture::index::ProjectIndex;
     use crate::tool::ToolRegistry;
     use async_trait::async_trait;
@@ -134,7 +134,10 @@ mod tests {
 
         assert_eq!(outcome.worker, "worker-a");
         assert!(!outcome.findings.is_empty());
-        assert!(outcome.status.is_success());
+        assert_eq!(
+            outcome.status,
+            crate::agent::contract::WorkerStatus::Submitted
+        );
     }
 
     #[tokio::test]
@@ -147,7 +150,10 @@ mod tests {
 
         // The contract stores owned_files in scope
         assert_eq!(outcome.worker, "worker-a");
-        assert!(outcome.status.is_success());
+        assert_eq!(
+            outcome.status,
+            crate::agent::contract::WorkerStatus::Submitted
+        );
     }
 
     /// Orchestrate 2 workers via DelegationContract, simulating a Lead pattern:
@@ -158,25 +164,18 @@ mod tests {
     #[tokio::test]
     async fn lead_delegates_to_two_workers() {
         let runtime = dummy_runtime();
-        let orchestrator = Orchestrator::new(runtime.clone(), crate::agent::llm_registry::LlmRegistry::new());
+        let orchestrator = Orchestrator::new(
+            runtime.clone(),
+            crate::agent::llm_registry::LlmRegistry::new(),
+        );
 
-        let profiles = vec![
-            dummy_profile("worker-a"),
-            dummy_profile("worker-b"),
-        ];
+        let profiles = vec![dummy_profile("worker-a"), dummy_profile("worker-b")];
 
-        let index = make_index(&[
-            "src/module_a.rs",
-            "src/module_b.rs",
-            "src/module_c.rs",
-        ]);
+        let index = make_index(&["src/module_a.rs", "src/module_b.rs", "src/module_c.rs"]);
 
         // Simulate Lead splitting the task
-        let assignments = orchestrator.split_task(
-            "Implement feature X across all modules",
-            &profiles,
-            &index,
-        );
+        let assignments =
+            orchestrator.split_task("Implement feature X across all modules", &profiles, &index);
 
         assert_eq!(assignments.len(), 2);
         assert!(!assignments[0].owned_files.is_empty());
@@ -203,11 +202,10 @@ mod tests {
 
         assert_eq!(outcomes.len(), 2);
         for outcome in &outcomes {
-            assert!(
-                outcome.status.is_success(),
-                "worker '{}' should succeed, got {:?}",
-                outcome.worker,
+            assert_eq!(
                 outcome.status,
+                crate::agent::contract::WorkerStatus::Submitted,
+                "mock worker has no verification evidence"
             );
             assert!(!outcome.findings.is_empty());
         }
@@ -222,23 +220,16 @@ mod tests {
         use crate::agent::orchestrator::tests;
 
         let runtime = dummy_runtime();
-        let orchestrator = Orchestrator::new(runtime.clone(), crate::agent::llm_registry::LlmRegistry::new());
-
-        let profiles = vec![
-            dummy_profile("worker-a"),
-            dummy_profile("worker-b"),
-        ];
-
-        let index = make_index(&[
-            "src/module_a.rs",
-            "src/module_b.rs",
-        ]);
-
-        let assignments = orchestrator.split_task(
-            "Refactor modules A and B",
-            &profiles,
-            &index,
+        let orchestrator = Orchestrator::new(
+            runtime.clone(),
+            crate::agent::llm_registry::LlmRegistry::new(),
         );
+
+        let profiles = vec![dummy_profile("worker-a"), dummy_profile("worker-b")];
+
+        let index = make_index(&["src/module_a.rs", "src/module_b.rs"]);
+
+        let assignments = orchestrator.split_task("Refactor modules A and B", &profiles, &index);
 
         assert_eq!(assignments.len(), 2);
 
@@ -247,19 +238,14 @@ mod tests {
         let coordinator = tests::MockFileClaimCoordinator::new();
 
         let report = orchestrator
-            .execute_with_file_claims(
-                assignments,
-                &coordinator,
-                1,
-                "test",
-            )
+            .execute_with_file_claims(assignments, &coordinator, 1, "test")
             .await
             .expect("orchestrator pipeline should complete");
 
         assert_eq!(
             report.status,
-            WorkerExecutionStatus::Completed,
-            "full pipeline should complete without review findings",
+            WorkerExecutionStatus::Submitted,
+            "unverified worker results must remain submitted",
         );
         assert_eq!(report.reports.len(), 2);
         assert!(report.conflicts.is_empty());
@@ -274,7 +260,10 @@ mod tests {
         assert_eq!(outcomes.len(), 2);
         assert_ne!(outcomes[0].worker, outcomes[1].worker);
         for outcome in &outcomes {
-            assert!(outcome.status.is_success());
+            assert_eq!(
+                outcome.status,
+                crate::agent::contract::WorkerStatus::Submitted
+            );
         }
     }
 }

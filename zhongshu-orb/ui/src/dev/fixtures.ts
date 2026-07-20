@@ -101,6 +101,7 @@ export const demoCodingEvents: OverlayToUiEvent[] = [
       worker: 'deepseek-worker',
       task_id: 'ui-css-pass',
       success: true,
+      status: 'completed',
     },
   },
   { type: 'phase_transition', from: 'implementation', to: 'verification' },

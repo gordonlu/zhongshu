@@ -13,6 +13,7 @@ import {
   ShieldAlert,
   Square,
   Sun,
+  Users,
   Wrench,
   X,
   ZoomIn,
@@ -196,12 +197,12 @@ export function App() {
   }, [resourceDialog, settingsConfig, showPersonality])
 
   const isCodingMode = mode === 'coding' || codingState.active
-  const submitComposer = () => {
+  const submitComposer = (delegateReview = false) => {
     const text = composerText.trim()
     if (!text) return
     optimisticUserMessages.current.push(text)
     dispatchChat({ type: 'user_message', content: text })
-    bridge.send({ type: 'submit', text })
+    bridge.send(delegateReview ? { type: 'delegate_review', text } : { type: 'submit', text })
     setComposerText('')
     focusComposer()
   }
@@ -262,6 +263,19 @@ export function App() {
           <span>{statusText}</span>
         </div>
         <div className="titlebar-actions">
+          {isCodingMode ? (
+            <button
+              type="button"
+              className="icon-button optional-title-action"
+              aria-label="Delegate review to two workers"
+              data-tooltip-dir="below"
+              data-tooltip="Two-worker review"
+              disabled={!composerText.trim()}
+              onClick={() => submitComposer(true)}
+            >
+              <Users size={iconSize} />
+            </button>
+          ) : null}
           {isCodingMode ? (
             <button
               type="button"
@@ -429,14 +443,14 @@ export function App() {
           value={composerText}
           placeholder={isCodingMode ? 'Describe the task or review request...' : 'Ask Zhongshu what to do next.'}
           onChange={setComposerText}
-          onSubmit={submitComposer}
+          onSubmit={() => submitComposer()}
         />
         <button
           type="button"
           className="send-button"
           aria-label="Send"
           data-tooltip="Send"
-          onClick={submitComposer}
+          onClick={() => submitComposer()}
         >
           <Send size={16} />
         </button>

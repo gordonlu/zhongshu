@@ -10,6 +10,7 @@ fn state_color(state: AgentState) -> (u8, u8, u8) {
         AgentState::Idle => (57, 100, 254),      // Zhongshu primary blue
         AgentState::Thinking => (68, 152, 255),  // blue-cyan flow
         AgentState::Executing => (35, 205, 220), // active tool energy
+        AgentState::Submitted => (234, 179, 8),  // awaiting verification
         AgentState::Done { success: true } => (76, 210, 135),
         AgentState::Done { success: false } => (235, 76, 86),
     }
@@ -37,6 +38,7 @@ mod orb {
             AgentState::Idle => crate::render::OrbMode::Idle,
             AgentState::Thinking => crate::render::OrbMode::Thinking,
             AgentState::Executing => crate::render::OrbMode::Executing,
+            AgentState::Submitted => crate::render::OrbMode::DoneSuccess,
             AgentState::Done { success: true } => crate::render::OrbMode::DoneSuccess,
             AgentState::Done { success: false } => crate::render::OrbMode::DoneFailure,
         }
@@ -140,7 +142,7 @@ mod orb {
             let t = self.start_time.elapsed().as_secs_f64();
             self.color.set_target(c.0, c.1, c.2, t);
             // Ensure Done state is visible for at least 900ms.
-            if matches!(state, AgentState::Done { .. }) {
+            if matches!(state, AgentState::Done { .. } | AgentState::Submitted) {
                 self.done_until = Instant::now() + std::time::Duration::from_millis(1100);
             }
             self.window.request_redraw();
@@ -164,7 +166,7 @@ mod orb {
 
         pub fn render(&mut self) {
             // Decay Done → Idle after minimum display time.
-            let effective = if matches!(self.state, AgentState::Done { .. })
+            let effective = if matches!(self.state, AgentState::Done { .. } | AgentState::Submitted)
                 && Instant::now() >= self.done_until
             {
                 AgentState::Idle
@@ -241,6 +243,7 @@ pub mod tray {
                 AgentState::Idle => "中书".into(),
                 AgentState::Thinking => "中书（思考中）".into(),
                 AgentState::Executing => "中书（执行中）".into(),
+                AgentState::Submitted => "中书（已提交，未验证）".into(),
                 AgentState::Done { success: true } => "中书（完成）".into(),
                 AgentState::Done { success: false } => "中书（出错）".into(),
             }
@@ -252,6 +255,7 @@ pub mod tray {
                 AgentState::Idle => "就绪",
                 AgentState::Thinking => "正在思考...",
                 AgentState::Executing => "正在执行工具...",
+                AgentState::Submitted => "结果已提交，尚未验证",
                 AgentState::Done { success: true } => "任务完成",
                 AgentState::Done { success: false } => "任务失败",
             };

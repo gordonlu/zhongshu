@@ -64,4 +64,22 @@ describe('RunSummary', () => {
       tone: 'bad',
     })
   })
+
+  it('shows submitted workers as awaiting verification', () => {
+    const state: CodingState = {
+      active: true,
+      planStepCount: 0,
+      steps: [],
+      workers: [{ worker: 'worker-a', taskId: 'w1', status: 'submitted', ownedFiles: [] }],
+      changes: [],
+      verifications: [],
+      recoveryMessages: [],
+      contextIncluded: [],
+    }
+
+    expect(buildRunSummary(state)[0]).toMatchObject({
+      value: 'Awaiting verification',
+      tone: 'warn',
+    })
+  })
 })

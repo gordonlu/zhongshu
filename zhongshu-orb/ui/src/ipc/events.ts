@@ -53,7 +53,7 @@ export type CodingUiEvent =
   | { kind: 'plan_step_started'; session_id: string; step_id: string; title: string }
   | { kind: 'plan_step_completed'; session_id: string; step_id: string; status: string }
   | { kind: 'worker_started'; session_id?: string; worker: string; task_id: string; owned_files: string[] }
-  | { kind: 'worker_completed'; session_id?: string; worker: string; task_id: string; success: boolean }
+  | { kind: 'worker_completed'; session_id?: string; worker: string; task_id: string; success: boolean; status: string }
   | { kind: 'worker_conflict'; session_id?: string; worker: string; task_id: string; reason: string }
   | { kind: 'patch_preview'; session_id?: string; path: string; operation: string; diff_summary: string; diff?: PatchDiffPayload | null }
   | { kind: 'patch_applied'; session_id?: string; path: string; operation: string; changed: boolean }

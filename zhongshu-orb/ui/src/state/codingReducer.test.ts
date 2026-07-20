@@ -80,4 +80,54 @@ describe('codingReducer', () => {
       summary: '@@ -1 +1 @@\n-old\n+new',
     })
   })
+
+  it('keeps an unverified worker submission distinct from failure', () => {
+    const events: OverlayToUiEvent[] = [
+      {
+        type: 'coding',
+        event: {
+          kind: 'worker_started',
+          worker: 'worker-a',
+          task_id: 'task-a',
+          owned_files: [],
+        },
+      },
+      {
+        type: 'coding',
+        event: {
+          kind: 'worker_completed',
+          worker: 'worker-a',
+          task_id: 'task-a',
+          success: false,
+          status: 'submitted',
+        },
+      },
+    ]
+
+    const state = events.reduce(codingReducer, initialCodingState)
+
+    expect(state.workers[0]?.status).toBe('submitted')
+  })
+
+  it('resets previous run artifacts when a new delegation plan starts', () => {
+    const previous = {
+      ...initialCodingState,
+      active: true,
+      workers: [{ worker: 'old', taskId: 'old', status: 'completed' as const, ownedFiles: [] }],
+      changes: [{ path: 'old.rs', operation: 'edit', summary: 'old', status: 'applied' as const }],
+      verifications: [{ command: 'old test', success: true }],
+      recoveryMessages: ['old recovery'],
+    }
+
+    const next = codingReducer(previous, {
+      type: 'coding',
+      event: { kind: 'plan_created', session_id: 'new', step_count: 2, risk: 'review-only' },
+    })
+
+    expect(next.sessionId).toBe('new')
+    expect(next.workers).toEqual([])
+    expect(next.changes).toEqual([])
+    expect(next.verifications).toEqual([])
+    expect(next.recoveryMessages).toEqual([])
+  })
 })

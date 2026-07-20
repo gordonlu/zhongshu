@@ -31,7 +31,17 @@ pub struct ToolExecution {
     pub output: ToolOutput,
     pub summary: ToolResultSummary,
     pub elapsed_ms: u128,
+    pub termination: ToolTermination,
+    /// Backward-compatible convenience flag. Prefer `termination` for new code.
     pub timed_out: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolTermination {
+    Completed,
+    TimedOut,
+    Cancelled,
 }
 
 pub struct ToolExecutor<'a> {
@@ -64,7 +74,7 @@ impl<'a> ToolExecutor<'a> {
         let spec = self.registry.get(name).map(|tool| tool.spec());
         let started = Instant::now();
 
-        let (output, timed_out) = match cancel_token {
+        let (output, termination) = match cancel_token {
             Some(ct) => {
                 tokio::select! {
                     result = tokio::time::timeout(
@@ -72,13 +82,13 @@ impl<'a> ToolExecutor<'a> {
                         self.registry.execute(name, &args_string),
                     ) => {
                         match result {
-                            Ok(output) => (output, false),
+                            Ok(output) => (output, ToolTermination::Completed),
                             Err(_) => (
                                 ToolOutput::error(format!(
                                     "tool '{name}' timed out after {:?}",
                                     self.policy.timeout
                                 )),
-                                true,
+                                ToolTermination::TimedOut,
                             ),
                         }
                     }
@@ -87,7 +97,7 @@ impl<'a> ToolExecutor<'a> {
                             ToolOutput::error(format!(
                                 "tool '{name}' was cancelled",
                             )),
-                            true,
+                            ToolTermination::Cancelled,
                         )
                     }
                 }
@@ -99,13 +109,13 @@ impl<'a> ToolExecutor<'a> {
                 )
                 .await;
                 match result {
-                    Ok(output) => (output, false),
+                    Ok(output) => (output, ToolTermination::Completed),
                     Err(_) => (
                         ToolOutput::error(format!(
                             "tool '{name}' timed out after {:?}",
                             self.policy.timeout
                         )),
-                        true,
+                        ToolTermination::TimedOut,
                     ),
                 }
             }
@@ -121,7 +131,8 @@ impl<'a> ToolExecutor<'a> {
             output,
             summary,
             elapsed_ms: started.elapsed().as_millis(),
-            timed_out,
+            termination,
+            timed_out: termination == ToolTermination::TimedOut,
         }
     }
 
@@ -149,7 +160,9 @@ impl<'a> ToolExecutor<'a> {
                 break;
             }
 
-            let execution = self.execute(&call.name, &call.arguments, cancel_token.clone()).await;
+            let execution = self
+                .execute(&call.name, &call.arguments, cancel_token.clone())
+                .await;
             used_serial_boundary = true;
             let should_stop = execution.output.status != ToolStatus::Success
                 || execution.timed_out
@@ -293,6 +306,7 @@ mod tests {
 
     struct EchoTool;
     struct WriteTool;
+    struct SlowTool;
     struct ConcurrentSearchTool {
         current: Arc<AtomicUsize>,
         max: Arc<AtomicUsize>,
@@ -334,6 +348,26 @@ mod tests {
 
         async fn execute(&self, arguments: &serde_json::Value) -> ToolOutput {
             ToolOutput::success(arguments.clone())
+        }
+    }
+
+    #[async_trait]
+    impl Tool for SlowTool {
+        fn name(&self) -> &str {
+            "slow"
+        }
+
+        fn description(&self) -> &str {
+            "slow"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        async fn execute(&self, _: &serde_json::Value) -> ToolOutput {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            ToolOutput::success(serde_json::json!({"ok": true}))
         }
     }
 
@@ -413,6 +447,7 @@ mod tests {
         assert_eq!(execution.output.status, crate::tool::ToolStatus::Success);
         assert!(execution.spec.is_some());
         assert!(!execution.timed_out);
+        assert_eq!(execution.termination, ToolTermination::Completed);
         assert_eq!(
             execution.observable_input.arguments,
             serde_json::json!({"a": 2, "b": 1})
@@ -420,9 +455,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn executor_distinguishes_timeout_from_cancellation() {
+        let registry = ToolRegistry::new().register(SlowTool);
+        let timed_out = ToolExecutor::with_policy(
+            &registry,
+            ToolExecutionPolicy {
+                timeout: Duration::from_millis(5),
+                ..Default::default()
+            },
+        )
+        .execute("slow", "{}", None)
+        .await;
+        assert_eq!(timed_out.termination, ToolTermination::TimedOut);
+
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let cancelled = ToolExecutor::new(&registry)
+            .execute("slow", "{}", Some(cancellation))
+            .await;
+        assert_eq!(cancelled.termination, ToolTermination::Cancelled);
+        assert!(!cancelled.timed_out);
+    }
+
+    #[tokio::test]
     async fn executor_records_parse_error_as_observable_input() {
         let registry = ToolRegistry::new().register(EchoTool);
-        let execution = ToolExecutor::new(&registry).execute("echo", "{", None).await;
+        let execution = ToolExecutor::new(&registry)
+            .execute("echo", "{", None)
+            .await;
 
         assert!(execution
             .observable_input

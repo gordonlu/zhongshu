@@ -29,11 +29,13 @@ export function buildRunSummary(state: CodingState): SummaryItem[] {
   const failedChecks = state.verifications.filter((verification) => !verification.success).length
   const passedChecks = state.verifications.length - failedChecks
   const conflictedWorkers = state.workers.filter((worker) => worker.status === 'conflict').length
+  const submittedWorkers = state.workers.filter((worker) => worker.status === 'submitted').length
   const appliedChanges = state.changes.filter((change) => change.status === 'applied').length
   const changedFiles = state.changes.filter((change) => change.changed === true).length
   const hasDroppedContext = Boolean(state.droppedEvidence || state.droppedRecent)
   const contextPressure = state.contextPressure ?? 0
   const needsAttention = failedChecks > 0 || conflictedWorkers > 0 || state.recoveryMessages.length > 0
+  const awaitsVerification = submittedWorkers > 0 && !needsAttention
   const reviewReady =
     state.changes.length > 0 &&
     appliedChanges === state.changes.length &&
@@ -43,15 +45,25 @@ export function buildRunSummary(state: CodingState): SummaryItem[] {
   return [
     {
       label: 'Outcome',
-      value: needsAttention ? 'Needs attention' : reviewReady ? 'Review ready' : state.active ? 'Running' : 'Standby',
+      value: needsAttention
+        ? 'Needs attention'
+        : awaitsVerification
+          ? 'Awaiting verification'
+          : reviewReady
+            ? 'Review ready'
+            : state.active
+              ? 'Running'
+              : 'Standby',
       detail: needsAttention
         ? `${failedChecks} failed checks, ${conflictedWorkers} conflicts`
+        : awaitsVerification
+          ? `${submittedWorkers} worker submissions`
         : reviewReady
           ? `${changedFiles} changed files`
           : state.risk
             ? `${state.risk} risk`
             : undefined,
-      tone: needsAttention ? 'bad' : reviewReady ? 'good' : state.active ? 'warn' : 'neutral',
+      tone: needsAttention ? 'bad' : awaitsVerification ? 'warn' : reviewReady ? 'good' : state.active ? 'warn' : 'neutral',
     },
     {
       label: 'Phase',

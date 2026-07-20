@@ -86,6 +86,7 @@ pub struct OverlayHostDiagnostics {
 
 pub struct IpcClones {
     pub pi: Arc<Mutex<VecDeque<String>>>,
+    pub pdr: Arc<Mutex<VecDeque<String>>>,
     pub pa: Arc<Mutex<Option<String>>>,
     pub pd: Arc<Mutex<Option<String>>>,
     pub pp: Arc<Mutex<Option<String>>>,
@@ -110,6 +111,7 @@ pub struct OverlayState {
     #[allow(dead_code)]
     pub personality_selected: bool,
     pub pending_input: Arc<Mutex<VecDeque<String>>>,
+    pub pending_delegate_review: Arc<Mutex<VecDeque<String>>>,
     pub pending_approve: Arc<Mutex<Option<String>>>,
     pub pending_deny: Arc<Mutex<Option<String>>>,
     pub pending_personality: Arc<Mutex<Option<String>>>,
@@ -134,6 +136,7 @@ impl OverlayState {
             request_quit: false,
             personality_selected: false,
             pending_input: Default::default(),
+            pending_delegate_review: Default::default(),
             pending_approve: Default::default(),
             pending_deny: Default::default(),
             pending_personality: Default::default(),
@@ -156,6 +159,7 @@ impl OverlayState {
     pub fn clone_for_ipc(&self) -> IpcClones {
         IpcClones {
             pi: self.pending_input.clone(),
+            pdr: self.pending_delegate_review.clone(),
             pa: self.pending_approve.clone(),
             pd: self.pending_deny.clone(),
             pp: self.pending_personality.clone(),
@@ -177,6 +181,9 @@ impl OverlayState {
 
     pub fn take_input(&self) -> Option<String> {
         self.pending_input.lock().unwrap().pop_front()
+    }
+    pub fn take_delegate_review(&self) -> Option<String> {
+        self.pending_delegate_review.lock().unwrap().pop_front()
     }
     pub fn take_approve(&self) -> Option<String> {
         self.pending_approve.lock().unwrap().take()
@@ -229,6 +236,9 @@ pub fn make_ipc_handler(clones: IpcClones) -> impl Fn(http::Request<String>) + '
     move |request: http::Request<String>| match parse_ui_command(request.body()) {
         UiToOverlayCommand::Submit(text) => {
             clones.pi.lock().unwrap().push_back(text);
+        }
+        UiToOverlayCommand::DelegateReview(text) => {
+            clones.pdr.lock().unwrap().push_back(text);
         }
         UiToOverlayCommand::Stop => {
             *clones.rs.lock().unwrap() = true;

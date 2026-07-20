@@ -9,7 +9,7 @@ export type PlanStep = {
 export type WorkerState = {
   worker: string
   taskId: string
-  status: 'running' | 'completed' | 'conflict'
+  status: 'running' | 'submitted' | 'completed' | 'conflict'
   ownedFiles: string[]
   reason?: string
 }
@@ -113,6 +113,10 @@ function reduceCodingEvent(state: CodingState, event: CodingUiEvent): CodingStat
         risk: event.risk,
         planStepCount: event.step_count,
         steps: [],
+        workers: [],
+        changes: [],
+        verifications: [],
+        recoveryMessages: [],
       }
     case 'plan_step_started':
       return {
@@ -152,7 +156,11 @@ function reduceCodingEvent(state: CodingState, event: CodingUiEvent): CodingStat
         ...state,
         active: true,
         workers: updateWorker(state.workers, event.task_id, {
-          status: event.success ? 'completed' : 'conflict',
+          status: event.status === 'submitted'
+            ? 'submitted'
+            : event.success
+              ? 'completed'
+              : 'conflict',
         }),
       }
     case 'worker_conflict':

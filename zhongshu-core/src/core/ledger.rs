@@ -15,6 +15,47 @@ pub struct RunLedger {
     db: Database,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ledger() -> (tempfile::TempDir, RunLedger) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(dir.path().join("ledger.db"));
+        db.migrate().unwrap();
+        (dir, RunLedger::new(db))
+    }
+
+    #[test]
+    fn later_start_is_not_hidden_by_an_older_completion() {
+        let (_dir, ledger) = ledger();
+        ledger
+            .record_tool_call("run", "shell", "{}", "started", None, Some("key"))
+            .unwrap();
+        ledger
+            .record_tool_call("run", "shell", "{}", "completed", None, Some("key"))
+            .unwrap();
+        ledger
+            .record_tool_call("run", "shell", "{}", "started", None, Some("key"))
+            .unwrap();
+
+        assert_eq!(ledger.reconcile_inflight_tools("run").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn unknown_effect_closes_inflight_record() {
+        let (_dir, ledger) = ledger();
+        ledger
+            .record_tool_call("run", "shell", "{}", "started", None, Some("key"))
+            .unwrap();
+        ledger
+            .record_tool_call("run", "shell", "{}", "unknown_effect", None, Some("key"))
+            .unwrap();
+
+        assert!(ledger.reconcile_inflight_tools("run").unwrap().is_empty());
+    }
+}
+
 impl RunLedger {
     pub fn new(db: Database) -> Self {
         RunLedger { db }
@@ -36,23 +77,14 @@ impl RunLedger {
         Ok(())
     }
 
-    fn insert_event(
-        &self,
-        run_id: &str,
-        event_type: &str,
-        payload: &str,
-    ) -> rusqlite::Result<()> {
+    fn insert_event(&self, run_id: &str, event_type: &str, payload: &str) -> rusqlite::Result<()> {
         self.insert(run_id, event_type, payload, None)
     }
 
     // ── Lifecycle ──────────────────────────────────────────────────────
 
     pub fn record_run_started(&self, run_id: &str, goal: &str) -> rusqlite::Result<()> {
-        self.insert_event(
-            run_id,
-            "run_started",
-            &json!({"goal": goal}).to_string(),
-        )
+        self.insert_event(run_id, "run_started", &json!({"goal": goal}).to_string())
     }
 
     pub fn record_run_interrupted(&self, run_id: &str, reason: &str) -> rusqlite::Result<()> {
@@ -160,9 +192,7 @@ impl RunLedger {
     /// Returns true if the run has any recorded events.
     pub fn has_run(&self, run_id: &str) -> rusqlite::Result<bool> {
         let conn = self.db.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT COUNT(*) FROM run_ledger WHERE run_id = ?1",
-        )?;
+        let mut stmt = conn.prepare("SELECT COUNT(*) FROM run_ledger WHERE run_id = ?1")?;
         let count: i64 = stmt.query_row(params![run_id], |row| row.get(0))?;
         Ok(count > 0)
     }
@@ -176,25 +206,30 @@ impl RunLedger {
     /// cannot know whether the side effect actually happened. The caller
     /// should NOT skip these via the idempotency checker; instead the agent
     /// should be informed that the outcome is unknown.
-    pub fn reconcile_inflight_tools(&self, run_id: &str) -> rusqlite::Result<Vec<(String, String, String)>> {
+    pub fn reconcile_inflight_tools(
+        &self,
+        run_id: &str,
+    ) -> rusqlite::Result<Vec<(String, String, String)>> {
         let conn = self.db.conn()?;
-        // Find all 'started' events that do NOT have a matching
-        // 'completed' or 'failed' event with the same idempotency_key.
+        // Find all 'started' events that do NOT have any later terminal
+        // record with the same idempotency key. Unknown-effect and approval
+        // waits are terminal records too: neither means "still executing".
         let mut stmt = conn.prepare(
-            "SELECT json_extract(payload, '$.tool'),
-                    json_extract(payload, '$.args'),
-                    idempotency_key
-             FROM run_ledger
-             WHERE run_id = ?1
-               AND event_type = 'tool_call'
-               AND json_extract(payload, '$.status') = 'started'
-               AND idempotency_key IS NOT NULL
-               AND idempotency_key NOT IN (
-                   SELECT idempotency_key FROM run_ledger
-                   WHERE run_id = ?1
-                     AND event_type = 'tool_call'
-                     AND json_extract(payload, '$.status') IN ('completed', 'failed')
-                     AND idempotency_key IS NOT NULL
+            "SELECT json_extract(s.payload, '$.tool'),
+                    json_extract(s.payload, '$.args'),
+                    s.idempotency_key
+             FROM run_ledger AS s
+             WHERE s.run_id = ?1
+               AND s.event_type = 'tool_call'
+               AND json_extract(s.payload, '$.status') = 'started'
+               AND s.idempotency_key IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM run_ledger AS e
+                   WHERE e.run_id = s.run_id
+                     AND e.event_type = 'tool_call'
+                     AND e.idempotency_key = s.idempotency_key
+                     AND e.id > s.id
+                     AND json_extract(e.payload, '$.status') != 'started'
                )",
         )?;
         let mut rows = stmt.query(rusqlite::params![run_id])?;

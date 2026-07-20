@@ -170,6 +170,30 @@ describe('App IPC interactions', () => {
     expect(screen.getAllByText('show me instantly')).toHaveLength(1)
   })
 
+  it('delegates a coding review without changing the normal send command', async () => {
+    const postMessage = installWebViewHost()
+    const { App } = await import('./App')
+
+    render(<App />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Coding' }))
+    const composer = screen.getByPlaceholderText('Describe the task or review request...')
+    fireEvent.change(composer, { target: { value: 'review the current changes' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Delegate review to two workers' }))
+
+    expect(JSON.parse(postMessage.mock.calls.at(-1)?.[0] ?? '{}')).toEqual({
+      type: 'delegate_review',
+      text: 'review the current changes',
+    })
+
+    fireEvent.change(composer, { target: { value: 'continue normally' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    expect(JSON.parse(postMessage.mock.calls.at(-1)?.[0] ?? '{}')).toEqual({
+      type: 'submit',
+      text: 'continue normally',
+    })
+  })
+
   it('closes modal surfaces before hiding the overlay on Escape', async () => {
     const postMessage = installWebViewHost()
     const { App } = await import('./App')

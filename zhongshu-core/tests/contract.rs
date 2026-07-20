@@ -41,7 +41,10 @@ struct ScriptedProvider {
 
 #[async_trait]
 impl LlmProvider for ScriptedProvider {
-    async fn chat(&self, _request: ChatCompletionRequest) -> anyhow::Result<ChatCompletionResponse> {
+    async fn chat(
+        &self,
+        _request: ChatCompletionRequest,
+    ) -> anyhow::Result<ChatCompletionResponse> {
         let mut idx = self.idx.lock().unwrap();
         let i = *idx;
         *idx += 1;
@@ -257,7 +260,11 @@ async fn max_tool_calls_exhausted_returns_blocked() {
 #[tokio::test]
 async fn max_steps_exhausted_returns_blocked() {
     let mut runtime = AgentRuntime::new(
-        scripted(&[("noop", r#"{"n":1}"#), ("noop", r#"{"n":2}"#), ("noop", r#"{"n":3}"#)]),
+        scripted(&[
+            ("noop", r#"{"n":1}"#),
+            ("noop", r#"{"n":2}"#),
+            ("noop", r#"{"n":3}"#),
+        ]),
         ToolRegistry::new().register(OkTool),
         "contract-test",
         AgentBudget {
@@ -291,9 +298,15 @@ async fn cancel_during_run_returns_interrupted() {
     struct SlowTool;
     #[async_trait]
     impl Tool for SlowTool {
-        fn name(&self) -> &str { "slow_tool" }
-        fn description(&self) -> &str { "slow" }
-        fn parameters(&self) -> serde_json::Value { json!({"type":"object","properties":{}}) }
+        fn name(&self) -> &str {
+            "slow_tool"
+        }
+        fn description(&self) -> &str {
+            "slow"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type":"object","properties":{}})
+        }
         async fn execute(&self, _: &serde_json::Value) -> ToolOutput {
             tokio::time::sleep(Duration::from_secs(10)).await;
             ToolOutput::success(json!({"ok": true}))
@@ -350,13 +363,11 @@ async fn tool_error_observation_renders_error_text() {
     .await
     .unwrap();
 
-    let has_error = result.messages.iter().any(|m| {
-        matches!(m.role, Role::Tool) && m.content.contains("simulated failure")
-    });
-    assert!(
-        has_error,
-        "tool result should contain error text"
-    );
+    let has_error = result
+        .messages
+        .iter()
+        .any(|m| matches!(m.role, Role::Tool) && m.content.contains("simulated failure"));
+    assert!(has_error, "tool result should contain error text");
 }
 
 /// Two consecutive runs produce independent results.

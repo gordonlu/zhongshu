@@ -104,6 +104,10 @@ impl OpenAiProvider {
 
         let mut body =
             serde_json::json!({ "model": request.model, "messages": msgs, "stream": true });
+        // Ask OpenAI-compatible providers to include the terminal usage
+        // chunk. Deeplossless consumes that chunk for per-conversation cost
+        // accounting; without it a live benchmark would silently report 0.
+        body["stream_options"] = serde_json::json!({"include_usage": true});
         if let Some(ref tools) = request.tools {
             body["tools"] = serde_json::to_value(tools).unwrap();
         }
@@ -410,4 +414,26 @@ struct ToolCallAccum {
     id: Option<String>,
     name: Option<String>,
     args: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::llm::{ChatCompletionRequest, Message};
+
+    #[test]
+    fn streaming_requests_include_usage() {
+        let provider = OpenAiProvider::new("test", "model");
+        let body = provider.build_stream_body(ChatCompletionRequest {
+            model: "model".into(),
+            messages: vec![Message::user("hello")],
+            tools: None,
+            tool_choice: None,
+            stream: true,
+            temperature: None,
+            max_tokens: None,
+            reasoning_effort: None,
+        });
+        assert_eq!(body["stream_options"]["include_usage"], true);
+    }
 }

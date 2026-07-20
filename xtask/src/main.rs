@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod benchmark;
+
 fn main() {
     if let Err(err) = run() {
         eprintln!("xtask: {err}");
@@ -20,6 +22,7 @@ fn run() -> Result<(), String> {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("proof") => run_proof(&args[1..]),
+        Some("benchmark") => benchmark::run(&args[1..]),
         Some("-h") | Some("--help") | None => {
             print_help();
             Ok(())
@@ -30,7 +33,7 @@ fn run() -> Result<(), String> {
 
 fn print_help() {
     println!(
-        "Usage:\n  cargo xtask proof --mode local\n\nModes:\n  local | pr | baseline | release"
+        "Usage:\n  cargo xtask proof --mode local\n  cargo xtask benchmark --suite benchmarks/review-v1/suite.json --dry-run\n\nProof modes:\n  local | pr | baseline | release\n\nBenchmark live mode requires --live, --flash-model, --pro-model and configured API key envs. Use --case CASE_ID --variant VARIANT --repeats 1 for a one-trial canary."
     );
 }
 

@@ -3,13 +3,20 @@ use std::path::{Path, PathBuf};
 /// Check whether the workspace has uncommitted changes (working tree
 /// or staged). Returns true if git is available and reports changes.
 pub fn workspace_has_mutations(workspace_root: &Path) -> bool {
+    workspace_mutation_snapshot(workspace_root).is_some_and(|snapshot| !snapshot.is_empty())
+}
+
+/// Capture the current Git working-tree mutation state so callers can compare
+/// before/after a shell command. Looking only at the post-command state would
+/// misattribute pre-existing user changes to a read-only command such as tests.
+pub fn workspace_mutation_snapshot(workspace_root: &Path) -> Option<Vec<u8>> {
     std::process::Command::new("git")
         .args(["status", "--porcelain"])
         .current_dir(workspace_root)
         .output()
         .ok()
-        .map(|o| o.status.success() && !o.stdout.is_empty())
-        .unwrap_or(false)
+        .filter(|output| output.status.success())
+        .map(|output| output.stdout)
 }
 
 pub fn capture_all_diff(workspace_root: &Path) -> Option<String> {

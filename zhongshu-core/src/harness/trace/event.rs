@@ -42,6 +42,8 @@ pub enum HarnessEvent {
         worker: String,
         task_id: String,
         success: bool,
+        #[serde(default)]
+        status: String,
         trace_event_count: usize,
     },
     WorkerConflict {

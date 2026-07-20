@@ -6,7 +6,7 @@ use crate::agent::runtime::AgentRuntime;
 use crate::core::checkpoint::AgentCheckpoint;
 use crate::core::context::ContextPack;
 use crate::harness::trace::event::HarnessEvent;
-use crate::tool::{infer_side_effect, SideEffect, ToolOutput, ToolStatus};
+use crate::tool::{infer_side_effect, SideEffect, ToolOutput, ToolStatus, ToolTermination};
 use anyhow::Context;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
@@ -115,8 +115,35 @@ pub struct LoopResult {
 pub struct AgentCallbacks {
     pub on_text: Box<dyn Fn(&str) + Send + Sync>,
     pub on_tool_start: Box<dyn Fn(&str, &str) + Send + Sync>,
-    pub on_tool_done: Box<dyn Fn(&str, &str, bool) + Send + Sync>,
+    pub on_tool_done: Box<dyn Fn(&str, &str, ToolCompletionStatus) + Send + Sync>,
     pub run_id: Uuid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCompletionStatus {
+    Completed,
+    Failed,
+    TimedOut,
+    Cancelled,
+    UnknownEffect,
+    AwaitingApproval,
+}
+
+impl ToolCompletionStatus {
+    pub fn as_ledger_status(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::TimedOut => "timed_out",
+            Self::Cancelled => "cancelled",
+            Self::UnknownEffect => "unknown_effect",
+            Self::AwaitingApproval => "awaiting_approval",
+        }
+    }
+
+    pub fn is_success(self) -> bool {
+        self == Self::Completed
+    }
 }
 
 /// Run the full ReAct loop using the given runtime and initial messages.
@@ -172,6 +199,18 @@ pub async fn run_agent(
                 tool_call_counts = cp.tool_call_counts;
                 start_step = cp.step;
 
+                // A checkpoint is written after the assistant emitted tool
+                // calls and before execution. Close every unresolved tool call
+                // with an explicit unknown-effect result before asking the LLM
+                // to continue; provider APIs reject dangling tool-call history.
+                close_unresolved_tool_calls(&mut messages);
+                if !source.trim().is_empty() {
+                    messages.push(Message::user(format!(
+                        "恢复运行后的用户指令：{}",
+                        source.trim()
+                    )));
+                }
+
                 // Reconcile any tools that were in-flight at crash time.
                 // These started but never completed/failed — their side
                 // effects are unknown. Inject a system message so the
@@ -189,9 +228,9 @@ pub async fn run_agent(
                                 "【恢复警告】以下工具在前一次运行中已开始但未能完成：",
                             ));
                             for (tool_name, _args, _key) in &inflight {
-                                messages.push(Message::system(
-                                    &format!("- {tool_name}：执行状态未知，请检查是否需要重做"),
-                                ));
+                                messages.push(Message::system(&format!(
+                                    "- {tool_name}：执行状态未知，请检查是否需要重做"
+                                )));
                             }
                         }
                     }
@@ -407,14 +446,22 @@ pub async fn run_agent(
                 .entry(tc.function.name.clone())
                 .or_insert(0);
             *count += 1;
-            if *count >= runtime.budget.per_tool_limit {
+            if *count > runtime.budget.per_tool_limit {
                 warn!(tool = %tc.function.name, total = *count, "tool called too many times, skipping");
                 let msg = format!(
                     "[系统：工具 {tool} 已被调用 {count} 次，跳过本次调用，请换用其他方法。]",
                     tool = tc.function.name,
                     count = *count
                 );
-                messages.push(Message::assistant(msg));
+                // Keep the assistant tool-call chain valid even when the host
+                // refuses execution. A plain assistant message here leaves a
+                // dangling tool_call_id and can make providers retry forever.
+                messages.push(Message::tool_result(&tc.id, msg));
+                messages.push(Message::system(format!(
+                    "工具 {} 已达到单工具调用上限。不要再次调用它；请基于已有证据给出最终答复，或明确说明证据不足。",
+                    tc.function.name
+                )));
+                consecutive_tool_failures += 1;
                 continue;
             }
 
@@ -509,6 +556,12 @@ pub async fn run_agent(
                     ..Default::default()
                 },
             );
+            let workspace_root = std::env::current_dir().unwrap_or_default();
+            let shell_mutations_before = (tc.function.name == "shell")
+                .then(|| {
+                    crate::harness::tool::transaction::workspace_mutation_snapshot(&workspace_root)
+                })
+                .flatten();
             let execution = executor
                 .execute(
                     &tc.function.name,
@@ -516,11 +569,11 @@ pub async fn run_agent(
                     Some(cancel_token.clone()),
                 )
                 .await;
-            let tool_timed_out = execution.timed_out;
+            let termination = execution.termination;
             let output = execution.output;
 
             // Interruption handling: check cancellation status and side effect
-            if tool_timed_out {
+            if termination != ToolTermination::Completed {
                 let side_effect = execution
                     .spec
                     .as_ref()
@@ -537,8 +590,7 @@ pub async fn run_agent(
                         // Timeout/cancellation only proves the wait ended; it does
                         // NOT prove no side effect occurred. Report unknown effect
                         // so the agent does not assume the operation was skipped.
-                        let original = output.error.as_deref()
-                            .unwrap_or("未知原因");
+                        let original = output.error.as_deref().unwrap_or("未知原因");
                         let interrupted = ToolOutput::error(format!(
                             "{}。实际执行状态未知，此操作可能已部分或完全执行，请核实系统状态。",
                             original,
@@ -549,6 +601,13 @@ pub async fn run_agent(
                             &tc.id,
                             interrupted.render_observation(&tc.function.name),
                         ));
+                        if let Some(ref cb) = callbacks {
+                            (cb.on_tool_done)(
+                                &tc.function.name,
+                                &tc.function.arguments,
+                                ToolCompletionStatus::UnknownEffect,
+                            );
+                        }
                         continue;
                     }
                 }
@@ -570,6 +629,13 @@ pub async fn run_agent(
             // AuthRequired means the tool was not actually executed.
             // Wait for the user to approve/deny before continuing.
             if output.status == ToolStatus::AuthRequired {
+                if let Some(ref cb) = callbacks {
+                    (cb.on_tool_done)(
+                        &tc.function.name,
+                        &tc.function.arguments,
+                        ToolCompletionStatus::AwaitingApproval,
+                    );
+                }
                 info!(tool = %tc.function.name, status = "auth_required");
                 crate::harness::recovery::record_signal(
                     &mut runtime.harness_state.recovery,
@@ -661,7 +727,11 @@ pub async fn run_agent(
                         output.render_observation(&tc.function.name),
                     ));
                     if let Some(ref cb) = callbacks {
-                        (cb.on_tool_done)(&tc.function.name, &tc.function.arguments, true);
+                        (cb.on_tool_done)(
+                            &tc.function.name,
+                            &tc.function.arguments,
+                            ToolCompletionStatus::Completed,
+                        );
                     }
                 }
                 ToolStatus::Error => {
@@ -672,7 +742,12 @@ pub async fn run_agent(
                         output.render_observation(&tc.function.name),
                     ));
                     if let Some(ref cb) = callbacks {
-                        (cb.on_tool_done)(&tc.function.name, &tc.function.arguments, false);
+                        let status = match termination {
+                            ToolTermination::Completed => ToolCompletionStatus::Failed,
+                            ToolTermination::TimedOut => ToolCompletionStatus::TimedOut,
+                            ToolTermination::Cancelled => ToolCompletionStatus::Cancelled,
+                        };
+                        (cb.on_tool_done)(&tc.function.name, &tc.function.arguments, status);
                     }
 
                     if consecutive_tool_failures >= 3 {
@@ -681,12 +756,12 @@ pub async fn run_agent(
                             runtime,
                             &mut messages,
                             StopReason::ToolFailurePersistent,
-                    tool_calls_made,
-                    tokens,
-                    &run_id,
-                ));
-            }
-        }
+                            tool_calls_made,
+                            tokens,
+                            &run_id,
+                        ));
+                    }
+                }
                 _ => {
                     messages.push(Message::tool_result(
                         &tc.id,
@@ -698,11 +773,16 @@ pub async fn run_agent(
             // Harness: post-tool checks
             {
                 // Update last_edit_step for mutation tools and shell mutations
+                let shell_has_new_mutations = if tc.function.name == "shell" {
+                    let after = crate::harness::tool::transaction::workspace_mutation_snapshot(
+                        &workspace_root,
+                    );
+                    matches!((&shell_mutations_before, &after), (Some(before), Some(after)) if before != after)
+                } else {
+                    false
+                };
                 let is_mutation = matches!(tc.function.name.as_str(), "edit" | "write_file")
-                    || (tc.function.name == "shell"
-                        && crate::harness::tool::transaction::workspace_has_mutations(
-                            &std::env::current_dir().unwrap_or_default(),
-                        ));
+                    || shell_has_new_mutations;
                 if is_mutation {
                     runtime.harness_state.verification.last_edit_step = harness_step;
 
@@ -768,15 +848,17 @@ pub async fn run_agent(
                 }
 
                 // Verification ledger
+                let verification_input =
+                    verification_command_text(tc).unwrap_or_else(|| tc.function.arguments.clone());
                 crate::harness::verification::ledger::record(
                     &mut runtime.harness_state.verification,
                     &tc.function.name,
-                    &tc.function.arguments,
+                    &verification_input,
                     exit_code,
                     harness_step,
                 );
 
-                if tool_timed_out {
+                if termination == ToolTermination::TimedOut {
                     crate::harness::recovery::record_signal(
                         &mut runtime.harness_state.recovery,
                         crate::harness::recovery::policy::RecoverySignal::tool_timeout(
@@ -958,6 +1040,28 @@ pub async fn run_agent(
     ))
 }
 
+fn close_unresolved_tool_calls(messages: &mut Vec<Message>) {
+    let resolved_ids: std::collections::HashSet<String> = messages
+        .iter()
+        .filter_map(|message| message.tool_call_id.clone())
+        .collect();
+    let unresolved = messages
+        .iter()
+        .flat_map(|message| message.tool_calls.iter().flatten())
+        .filter(|call| !resolved_ids.contains(&call.id))
+        .map(|call| (call.id.clone(), call.function.name.clone()))
+        .collect::<Vec<_>>();
+
+    for (call_id, tool_name) in unresolved {
+        messages.push(Message::tool_result(
+            call_id,
+            format!(
+                "<observation tool=\"{tool_name}\" status=\"unknown_effect\">进程在工具结果持久化前终止；实际执行状态未知，必须先对账再决定是否重试。</observation>"
+            ),
+        ));
+    }
+}
+
 pub async fn run_agent_with_context(
     runtime: &mut AgentRuntime,
     context: ContextPack,
@@ -990,7 +1094,7 @@ fn finish_loop_result(
     estimated_tokens: usize,
     run_id: &str,
 ) -> LoopResult {
-    let outcome = RunOutcome::from(stop_reason);
+    let outcome = derive_run_outcome(stop_reason, &runtime.harness_state.verification);
     // Only delete checkpoint for clean finishes. For interrupted/failed/
     // blocked/budget-exhausted the checkpoint is preserved so the user
     // can recover or re-examine the state.
@@ -1016,6 +1120,33 @@ fn finish_loop_result(
         tool_calls_made,
         estimated_tokens,
         trace_events: runtime.harness_state.trace.events.clone(),
+    }
+}
+
+fn derive_run_outcome(
+    stop_reason: StopReason,
+    verification: &crate::harness::state::VerificationState,
+) -> RunOutcome {
+    if stop_reason != StopReason::Finished {
+        return RunOutcome::from(stop_reason);
+    }
+
+    let Some(success) = verification.last_success.as_ref() else {
+        return RunOutcome::CompletedUnverified;
+    };
+    let failure_is_newer = verification
+        .last_failure
+        .as_ref()
+        .is_some_and(|failure| failure.step > success.step);
+    let verification_is_fresh = success.success
+        && success.exit_code == Some(0)
+        && success.step > verification.last_edit_step
+        && !failure_is_newer;
+
+    if verification_is_fresh {
+        RunOutcome::CompletedVerified
+    } else {
+        RunOutcome::CompletedUnverified
     }
 }
 
@@ -1396,6 +1527,24 @@ mod tests {
         }
     }
 
+    struct PassingShellTool;
+
+    #[async_trait]
+    impl Tool for PassingShellTool {
+        fn name(&self) -> &str {
+            "shell"
+        }
+        fn description(&self) -> &str {
+            "fake shell for verification-ledger testing"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type":"object","properties":{"command":{"type":"string"}}})
+        }
+        async fn execute(&self, _arguments: &serde_json::Value) -> ToolOutput {
+            ToolOutput::success(json!({"exit_code": 0, "stdout": "tests passed"}))
+        }
+    }
+
     struct SlowTool;
 
     #[async_trait]
@@ -1522,6 +1671,99 @@ mod tests {
             llm_timeout: Duration::from_secs(5),
             tool_timeout: Duration::from_secs(5),
         }
+    }
+
+    #[tokio::test]
+    async fn per_tool_limit_closes_rejected_tool_call_before_final_answer() {
+        let provider = ScriptedProvider {
+            script: Arc::new(vec![
+                ("noop".into(), "{}".into(), true),
+                ("noop".into(), "{}".into(), true),
+                (
+                    "__text__".into(),
+                    "final from existing evidence".into(),
+                    true,
+                ),
+            ]),
+            idx: Arc::new(Mutex::new(0)),
+        };
+        let mut budget = small_budget();
+        budget.per_tool_limit = 1;
+        let mut runtime = AgentRuntime::new(
+            provider,
+            ToolRegistry::new().register(NoopTool),
+            "scripted",
+            budget,
+        );
+
+        let result = run_agent(
+            &mut runtime,
+            vec![Message::user("inspect once, then finalize")],
+            None,
+            "test",
+            CancellationToken::new(),
+        )
+        .await
+        .expect("run");
+
+        assert_eq!(result.stop_reason, StopReason::Finished);
+        assert!(result.messages.iter().any(|message| {
+            message.tool_call_id.as_deref() == Some("call-2")
+                && message.content.contains("跳过本次调用")
+        }));
+        assert!(result
+            .messages
+            .iter()
+            .any(|message| { message.content.contains("不要再次调用它") }));
+        assert_eq!(
+            result
+                .messages
+                .last()
+                .map(|message| message.content.as_str()),
+            Some("final from existing evidence")
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_json_command_records_fresh_verification_in_ledger() {
+        let provider = ScriptedProvider {
+            script: Arc::new(vec![
+                (
+                    "shell".into(),
+                    r#"{"command":"cargo test 2>&1"}"#.into(),
+                    true,
+                ),
+                ("__text__".into(), "tests passed; final review".into(), true),
+            ]),
+            idx: Arc::new(Mutex::new(0)),
+        };
+        let mut runtime = AgentRuntime::new(
+            provider,
+            ToolRegistry::new().register(PassingShellTool),
+            "scripted",
+            small_budget(),
+        );
+
+        let result = run_agent(
+            &mut runtime,
+            vec![Message::user("review this and run tests")],
+            None,
+            "test",
+            CancellationToken::new(),
+        )
+        .await
+        .expect("run");
+
+        assert_eq!(result.stop_reason, StopReason::Finished);
+        assert_eq!(result.outcome, RunOutcome::CompletedVerified);
+        let verification = runtime
+            .harness_state
+            .verification
+            .last_success
+            .as_ref()
+            .expect("verification record");
+        assert_eq!(verification.command, "cargo test 2>&1");
+        assert_eq!(verification.exit_code, Some(0));
     }
 
     fn has_recovery_rule(result: &LoopResult, expected_rule: &str) -> bool {
@@ -1734,6 +1976,52 @@ mod tests {
             recovery_events.is_empty(),
             "read should reset no-progress counter"
         );
+    }
+
+    #[test]
+    fn finished_outcome_requires_fresh_successful_verification() {
+        let mut verification = crate::harness::HarnessState::new().verification;
+        assert_eq!(
+            derive_run_outcome(StopReason::Finished, &verification),
+            RunOutcome::CompletedUnverified
+        );
+
+        crate::harness::verification::ledger::record(
+            &mut verification,
+            "shell",
+            "cargo test",
+            Some(0),
+            2,
+        );
+        assert_eq!(
+            derive_run_outcome(StopReason::Finished, &verification),
+            RunOutcome::CompletedVerified
+        );
+
+        verification.last_edit_step = 2;
+        assert_eq!(
+            derive_run_outcome(StopReason::Finished, &verification),
+            RunOutcome::CompletedUnverified
+        );
+    }
+
+    #[test]
+    fn checkpoint_recovery_closes_dangling_tool_calls() {
+        let call = ToolCall {
+            id: "call-1".into(),
+            call_type: "function".into(),
+            function: crate::agent::llm::FunctionCall {
+                name: "write_file".into(),
+                arguments: r#"{"path":"src/a.rs"}"#.into(),
+            },
+        };
+        let mut messages = vec![Message::assistant_with_tools("", vec![call])];
+
+        close_unresolved_tool_calls(&mut messages);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].tool_call_id.as_deref(), Some("call-1"));
+        assert!(messages[1].content.contains("unknown_effect"));
     }
 }
 

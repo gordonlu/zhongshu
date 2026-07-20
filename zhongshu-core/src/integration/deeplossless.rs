@@ -34,6 +34,7 @@ impl Default for DeeplosslessConfig {
 
 pub struct DeeplosslessProxy {
     coordinator: Arc<Mutex<Option<RuntimeCoordinator>>>,
+    server_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     actual_port: u16,
     base_url: String,
     db_path: String,
@@ -138,6 +139,24 @@ pub struct DeeplosslessFileConflictsResult {
     pub conflicts: Vec<DeeplosslessFileConflict>,
 }
 
+/// Aggregate facts exported by Deeplossless for one isolated benchmark DB.
+/// Zhongshu stores this reference in benchmark results instead of copying raw
+/// prompts, responses, or replay events into a second fact store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DeeplosslessBenchmarkSnapshot {
+    pub conversation_ids: Vec<i64>,
+    pub execution_ids: Vec<i64>,
+    pub replay_session_ids: Vec<String>,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+}
+
+impl DeeplosslessBenchmarkSnapshot {
+    pub fn total_tokens(&self) -> u64 {
+        self.prompt_tokens.saturating_add(self.completion_tokens)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct DeeplosslessErrorEnvelope {
     error: DeeplosslessErrorBody,
@@ -189,6 +208,7 @@ impl DeeplosslessProxy {
 
         Ok(DeeplosslessProxy {
             coordinator: Arc::new(Mutex::new(Some(coordinator))),
+            server_task: Mutex::new(None),
             actual_port: 0,
             base_url: String::new(),
             db_path: config.db_path.clone(),
@@ -207,11 +227,12 @@ impl DeeplosslessProxy {
 
         info!("deeplossless proxy listening on 127.0.0.1:{actual}");
 
-        tokio::spawn(async move {
+        let server_task = tokio::spawn(async move {
             if let Err(e) = axum::serve(listener, app).await {
                 tracing::warn!("deeplossless proxy stopped: {e}");
             }
         });
+        *self.server_task.get_mut() = Some(server_task);
 
         self.actual_port = actual;
         self.base_url = format!("http://127.0.0.1:{actual}/v1");
@@ -243,6 +264,11 @@ impl DeeplosslessProxy {
             c.shutdown(std::time::Duration::from_secs(2)).await;
             info!("deeplossless proxy shut down");
         }
+        drop(guard);
+        if let Some(task) = self.server_task.lock().await.take() {
+            task.abort();
+            let _ = task.await;
+        }
     }
 
     /// Get the current (most recent) conversation ID from deeplossless.
@@ -259,6 +285,60 @@ impl DeeplosslessProxy {
             |row| row.get(0),
         )
         .ok()
+    }
+
+    /// Read aggregate usage and replay anchors from this proxy's database.
+    /// Benchmark trials use a fresh database, so these totals belong to one
+    /// trial without requiring Zhongshu to duplicate Deeplossless records.
+    pub fn benchmark_snapshot(&self) -> anyhow::Result<DeeplosslessBenchmarkSnapshot> {
+        let expanded = self.db_path.replacen(
+            "~",
+            &std::env::var("HOME").unwrap_or_else(|_| ".".into()),
+            1,
+        );
+        let conn = rusqlite::Connection::open(&expanded)?;
+        let mut snapshot = DeeplosslessBenchmarkSnapshot::default();
+
+        let mut conversations = conn.prepare(
+            "SELECT id, COALESCE(total_input_tokens, 0), COALESCE(total_output_tokens, 0)
+             FROM conversations ORDER BY id",
+        )?;
+        let rows = conversations.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?.max(0) as u64,
+                row.get::<_, i64>(2)?.max(0) as u64,
+            ))
+        })?;
+        for row in rows {
+            let (id, input, output) = row?;
+            snapshot.conversation_ids.push(id);
+            snapshot.prompt_tokens = snapshot.prompt_tokens.saturating_add(input);
+            snapshot.completion_tokens = snapshot.completion_tokens.saturating_add(output);
+        }
+
+        let mut executions = conn.prepare(
+            "SELECT DISTINCT execution_id, replay_session_id
+             FROM execution_events
+             WHERE execution_id IS NOT NULL
+             ORDER BY execution_id",
+        )?;
+        let rows = executions.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1).unwrap_or_default(),
+            ))
+        })?;
+        for row in rows {
+            let (execution_id, replay_session_id) = row?;
+            snapshot.execution_ids.push(execution_id);
+            if !replay_session_id.is_empty()
+                && !snapshot.replay_session_ids.contains(&replay_session_id)
+            {
+                snapshot.replay_session_ids.push(replay_session_id);
+            }
+        }
+        Ok(snapshot)
     }
 
     /// Compress the oldest `count` DAG leaves in the current conversation
@@ -743,6 +823,7 @@ mod tests {
     #[tokio::test]
     async fn proxy_starts_and_listens() {
         let (proxy, base_url) = test_proxy().await;
+        let port = proxy.port();
         assert!(proxy.port() > 0, "should bind a random port");
         assert_eq!(base_url, format!("http://127.0.0.1:{}/v1", proxy.port()));
 
@@ -756,6 +837,12 @@ mod tests {
         );
 
         proxy.shutdown().await;
+        assert!(
+            tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_err(),
+            "shutdown should release the proxy listener"
+        );
     }
 
     #[tokio::test]
@@ -808,6 +895,31 @@ mod tests {
 
         assert!(proxy.lcm_url("snapshot").is_err());
         proxy.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn benchmark_snapshot_reads_an_isolated_empty_store() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir
+            .path()
+            .join("benchmark.db")
+            .to_string_lossy()
+            .to_string();
+        let proxy = DeeplosslessProxy::new(DeeplosslessConfig {
+            db_path,
+            api_key: String::new(),
+            upstream: DEFAULT_UPSTREAM.into(),
+            upstream_path: "/v1/chat/completions".into(),
+            summarize_model: "deepseek-chat".into(),
+            proxy_port: 0,
+        })
+        .await
+        .expect("proxy build");
+
+        let snapshot = proxy.benchmark_snapshot().expect("benchmark snapshot");
+        assert!(snapshot.conversation_ids.is_empty());
+        assert!(snapshot.execution_ids.is_empty());
+        assert_eq!(snapshot.total_tokens(), 0);
     }
 
     #[tokio::test]

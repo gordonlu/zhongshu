@@ -19,7 +19,7 @@ use crate::agent::llm::{ToolDef, ToolFunctionDef};
 use async_trait::async_trait;
 pub use executor::{
     ToolCallRequest, ToolExecution, ToolExecutionPlan, ToolExecutionPolicy, ToolExecutor,
-    ToolScheduling,
+    ToolScheduling, ToolTermination,
 };
 use serde::{Deserialize, Serialize};
 pub use spec::{
@@ -27,6 +27,7 @@ pub use spec::{
     ToolResultSummary, ToolSpec, WorkspaceScope,
 };
 use std::collections::HashMap;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -265,6 +266,187 @@ impl ToolRegistry {
     pub fn unregister(&mut self, name: &str) -> bool {
         self.tools.remove(name).is_some()
     }
+
+    /// Wrap path-addressed workspace tools with an enforceable delegation path
+    /// policy. Current-directory process tools remain available so workers can
+    /// run builds and tests; their writes are still subject to approval and
+    /// parent-side ownership review.
+    pub fn restrict_to_paths(&self, owned_files: &[PathBuf], allowed_dirs: &[PathBuf]) -> Self {
+        if owned_files.is_empty() && allowed_dirs.is_empty() {
+            return self.clone();
+        }
+        let tools = self
+            .tools
+            .iter()
+            .map(|(name, tool)| {
+                let spec = tool.spec();
+                let wrapped: Arc<dyn Tool> = match spec.workspace_scope {
+                    WorkspaceScope::WorkspaceOnly => Arc::new(PathScopedTool {
+                        inner: tool.clone(),
+                        owned_files: owned_files
+                            .iter()
+                            .map(|path| normalize_path(path))
+                            .collect(),
+                        allowed_dirs: allowed_dirs
+                            .iter()
+                            .map(|path| normalize_path(path))
+                            .collect(),
+                    }),
+                    WorkspaceScope::CurrentDirectoryOnly
+                    | WorkspaceScope::Unrestricted
+                    | WorkspaceScope::External => tool.clone(),
+                };
+                (name.clone(), wrapped)
+            })
+            .collect();
+        ToolRegistry { tools }
+    }
+
+    pub fn require_approval_for_side_effects(&self) -> Self {
+        let tools = self
+            .tools
+            .iter()
+            .map(|(name, tool)| {
+                let wrapped: Arc<dyn Tool> = if tool.spec().side_effect == SideEffect::ReadOnly {
+                    tool.clone()
+                } else {
+                    Arc::new(ApprovalRequiredTool {
+                        inner: tool.clone(),
+                    })
+                };
+                (name.clone(), wrapped)
+            })
+            .collect();
+        ToolRegistry { tools }
+    }
+}
+
+struct ApprovalRequiredTool {
+    inner: Arc<dyn Tool>,
+}
+
+#[async_trait]
+impl Tool for ApprovalRequiredTool {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        self.inner.parameters()
+    }
+
+    fn spec(&self) -> ToolSpec {
+        self.inner.spec().requires_approval(true)
+    }
+
+    async fn execute(&self, arguments: &serde_json::Value) -> ToolOutput {
+        match crate::authority::check_explicit_tool(self.inner.name()) {
+            crate::authority::CheckResult::Allow => self.inner.execute(arguments).await,
+            crate::authority::CheckResult::Deny { reason } => ToolOutput::error(reason),
+            crate::authority::CheckResult::RequireAuth { request } => {
+                let request_id = crate::authority::set_pending(
+                    &request.tool,
+                    &request.program,
+                    &request.command,
+                    "delegation_contract",
+                );
+                ToolOutput::auth_required(&request.program, &request.command)
+                    .with_request_id(request_id)
+            }
+        }
+    }
+}
+
+struct PathScopedTool {
+    inner: Arc<dyn Tool>,
+    owned_files: Vec<PathBuf>,
+    allowed_dirs: Vec<PathBuf>,
+}
+
+#[async_trait]
+impl Tool for PathScopedTool {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        self.inner.parameters()
+    }
+
+    fn spec(&self) -> ToolSpec {
+        self.inner.spec()
+    }
+
+    async fn execute(&self, arguments: &serde_json::Value) -> ToolOutput {
+        let paths = extract_argument_paths(arguments);
+        if paths.is_empty() {
+            return ToolOutput::error(format!(
+                "tool '{}' did not provide a path that can be checked against the delegation scope",
+                self.inner.name()
+            ));
+        }
+        for path in paths {
+            if path
+                .components()
+                .any(|component| component == Component::ParentDir)
+            {
+                return ToolOutput::error(format!(
+                    "path '{}' escapes the delegated scope",
+                    path.display()
+                ));
+            }
+            let path = normalize_path(&path);
+            let owned = self.owned_files.iter().any(|allowed| allowed == &path);
+            let in_allowed_dir = self
+                .allowed_dirs
+                .iter()
+                .any(|allowed| path.starts_with(allowed));
+            if !owned && !in_allowed_dir {
+                return ToolOutput::error(format!(
+                    "path '{}' is outside the delegated scope",
+                    path.display()
+                ));
+            }
+        }
+        self.inner.execute(arguments).await
+    }
+}
+
+fn extract_argument_paths(value: &serde_json::Value) -> Vec<PathBuf> {
+    const PATH_KEYS: &[&str] = &["path", "file_path", "directory", "dir", "cwd", "root"];
+    let mut paths = Vec::new();
+    if let serde_json::Value::Object(map) = value {
+        for (key, value) in map {
+            if PATH_KEYS.contains(&key.as_str()) {
+                if let Some(path) = value.as_str() {
+                    paths.push(PathBuf::from(path));
+                }
+            }
+        }
+    }
+    paths
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }
 
 /// Decode HTML bytes with correct encoding, respecting Content-Type
@@ -445,7 +627,50 @@ pub fn default_registry() -> ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use serde_json::json;
+
+    struct ScopedFsTool;
+
+    struct ScopedProcessTool;
+
+    #[async_trait]
+    impl Tool for ScopedFsTool {
+        fn name(&self) -> &str {
+            "write_file"
+        }
+
+        fn description(&self) -> &str {
+            "test scoped writes"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type":"object"})
+        }
+
+        async fn execute(&self, arguments: &serde_json::Value) -> ToolOutput {
+            ToolOutput::success(arguments.clone())
+        }
+    }
+
+    #[async_trait]
+    impl Tool for ScopedProcessTool {
+        fn name(&self) -> &str {
+            "shell"
+        }
+
+        fn description(&self) -> &str {
+            "test current-directory process"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type":"object"})
+        }
+
+        async fn execute(&self, arguments: &serde_json::Value) -> ToolOutput {
+            ToolOutput::success(arguments.clone())
+        }
+    }
 
     #[test]
     fn render_observation_escapes_external_tag_boundaries() {
@@ -527,5 +752,36 @@ mod tests {
         assert!(msg.contains("source=\"external\""));
         assert!(msg.contains("<system-reminder>"));
         assert!(msg.contains("Hello"));
+    }
+
+    #[tokio::test]
+    async fn delegated_path_scope_allows_owned_file_and_rejects_escape() {
+        let registry = ToolRegistry::new()
+            .register(ScopedFsTool)
+            .restrict_to_paths(&[PathBuf::from("src/owned.rs")], &[]);
+
+        let allowed = registry
+            .execute("write_file", r#"{"path":"src/owned.rs"}"#)
+            .await;
+        assert_eq!(allowed.status, ToolStatus::Success);
+
+        let rejected = registry
+            .execute("write_file", r#"{"path":"../src/owned.rs"}"#)
+            .await;
+        assert_eq!(rejected.status, ToolStatus::Error);
+        assert!(rejected.error.unwrap().contains("escapes"));
+    }
+
+    #[tokio::test]
+    async fn delegated_path_scope_keeps_verification_process_tools_available() {
+        let registry = ToolRegistry::new()
+            .register(ScopedProcessTool)
+            .restrict_to_paths(&[PathBuf::from("src/owned.rs")], &[]);
+
+        let output = registry
+            .execute("shell", r#"{"command":"cargo test"}"#)
+            .await;
+
+        assert_eq!(output.status, ToolStatus::Success);
     }
 }

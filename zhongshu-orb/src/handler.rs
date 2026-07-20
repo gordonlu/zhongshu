@@ -19,6 +19,7 @@ use zhongshu_message_core::streaming::ControlTokenFilter;
 
 use crate::app::{AgentController, AgentInbox};
 use crate::config::AppConfig;
+use crate::delegation_service::DelegationController;
 use crate::hotkey::HotkeyManager;
 use crate::indicator::Indicator;
 use uuid::Uuid;
@@ -49,6 +50,7 @@ pub struct ZhongshuApp {
     pub proxy: Arc<tokio::sync::Mutex<DeeplosslessProxy>>,
     pub runtime: tokio::runtime::Runtime,
     pub inbox: Arc<AgentInbox>,
+    pub delegation: Arc<DelegationController>,
     pub indicator: Option<Indicator>,
     pub indicator_state: AgentState,
     pub overlay: Option<OverlayHandle>,
@@ -89,6 +91,7 @@ impl ZhongshuApp {
         config: AppConfig,
         controller: Arc<AgentController>,
         inbox: Arc<AgentInbox>,
+        delegation: Arc<DelegationController>,
         event_bus: Arc<EventBus>,
         event_rx: EventRx,
         response_tx: ResponseTx,
@@ -112,6 +115,7 @@ impl ZhongshuApp {
             config,
             controller,
             inbox,
+            delegation,
             indicator: None,
             indicator_state: AgentState::Idle,
             proxy,
@@ -172,6 +176,17 @@ impl ZhongshuApp {
             None => return,
         };
 
+        if let Some(text) = ov.take_delegate_review() {
+            if !self.controller.is_idle() || self.delegation.is_busy() {
+                ov.toast("当前已有任务运行，请结束后再委派。");
+            } else {
+                ov.send(&serde_json::json!({"type": "user_message", "content": text}));
+                self.observer.lock().unwrap().record_user_message(&text);
+                if !self.delegation.submit_review(text) {
+                    ov.toast("双员工协作已经在运行。");
+                }
+            }
+        }
         if let Some(text) = ov.take_input() {
             if env_flag("ZHONGSHU_ORB_SMOKE_INTERACTION") {
                 tracing::info!(
@@ -181,21 +196,21 @@ impl ZhongshuApp {
             }
             ov.send(&serde_json::json!({"type": "user_message", "content": text}));
             self.observer.lock().unwrap().record_user_message(&text);
-            self.inbox.submit(text);
+            if self.delegation.is_busy() {
+                ov.toast("双员工协作正在运行，请先停止或等待汇报。");
+            } else {
+                self.inbox.submit(text);
+            }
         }
         if let Some(rid) = ov.take_approve() {
-            if let Some(req) = authority::peek_pending() {
-                if req.id == rid {
-                    self.run_controller.record_approval(&req.tool, "approved");
-                }
+            if let Some(req) = authority::get_pending(&rid) {
+                self.run_controller.record_approval(&req.tool, "approved");
             }
             authority::approve_pending(&rid);
         }
         if let Some(rid) = ov.take_deny() {
-            if let Some(req) = authority::peek_pending() {
-                if req.id == rid {
-                    self.run_controller.record_approval(&req.tool, "denied");
-                }
+            if let Some(req) = authority::get_pending(&rid) {
+                self.run_controller.record_approval(&req.tool, "denied");
             }
             authority::deny_pending(&rid);
         }
@@ -383,6 +398,10 @@ impl ZhongshuApp {
             self.delete_all_history();
         }
         if ov.take_stop() {
+            if self.delegation.cancel() {
+                ov.send(&serde_json::json!({"type": "stop"}));
+                return;
+            }
             use zhongshu_core::agent::run::RunState;
             if matches!(self.run_controller.state(), RunState::Interrupted { .. }) {
                 // Already interrupted — fully cancel
@@ -546,6 +565,13 @@ impl ZhongshuApp {
         loop {
             match self.event_rx.try_recv() {
                 Ok(ev) => {
+                    let event_sequence = self
+                        .event_bus
+                        .sequence_for_event_since(self.overlay_event_cursor, &ev);
+                    if self.overlay_event_cursor > 0 && event_sequence.is_none() {
+                        // This occurrence was already delivered by replay.
+                        continue;
+                    }
                     active = true;
                     match ev {
                         Event::Agent(AgentEvent::StateChanged { from: _, to }) => {
@@ -572,6 +598,10 @@ impl ZhongshuApp {
                                 match to {
                                     AgentState::Thinking | AgentState::Executing => {
                                         ov.set_state("thinking")
+                                    }
+                                    AgentState::Submitted => {
+                                        ov.set_state("done");
+                                        ov.toast("结果已提交，但尚未获得验证证据。");
                                     }
                                     AgentState::Done { success } => {
                                         ov.set_state(if success { "done" } else { "stopped" })
@@ -726,6 +756,7 @@ impl ZhongshuApp {
                                         worker,
                                         task_id,
                                         success,
+                                        status,
                                         trace_event_count: _,
                                     } => {
                                         send_coding_event(
@@ -735,6 +766,7 @@ impl ZhongshuApp {
                                                 worker,
                                                 task_id,
                                                 success,
+                                                status,
                                             },
                                         );
                                     }
@@ -894,6 +926,9 @@ impl ZhongshuApp {
                             _ => {}
                         },
                         _ => {}
+                    }
+                    if let Some(sequence) = event_sequence {
+                        self.overlay_event_cursor = sequence + 1;
                     }
                 }
                 Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
@@ -1106,17 +1141,19 @@ impl ZhongshuApp {
         }));
         for (_seq, event) in &events {
             match event {
-                Event::Agent(AgentEvent::StateChanged { from: _, to }) => {
-                    match to {
-                        AgentState::Thinking | AgentState::Executing => {
-                            ov.set_state("thinking");
-                        }
-                        AgentState::Done { success } => {
-                            ov.set_state(if *success { "done" } else { "stopped" });
-                        }
-                        AgentState::Idle => ov.set_state("idle"),
+                Event::Agent(AgentEvent::StateChanged { from: _, to }) => match to {
+                    AgentState::Thinking | AgentState::Executing => {
+                        ov.set_state("thinking");
                     }
-                }
+                    AgentState::Submitted => {
+                        ov.set_state("done");
+                        ov.toast("结果已提交，但尚未获得验证证据。");
+                    }
+                    AgentState::Done { success } => {
+                        ov.set_state(if *success { "done" } else { "stopped" });
+                    }
+                    AgentState::Idle => ov.set_state("idle"),
+                },
                 Event::Tool(ToolEvent::Started { name, .. }) => {
                     ov.send(&serde_json::json!({"type":"tool_call","name":name}));
                 }
@@ -1203,6 +1240,7 @@ impl ZhongshuApp {
                         worker,
                         task_id,
                         success,
+                        status,
                         ..
                     } => {
                         send_coding_event(
@@ -1212,6 +1250,7 @@ impl ZhongshuApp {
                                 worker: worker.clone(),
                                 task_id: task_id.clone(),
                                 success: *success,
+                                status: status.clone(),
                             },
                         );
                     }

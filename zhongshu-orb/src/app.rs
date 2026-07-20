@@ -29,7 +29,10 @@ use zhongshu_core::patch::PatchDiffPayload;
 use zhongshu_core::task::TaskQueue;
 use zhongshu_core::tool::ToolRegistry;
 
-fn publish_harness_events(eb: &EventBus, events: &[zhongshu_core::harness::trace::event::HarnessEvent]) {
+pub(crate) fn publish_harness_events(
+    eb: &EventBus,
+    events: &[zhongshu_core::harness::trace::event::HarnessEvent],
+) {
     for event in events {
         match event {
             zhongshu_core::harness::trace::event::HarnessEvent::CodingSessionStarted {
@@ -103,6 +106,7 @@ fn publish_harness_events(eb: &EventBus, events: &[zhongshu_core::harness::trace
                 worker,
                 task_id,
                 success,
+                status,
                 trace_event_count,
             } => {
                 eb.publish(Event::Harness(HarnessUiEvent::WorkerCompleted {
@@ -110,6 +114,7 @@ fn publish_harness_events(eb: &EventBus, events: &[zhongshu_core::harness::trace
                     worker: worker.clone(),
                     task_id: task_id.clone(),
                     success: *success,
+                    status: status.clone(),
                     trace_event_count: *trace_event_count,
                 }));
             }
@@ -154,11 +159,7 @@ fn publish_harness_events(eb: &EventBus, events: &[zhongshu_core::harness::trace
                     changed: *changed,
                 }));
             }
-            zhongshu_core::harness::trace::event::HarnessEvent::FileEdit {
-                path,
-                diff,
-                ..
-            } => {
+            zhongshu_core::harness::trace::event::HarnessEvent::FileEdit { path, diff, .. } => {
                 let display_path = if path.as_os_str().is_empty() {
                     PathBuf::from("workspace")
                 } else {
@@ -229,10 +230,7 @@ fn publish_harness_events(eb: &EventBus, events: &[zhongshu_core::harness::trace
                     message: message.clone(),
                 }));
             }
-            zhongshu_core::harness::trace::event::HarnessEvent::PhaseTransition {
-                from,
-                to,
-            } => {
+            zhongshu_core::harness::trace::event::HarnessEvent::PhaseTransition { from, to } => {
                 eb.publish(Event::Harness(HarnessUiEvent::PhaseTransition {
                     from: from.clone(),
                     to: to.clone(),
@@ -404,6 +402,13 @@ impl AgentController {
         self.model.lock().unwrap().clone()
     }
 
+    pub fn is_idle(&self) -> bool {
+        self.state
+            .try_read()
+            .map(|state| matches!(*state, AgentState::Idle))
+            .unwrap_or(false)
+    }
+
     pub fn provider_snapshot(&self) -> Arc<dyn LlmProvider> {
         self.provider.lock().unwrap().clone()
     }
@@ -493,7 +498,11 @@ impl AgentController {
             }
         }
 
-        self.run_controller.start_run(&input);
+        if self.run_controller.has_startup_recovery() {
+            self.run_controller.begin_resume();
+        } else {
+            self.run_controller.start_run(&input);
+        }
         self.emit_start(&input);
         self.spawn_task(input);
     }
@@ -729,11 +738,9 @@ impl AgentController {
             runtime.reasoning_effort = reasoning_str;
             // Checkpoint store: saves the agent state before each tool call
             // so a crashed process can recover from the last good state.
-            runtime.checkpoint_store = Some(
-                zhongshu_core::core::checkpoint::CheckpointStore::new(
-                    zhongshu_core::core::Database::new(core_db_path.clone()),
-                ),
-            );
+            runtime.checkpoint_store = Some(zhongshu_core::core::checkpoint::CheckpointStore::new(
+                zhongshu_core::core::Database::new(core_db_path.clone()),
+            ));
             // Ledger: needed for reconciling in-flight tools after crash recovery.
             runtime.ledger = rc.get_ledger();
             // Idempotency checker: queries the ledger to see if a tool call
@@ -781,14 +788,23 @@ impl AgentController {
                     on_tool_done: {
                         let run_id = run_id.to_string();
                         let rc = rc.clone();
-                        Box::new(move |name: &str, args: &str, ok: bool| {
-                            let status = if ok { "completed" } else { "failed" };
-                            rc.record_tool_call_end(name, args, status, None);
-                            eb2.publish(Event::Tool(ToolEvent::Completed {
-                                name: name.to_string(),
-                                success: ok,
-                                run_id: run_id.clone(),
-                            }));
+                        Box::new(move |name: &str, args: &str, status| {
+                            rc.record_tool_call_end(name, args, status.as_ledger_status(), None);
+                            if status
+                                == zhongshu_core::agent::loop_::ToolCompletionStatus::UnknownEffect
+                            {
+                                eb2.publish(Event::Tool(ToolEvent::Interrupted {
+                                    name: name.to_string(),
+                                    run_id: run_id.clone(),
+                                    tool_call_id: String::new(),
+                                }));
+                            } else {
+                                eb2.publish(Event::Tool(ToolEvent::Completed {
+                                    name: name.to_string(),
+                                    success: status.is_success(),
+                                    run_id: run_id.clone(),
+                                }));
+                            }
                         })
                     },
                     run_id,
@@ -865,22 +881,31 @@ impl AgentController {
                             .unwrap()
                             .push(("assistant".to_string(), history_content));
                     }
-                    // Extract todos and goal completions.
+                    // Todos may be useful from an unverified submission, but a
+                    // goal is only completed when fresh verification exists.
                     memory.extract_todos(last);
-                    memory.extract_goal_completions(last);
-                    // Archive old completed goals to keep the list bounded.
-                    memory.archive_completed_goals(KEEP_COMPLETED_GOALS);
+                    if rr.outcome == zhongshu_core::agent::RunOutcome::CompletedVerified {
+                        memory.extract_goal_completions(last);
+                        memory.archive_completed_goals(KEEP_COMPLETED_GOALS);
+                    }
                     stop_reason = format!("{:?}", rr.stop_reason);
-                    overall_success = rr.outcome == zhongshu_core::agent::RunOutcome::CompletedVerified
-                        || rr.outcome == zhongshu_core::agent::RunOutcome::CompletedUnverified;
+                    overall_success =
+                        rr.outcome == zhongshu_core::agent::RunOutcome::CompletedVerified;
                     let _ = tx
                         .send(ResponseEvent::MessageCompleted { id: aid, run_id })
                         .await;
+                    let outcome_state = match rr.outcome {
+                        zhongshu_core::agent::RunOutcome::CompletedVerified => {
+                            AgentState::Done { success: true }
+                        }
+                        zhongshu_core::agent::RunOutcome::CompletedUnverified => {
+                            AgentState::Submitted
+                        }
+                        _ => AgentState::Done { success: false },
+                    };
                     eb.publish(Event::Agent(AgentEvent::StateChanged {
                         from: AgentState::Thinking,
-                        to: AgentState::Done {
-                            success: overall_success,
-                        },
+                        to: outcome_state,
                     }));
                 }
                 Ok(Err(e)) => {
@@ -962,7 +987,9 @@ impl AgentController {
                                     on_tool_start: {
                                         let run_id = run_id.to_string();
                                         let eb1 = eb.clone();
-                                        Box::new(move |name: &str, _args: &str| {
+                                        let rc_start = rc.clone();
+                                        Box::new(move |name: &str, args: &str| {
+                                            rc_start.record_tool_call_start(name, args);
                                             eb1.publish(Event::Tool(ToolEvent::Started {
                                                 name: name.to_string(),
                                                 run_id: run_id.clone(),
@@ -972,12 +999,27 @@ impl AgentController {
                                     on_tool_done: {
                                         let run_id = run_id.to_string();
                                         let eb2 = eb.clone();
-                                        Box::new(move |name: &str, _args: &str, ok: bool| {
-                                            eb2.publish(Event::Tool(ToolEvent::Completed {
-                                                name: name.to_string(),
-                                                success: ok,
-                                                run_id: run_id.clone(),
-                                            }));
+                                        let rc_done = rc.clone();
+                                        Box::new(move |name: &str, args: &str, status| {
+                                            rc_done.record_tool_call_end(
+                                                name,
+                                                args,
+                                                status.as_ledger_status(),
+                                                None,
+                                            );
+                                            if status == zhongshu_core::agent::loop_::ToolCompletionStatus::UnknownEffect {
+                                                eb2.publish(Event::Tool(ToolEvent::Interrupted {
+                                                    name: name.to_string(),
+                                                    run_id: run_id.clone(),
+                                                    tool_call_id: String::new(),
+                                                }));
+                                            } else {
+                                                eb2.publish(Event::Tool(ToolEvent::Completed {
+                                                    name: name.to_string(),
+                                                    success: status.is_success(),
+                                                    run_id: run_id.clone(),
+                                                }));
+                                            }
                                         })
                                     },
                                     run_id,
@@ -990,17 +1032,17 @@ impl AgentController {
                                     recovery_budget,
                                 );
                                 recovery_runtime.reasoning_effort = recovery_reasoning;
-                                recovery_runtime.checkpoint_store = Some(
-                                    zhongshu_core::core::checkpoint::CheckpointStore::new(
+                                recovery_runtime.checkpoint_store =
+                                    Some(zhongshu_core::core::checkpoint::CheckpointStore::new(
                                         zhongshu_core::core::Database::new(core_db_path.clone()),
-                                    ),
-                                );
+                                    ));
                                 recovery_runtime.ledger = rc.get_ledger();
                                 {
                                     let rc = rc.clone();
-                                    recovery_runtime.idempotency_checker = Some(Arc::new(move |name: &str, args: &str| {
-                                        rc.is_tool_completed(name, args)
-                                    }));
+                                    recovery_runtime.idempotency_checker =
+                                        Some(Arc::new(move |name: &str, args: &str| {
+                                            rc.is_tool_completed(name, args)
+                                        }));
                                 }
                                 let r2 = tokio::time::timeout(
                                     AGENT_TIMEOUT,
@@ -1067,21 +1109,30 @@ impl AgentController {
                                                 .push(("assistant".to_string(), history_content));
                                         }
                                         memory.extract_todos(last);
-                                        memory.extract_goal_completions(last);
-                                        memory.archive_completed_goals(KEEP_COMPLETED_GOALS);
+                                        if rr.outcome
+                                            == zhongshu_core::agent::RunOutcome::CompletedVerified
+                                        {
+                                            memory.extract_goal_completions(last);
+                                            memory.archive_completed_goals(KEEP_COMPLETED_GOALS);
+                                        }
                                         let _ = tx
                                             .send(ResponseEvent::MessageCompleted {
                                                 id: aid,
                                                 run_id,
                                             })
                                             .await;
-                                        let recovery_success = rr.outcome == zhongshu_core::agent::RunOutcome::CompletedVerified
-                                            || rr.outcome == zhongshu_core::agent::RunOutcome::CompletedUnverified;
+                                        let recovery_success = rr.outcome
+                                            == zhongshu_core::agent::RunOutcome::CompletedVerified;
                                         stop_reason = format!("{:?}", rr.stop_reason);
                                         overall_success = recovery_success;
+                                        let outcome_state = match rr.outcome {
+                                            zhongshu_core::agent::RunOutcome::CompletedVerified => AgentState::Done { success: true },
+                                            zhongshu_core::agent::RunOutcome::CompletedUnverified => AgentState::Submitted,
+                                            _ => AgentState::Done { success: false },
+                                        };
                                         eb.publish(Event::Agent(AgentEvent::StateChanged {
                                             from: AgentState::Thinking,
-                                            to: AgentState::Done { success: recovery_success },
+                                            to: outcome_state,
                                         }));
                                     }
                                     Ok(Err(e)) => {

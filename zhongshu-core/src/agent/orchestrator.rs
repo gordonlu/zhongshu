@@ -83,6 +83,9 @@ pub struct WorkerFileClaimReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerExecutionStatus {
     Completed,
+    /// Workers returned results, but at least one result lacks fresh
+    /// verification evidence and still needs parent verification.
+    Submitted,
     BlockedBeforeExecution,
     WorkerFailed,
     CompletedWithReviewFindings,
@@ -97,6 +100,18 @@ pub struct WorkerExecutionReport {
     pub ownership_violations: Vec<OwnershipViolation>,
     pub release_failures: Vec<WorkerFileClaimReleaseFailure>,
     pub execution_error: Option<String>,
+    pub trace_events: Vec<HarnessEvent>,
+}
+
+/// Result of the first production-oriented Lead → analyst → verifier handoff.
+/// The analyst may submit an unverified report; final acceptance requires the
+/// verifier to produce fresh successful verification evidence.
+#[derive(Debug, Clone)]
+pub struct LeadReviewReport {
+    pub status: WorkerExecutionStatus,
+    pub analyst: Report,
+    pub verifier: Report,
+    pub acceptance_reasons: Vec<String>,
     pub trace_events: Vec<HarnessEvent>,
 }
 
@@ -323,6 +338,7 @@ impl Orchestrator {
 
     /// Run all worker assignments sequentially.
     pub async fn execute(&self, assignments: Vec<WorkerAssignment>) -> anyhow::Result<Vec<Report>> {
+        self.ensure_worker_limit(assignments.len())?;
         let mut reports = Vec::new();
 
         for a in &assignments {
@@ -330,6 +346,109 @@ impl Orchestrator {
         }
 
         Ok(reports)
+    }
+
+    /// Execute a bounded two-worker review handoff used by the desktop
+    /// production entrypoint. The second worker receives the first worker's
+    /// report, so this is an actual collaboration chain rather than two
+    /// independent parallel prompts. Acceptance remains deterministic: an
+    /// analyst report plus a freshly verified verifier result.
+    pub async fn execute_review_handoff(
+        &self,
+        goal: &str,
+        analyst_profile: AgentProfile,
+        verifier_profile: AgentProfile,
+        session_id: &str,
+    ) -> anyhow::Result<LeadReviewReport> {
+        self.ensure_worker_limit(2)?;
+        let session_id = Some(session_id.to_string());
+        let analyst_assignment = WorkerAssignment {
+            worker_name: analyst_profile.name.clone(),
+            task_description: format!(
+                "作为分析员工审查以下任务，只收集事实、定位风险并提交报告，不修改文件：\n\n{goal}"
+            ),
+            owned_files: Vec::new(),
+            profile: analyst_profile,
+        };
+        let mut trace_events = vec![worker_started_event(
+            &analyst_assignment,
+            session_id.clone(),
+        )];
+        let analyst = self.execute_assignment(&analyst_assignment).await?;
+        trace_events.push(worker_completed_event(
+            &analyst_assignment,
+            session_id.clone(),
+            analyst.success,
+            report_status(&analyst),
+            analyst.trace_events.len(),
+        ));
+
+        let verifier_assignment = WorkerAssignment {
+            worker_name: verifier_profile.name.clone(),
+            task_description: format!(
+                "作为验证员工，独立复核分析报告并运行与任务直接相关的验证。不得修改文件；若无法获得新鲜验证证据，必须明确说明未验证。\n\n原始任务：\n{goal}\n\n分析员工报告：\n{}",
+                analyst.findings
+            ),
+            owned_files: Vec::new(),
+            profile: verifier_profile,
+        };
+        trace_events.push(worker_started_event(
+            &verifier_assignment,
+            session_id.clone(),
+        ));
+        let verifier = self.execute_assignment(&verifier_assignment).await?;
+        trace_events.push(worker_completed_event(
+            &verifier_assignment,
+            session_id,
+            verifier.success,
+            report_status(&verifier),
+            verifier.trace_events.len(),
+        ));
+
+        let analyst_submitted = matches!(
+            analyst.outcome,
+            crate::agent::RunOutcome::CompletedVerified
+                | crate::agent::RunOutcome::CompletedUnverified
+        );
+        let verifier_verified = verifier.outcome == crate::agent::RunOutcome::CompletedVerified;
+        let mut acceptance_reasons = Vec::new();
+        if !analyst_submitted {
+            acceptance_reasons.push(format!(
+                "analysis worker ended with {}",
+                report_status(&analyst)
+            ));
+        }
+        if !verifier_verified {
+            acceptance_reasons
+                .push("verification worker did not produce fresh passing evidence".into());
+            if verifier.outcome == crate::agent::RunOutcome::Blocked {
+                acceptance_reasons.push(
+                    "verification worker stopped at its completion gate; Lead kept the review pending"
+                        .into(),
+                );
+            }
+        }
+        let status = if !analyst_submitted
+            || matches!(
+                verifier.outcome,
+                crate::agent::RunOutcome::Failed
+                    | crate::agent::RunOutcome::BudgetExhausted
+                    | crate::agent::RunOutcome::Interrupted
+            ) {
+            WorkerExecutionStatus::WorkerFailed
+        } else if verifier_verified {
+            WorkerExecutionStatus::Completed
+        } else {
+            WorkerExecutionStatus::Submitted
+        };
+
+        Ok(LeadReviewReport {
+            status,
+            analyst,
+            verifier,
+            acceptance_reasons,
+            trace_events,
+        })
     }
 
     /// Execute file-owned worker assignments under deeplossless file claims.
@@ -406,6 +525,7 @@ impl Orchestrator {
         concurrent: bool,
         session_id: Option<&str>,
     ) -> anyhow::Result<WorkerExecutionReport> {
+        self.ensure_worker_limit(assignments.len())?;
         let claim_report = self
             .claim_worker_files(&assignments, coordinator, conv_id, operation)
             .await?;
@@ -434,13 +554,25 @@ impl Orchestrator {
                 .await,
         );
 
-        let status = if execution_error.is_some() {
+        let has_hard_failure = reports.iter().any(|report| {
+            !matches!(
+                report.outcome,
+                crate::agent::RunOutcome::CompletedVerified
+                    | crate::agent::RunOutcome::CompletedUnverified
+            )
+        });
+        let has_unverified = reports
+            .iter()
+            .any(|report| report.outcome == crate::agent::RunOutcome::CompletedUnverified);
+        let status = if execution_error.is_some() || has_hard_failure {
             WorkerExecutionStatus::WorkerFailed
         } else if !conflicts.is_empty()
             || !ownership_violations.is_empty()
             || !release_failures.is_empty()
         {
             WorkerExecutionStatus::CompletedWithReviewFindings
+        } else if has_unverified {
+            WorkerExecutionStatus::Submitted
         } else {
             WorkerExecutionStatus::Completed
         };
@@ -455,6 +587,16 @@ impl Orchestrator {
             execution_error,
             trace_events,
         })
+    }
+
+    fn ensure_worker_limit(&self, requested: usize) -> anyhow::Result<()> {
+        if requested > self.max_concurrent_workers {
+            anyhow::bail!(
+                "worker limit exceeded: requested {requested}, maximum is {}",
+                self.max_concurrent_workers
+            );
+        }
+        Ok(())
     }
 
     async fn execute_claimed_assignments(
@@ -472,17 +614,13 @@ impl Orchestrator {
             let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(
                 self.max_concurrent_workers.max(1),
             ));
-            let results = futures::future::join_all(
-                assignments
-                    .iter()
-                    .map(|assignment| {
-                        let sem = sem.clone();
-                        async move {
-                            let _permit = sem.acquire().await.expect("semaphore closed");
-                            self.execute_assignment(assignment).await
-                        }
-                    }),
-            )
+            let results = futures::future::join_all(assignments.iter().map(|assignment| {
+                let sem = sem.clone();
+                async move {
+                    let _permit = sem.acquire().await.expect("semaphore closed");
+                    self.execute_assignment(assignment).await
+                }
+            }))
             .await;
             let mut reports = Vec::new();
             let mut execution_error = None;
@@ -492,7 +630,8 @@ impl Orchestrator {
                         trace_events.push(worker_completed_event(
                             assignment,
                             session_id.clone(),
-                            true,
+                            report.success,
+                            report_status(&report),
                             report.trace_events.len(),
                         ));
                         reports.push(report);
@@ -502,6 +641,7 @@ impl Orchestrator {
                             assignment,
                             session_id.clone(),
                             false,
+                            "failed",
                             0,
                         ));
                         execution_error = Some(format!(
@@ -513,6 +653,7 @@ impl Orchestrator {
                         assignment,
                         session_id.clone(),
                         false,
+                        "failed",
                         0,
                     )),
                 }
@@ -529,7 +670,8 @@ impl Orchestrator {
                     trace_events.push(worker_completed_event(
                         assignment,
                         session_id.clone(),
-                        true,
+                        report.success,
+                        report_status(&report),
                         report.trace_events.len(),
                     ));
                     reports.push(report);
@@ -539,6 +681,7 @@ impl Orchestrator {
                         assignment,
                         session_id.clone(),
                         false,
+                        "failed",
                         0,
                     ));
                     return (
@@ -1193,6 +1336,7 @@ fn worker_completed_event(
     assignment: &WorkerAssignment,
     session_id: Option<String>,
     success: bool,
+    status: &str,
     trace_event_count: usize,
 ) -> HarnessEvent {
     HarnessEvent::WorkerCompleted {
@@ -1200,7 +1344,18 @@ fn worker_completed_event(
         worker: assignment.worker_name.clone(),
         task_id: worker_task_id(assignment),
         success,
+        status: status.to_string(),
         trace_event_count,
+    }
+}
+
+fn report_status(report: &Report) -> &'static str {
+    match report.outcome {
+        crate::agent::RunOutcome::CompletedVerified => "completed",
+        crate::agent::RunOutcome::CompletedUnverified => "submitted",
+        crate::agent::RunOutcome::Interrupted => "interrupted",
+        crate::agent::RunOutcome::Blocked | crate::agent::RunOutcome::BudgetExhausted => "blocked",
+        crate::agent::RunOutcome::Failed => "failed",
     }
 }
 
@@ -1248,6 +1403,9 @@ fn worker_task_id(assignment: &WorkerAssignment) -> String {
 
 fn execution_blockers(execution: &WorkerExecutionReport) -> Vec<String> {
     let mut blockers = Vec::new();
+    if execution.status == WorkerExecutionStatus::Submitted {
+        blockers.push("worker results were submitted without fresh verification".into());
+    }
     if let Some(error) = &execution.execution_error {
         blockers.push(error.clone());
     }
@@ -1983,7 +2141,7 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn worker_patch_pipeline_applies_approved_worker_patch() {
+    async fn worker_patch_pipeline_blocks_unverified_worker_patch() {
         let temp = tempfile::tempdir().expect("tempdir");
         let src = temp.path().join("src");
         std::fs::create_dir(&src).expect("create src");
@@ -2019,12 +2177,13 @@ pub mod tests {
             .await
             .expect("worker patch pipeline");
 
-        assert_eq!(report.status, WorkerPatchPipelineStatus::Applied);
-        assert!(report.passed());
-        assert_eq!(report.apply_report.applied.len(), 1);
+        assert_eq!(report.status, WorkerPatchPipelineStatus::Blocked);
+        assert!(!report.passed());
+        assert!(report.apply_report.applied.is_empty());
+        assert_eq!(report.execution.status, WorkerExecutionStatus::Submitted);
         assert_eq!(
             std::fs::read_to_string(src.join("a.rs")).expect("read file"),
-            "new\n"
+            "old\n"
         );
         assert_eq!(
             coordinator.released(),
@@ -2208,8 +2367,8 @@ pub mod tests {
             .await
             .expect("execute with file claims");
 
-        assert_eq!(report.status, WorkerExecutionStatus::Completed);
-        assert!(!report.has_blockers());
+        assert_eq!(report.status, WorkerExecutionStatus::Submitted);
+        assert!(report.has_blockers());
         assert_eq!(report.reports.len(), 1);
         assert_eq!(report.claim_report.active_claims.len(), 1);
         assert_eq!(
@@ -2253,7 +2412,7 @@ pub mod tests {
             .await
             .expect("execute with file claims");
 
-        assert_eq!(report.status, WorkerExecutionStatus::Completed);
+        assert_eq!(report.status, WorkerExecutionStatus::Submitted);
         assert_eq!(report.reports.len(), 2);
         assert_eq!(report.trace_events.len(), 4);
         assert!(
@@ -2267,6 +2426,62 @@ pub mod tests {
                 ("w2".into(), "src\\b.rs".into())
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_more_than_configured_worker_limit() {
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+        let profile = dummy_profile("worker");
+        let assignments = (0..3)
+            .map(|index| WorkerAssignment {
+                worker_name: format!("worker-{index}"),
+                task_description: "test".into(),
+                owned_files: Vec::new(),
+                profile: profile.clone(),
+            })
+            .collect();
+
+        let error = orch.execute(assignments).await.unwrap_err();
+        assert!(error.to_string().contains("worker limit exceeded"));
+    }
+
+    #[tokio::test]
+    async fn review_handoff_keeps_unverified_workers_submitted() {
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+
+        let report = orch
+            .execute_review_handoff(
+                "review current changes",
+                dummy_profile("analyst"),
+                dummy_profile("verifier"),
+                "session-review",
+            )
+            .await
+            .expect("review handoff");
+
+        assert_eq!(
+            report.status,
+            WorkerExecutionStatus::Submitted,
+            "analyst={:?}, verifier={:?}, reasons={:?}",
+            report.analyst.outcome,
+            report.verifier.outcome,
+            report.acceptance_reasons
+        );
+        assert_eq!(report.trace_events.len(), 4);
+        assert!(report
+            .acceptance_reasons
+            .iter()
+            .any(|reason| reason.contains("fresh passing evidence")));
+        assert!(matches!(
+            report.trace_events.first(),
+            Some(HarnessEvent::WorkerStarted { session_id, worker, .. })
+                if session_id.as_deref() == Some("session-review") && worker == "analyst"
+        ));
+        assert!(matches!(
+            report.trace_events.get(2),
+            Some(HarnessEvent::WorkerStarted { session_id, worker, .. })
+                if session_id.as_deref() == Some("session-review") && worker == "verifier"
+        ));
     }
 
     #[tokio::test]
@@ -2292,7 +2507,7 @@ pub mod tests {
             .await
             .expect("execute session workers");
 
-        assert_eq!(report.status, WorkerExecutionStatus::Completed);
+        assert_eq!(report.status, WorkerExecutionStatus::Submitted);
         assert!(matches!(
             report.trace_events.first(),
             Some(HarnessEvent::WorkerStarted {
@@ -2311,11 +2526,13 @@ pub mod tests {
                 session_id,
                 worker,
                 task_id,
-                success: true,
+                success: false,
+                status,
                 trace_event_count,
             }) if session_id.as_deref() == Some("session-1")
                 && worker == "w1"
                 && task_id == "worker-w1"
+                && status == "submitted"
                 && *trace_event_count > 0
         ));
     }

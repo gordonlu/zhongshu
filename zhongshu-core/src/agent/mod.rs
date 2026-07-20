@@ -23,9 +23,9 @@ pub use loop_::{
     StopReason,
 };
 pub use orchestrator::{
-    AssignmentFileOverlap, Conflict, FileClaimCoordinator, Orchestrator, OwnershipViolation,
-    WorkerAssignment, WorkerExecutionReport, WorkerExecutionStatus, WorkerFileClaim,
-    WorkerFileClaimConflict, WorkerFileClaimReleaseFailure, WorkerFileClaimReport,
+    AssignmentFileOverlap, Conflict, FileClaimCoordinator, LeadReviewReport, Orchestrator,
+    OwnershipViolation, WorkerAssignment, WorkerExecutionReport, WorkerExecutionStatus,
+    WorkerFileClaim, WorkerFileClaimConflict, WorkerFileClaimReleaseFailure, WorkerFileClaimReport,
     WorkerMergeReview, WorkerMergeStatus, WorkerPatchApplyFailure, WorkerPatchApplyReport,
     WorkerPatchDecision, WorkerPatchPipelineReport, WorkerPatchPipelineStatus, WorkerPatchProposal,
 };

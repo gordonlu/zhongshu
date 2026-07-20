@@ -192,6 +192,7 @@ pub enum CodingUiEvent {
         worker: String,
         task_id: String,
         success: bool,
+        status: String,
     },
     WorkerConflict {
         session_id: Option<String>,
@@ -239,6 +240,7 @@ pub enum CodingUiEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiToOverlayCommand {
     Submit(String),
+    DelegateReview(String),
     Stop,
     NewConversation,
     Approve(String),
@@ -340,6 +342,11 @@ pub fn parse_ui_command(body: &str) -> UiToOverlayCommand {
             .as_str()
             .map(|text| UiToOverlayCommand::Submit(text.to_string()))
             .unwrap_or(UiToOverlayCommand::Unknown),
+        Some("delegate_review") => msg["text"]
+            .as_str()
+            .filter(|text| !text.trim().is_empty())
+            .map(|text| UiToOverlayCommand::DelegateReview(text.to_string()))
+            .unwrap_or(UiToOverlayCommand::Unknown),
         Some("stop") => UiToOverlayCommand::Stop,
         Some("new_conversation") => UiToOverlayCommand::NewConversation,
         Some("approve") => {
@@ -388,17 +395,38 @@ pub fn parse_ui_command(body: &str) -> UiToOverlayCommand {
 fn settings_from_value(value: &serde_json::Value) -> Option<SettingsUpdate> {
     let cfg = value.as_object()?;
     Some(SettingsUpdate {
-        api_key: cfg.get("api_key").and_then(|v| v.as_str()).map(String::from),
+        api_key: cfg
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .map(String::from),
         api_key_saved: cfg.get("api_key_saved").and_then(|v| v.as_bool()),
-        api_base: cfg.get("api_base").and_then(|v| v.as_str()).map(String::from),
+        api_base: cfg
+            .get("api_base")
+            .and_then(|v| v.as_str())
+            .map(String::from),
         model: cfg.get("model").and_then(|v| v.as_str()).map(String::from),
-        personality: cfg.get("personality").and_then(|v| v.as_str()).map(String::from),
-        proxy_port: cfg.get("proxy_port").and_then(|v| v.as_str()).map(String::from),
+        personality: cfg
+            .get("personality")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        proxy_port: cfg
+            .get("proxy_port")
+            .and_then(|v| v.as_str())
+            .map(String::from),
         bg_enabled: cfg.get("bg_enabled").and_then(|v| v.as_bool()),
-        bg_interval: cfg.get("bg_interval").and_then(|v| v.as_str()).map(String::from),
-        bg_prompt: cfg.get("bg_prompt").and_then(|v| v.as_str()).map(String::from),
+        bg_interval: cfg
+            .get("bg_interval")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        bg_prompt: cfg
+            .get("bg_prompt")
+            .and_then(|v| v.as_str())
+            .map(String::from),
         auto_evolve: cfg.get("auto_evolve").and_then(|v| v.as_bool()),
-        max_context_tokens: cfg.get("max_context_tokens").and_then(|v| v.as_u64()).map(|n| n as u32),
+        max_context_tokens: cfg
+            .get("max_context_tokens")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32),
         mode: cfg.get("mode").and_then(|v| v.as_str()).map(String::from),
     })
 }
@@ -412,6 +440,18 @@ mod tests {
         let cmd = parse_ui_command(r#"{"type":"submit","text":"hello"}"#);
 
         assert_eq!(cmd, UiToOverlayCommand::Submit("hello".into()));
+    }
+
+    #[test]
+    fn parses_delegate_review_command() {
+        assert_eq!(
+            parse_ui_command(r#"{"type":"delegate_review","text":"review this change"}"#),
+            UiToOverlayCommand::DelegateReview("review this change".into())
+        );
+        assert_eq!(
+            parse_ui_command(r#"{"type":"delegate_review","text":"  "}"#),
+            UiToOverlayCommand::Unknown
+        );
     }
 
     #[test]

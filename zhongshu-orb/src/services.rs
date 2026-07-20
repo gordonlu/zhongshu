@@ -409,9 +409,11 @@ pub fn spawn_task_executor(
                         };
 
                         let step_status = match report.outcome {
-                            zhongshu_core::agent::RunOutcome::CompletedVerified
-                            | zhongshu_core::agent::RunOutcome::CompletedUnverified => {
+                            zhongshu_core::agent::RunOutcome::CompletedVerified => {
                                 StepStatus::Completed
+                            }
+                            zhongshu_core::agent::RunOutcome::CompletedUnverified => {
+                                StepStatus::Submitted
                             }
                             zhongshu_core::agent::RunOutcome::Blocked => StepStatus::ToolBlocked,
                             zhongshu_core::agent::RunOutcome::BudgetExhausted

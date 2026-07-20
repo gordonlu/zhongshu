@@ -1,5 +1,8 @@
 use crate::agent::attention::AttentionLevel;
-use crate::agent::contract::{AcceptanceCriteria, DelegationContract, PatchRecord, VerificationRecord, CommandRecord, WorkerArtifacts, WorkerOutcome};
+use crate::agent::contract::{
+    CommandRecord, DelegationContract, PatchRecord, VerificationRecord, WorkerArtifacts,
+    WorkerOutcome,
+};
 use crate::agent::llm::{LlmProvider, Message};
 use crate::agent::loop_::{run_agent, AgentCallbacks};
 use crate::agent::profile::AgentProfile;
@@ -37,6 +40,63 @@ impl Worker {
         callbacks: Option<std::sync::Arc<AgentCallbacks>>,
     ) -> anyhow::Result<Report> {
         let mut scoped_runtime = Worker::build_scoped_runtime(runtime, profile);
+        let run_id = callbacks
+            .as_ref()
+            .map(|callbacks| callbacks.run_id)
+            .unwrap_or_else(uuid::Uuid::new_v4);
+
+        if let Some(ledger) = scoped_runtime.ledger.clone() {
+            let run_id_string = run_id.to_string();
+            scoped_runtime.idempotency_checker = Some(std::sync::Arc::new({
+                let ledger = ledger.clone();
+                let run_id_string = run_id_string.clone();
+                move |name: &str, args: &str| {
+                    let key = crate::agent::run::RunController::idempotency_key(name, args);
+                    ledger
+                        .is_tool_completed(&run_id_string, &key)
+                        .unwrap_or(false)
+                }
+            }));
+        }
+
+        let internal_callbacks =
+            (callbacks.is_none() && scoped_runtime.ledger.is_some()).then(|| {
+                let ledger_for_start = scoped_runtime.ledger.clone();
+                let ledger_for_end = scoped_runtime.ledger.clone();
+                let run_id_for_start = run_id.to_string();
+                let run_id_for_end = run_id.to_string();
+                std::sync::Arc::new(AgentCallbacks {
+                    on_text: Box::new(|_| {}),
+                    on_tool_start: Box::new(move |name, args| {
+                        if let Some(ledger) = &ledger_for_start {
+                            let key = crate::agent::run::RunController::idempotency_key(name, args);
+                            let _ = ledger.record_tool_call(
+                                &run_id_for_start,
+                                name,
+                                args,
+                                "started",
+                                None,
+                                Some(&key),
+                            );
+                        }
+                    }),
+                    on_tool_done: Box::new(move |name, args, status| {
+                        if let Some(ledger) = &ledger_for_end {
+                            let key = crate::agent::run::RunController::idempotency_key(name, args);
+                            let _ = ledger.record_tool_call(
+                                &run_id_for_end,
+                                name,
+                                args,
+                                status.as_ledger_status(),
+                                None,
+                                Some(&key),
+                            );
+                        }
+                    }),
+                    run_id,
+                })
+            });
+        let callbacks = callbacks.or(internal_callbacks);
 
         let messages = vec![
             Message::system(&profile.system_prompt),
@@ -72,8 +132,7 @@ impl Worker {
         };
         let attention = Worker::infer_attention(last_content);
         let outcome = result.outcome;
-        let success = outcome == crate::agent::RunOutcome::CompletedVerified
-            || outcome == crate::agent::RunOutcome::CompletedUnverified;
+        let success = outcome == crate::agent::RunOutcome::CompletedVerified;
 
         Ok(Report {
             task_id: task.id,
@@ -116,9 +175,16 @@ impl Worker {
                 .unwrap_or_else(|| runtime.model.clone()),
             reasoning_effort: profile.llm_reasoning_effort.clone(),
             harness_state: crate::harness::HarnessState::new(),
+            // A parent run's idempotency closure is keyed to the parent run id.
+            // `execute` installs a worker-run-specific checker when a ledger is
+            // available; without a ledger there is nothing safe to inherit.
             idempotency_checker: None,
+            // Worker restart needs its profile/contract to be persisted as well;
+            // reusing the main-agent checkpoint store would resume it with the
+            // wrong runtime after process restart. Keep this disabled until the
+            // worker scheduler owns that recovery metadata.
             checkpoint_store: None,
-            ledger: None,
+            ledger: runtime.ledger.clone(),
         }
     }
 
@@ -134,12 +200,25 @@ impl Worker {
     ) -> anyhow::Result<WorkerOutcome> {
         let task = Task::from(contract);
         let profile = AgentProfile::from(contract);
-        let report = Self::execute(runtime, &profile, task, callbacks).await?;
+        let mut contract_runtime = runtime.clone();
+        contract_runtime.registry = contract_runtime.registry.restrict_to_paths(
+            &contract.scope.owned_files,
+            &contract.scope.allowed_directories,
+        );
+        if contract.permissions.require_approval {
+            contract_runtime.registry = contract_runtime
+                .registry
+                .require_approval_for_side_effects();
+        }
+        for denied in &contract.permissions.denied_tools {
+            contract_runtime.registry.unregister(denied);
+        }
+        let report = Self::execute(&contract_runtime, &profile, task, callbacks).await?;
         let mut outcome = WorkerOutcome::from(report);
         outcome.artifacts = Self::extract_artifacts(&outcome.trace_events);
         // Verify acceptance criteria and downgrade status if unmet.
         if outcome.status.is_success() {
-            let issues = Self::check_acceptance(&outcome.artifacts, &contract.acceptance);
+            let issues = Self::check_acceptance(&outcome.artifacts, contract);
             if !issues.is_empty() {
                 outcome.summary = format!("{} (验收问题: {})", outcome.summary, issues.join("; "));
                 outcome.status = crate::agent::contract::WorkerStatus::CompletedWithIssues;
@@ -150,15 +229,15 @@ impl Worker {
 
     /// Check acceptance criteria against the extracted artifacts.
     /// Returns a list of unmet criteria descriptions.
-    fn check_acceptance(
-        artifacts: &WorkerArtifacts,
-        criteria: &AcceptanceCriteria,
-    ) -> Vec<String> {
+    fn check_acceptance(artifacts: &WorkerArtifacts, contract: &DelegationContract) -> Vec<String> {
+        let criteria = &contract.acceptance;
         let mut issues = Vec::new();
         if criteria.verification_required && artifacts.verification_results.is_empty() {
             issues.push("需要验证但无验证记录".into());
         }
-        if criteria.tests_must_pass {
+        if criteria.tests_must_pass && artifacts.verification_results.is_empty() {
+            issues.push("要求测试通过但无测试记录".into());
+        } else if criteria.tests_must_pass {
             let failed: Vec<&str> = artifacts
                 .verification_results
                 .iter()
@@ -166,22 +245,42 @@ impl Worker {
                 .map(|v| v.command.as_str())
                 .collect();
             if !failed.is_empty() {
-                issues.push(format!(
-                    "以下验证未通过: {}",
-                    failed.join(", ")
-                ));
+                issues.push(format!("以下验证未通过: {}", failed.join(", ")));
             }
         }
         if criteria.no_ownership_violations {
-            // Ownership violations are detected at the orchestrator level;
-            // here we have no access to the project index. The orchestrator
-            // must enforce this before accepting the outcome.
+            for patch in &artifacts.patches {
+                let owned = contract
+                    .scope
+                    .owned_files
+                    .iter()
+                    .any(|path| path == &patch.path);
+                let allowed = contract
+                    .scope
+                    .allowed_directories
+                    .iter()
+                    .any(|directory| patch.path.starts_with(directory));
+                if !owned && !allowed {
+                    issues.push(format!("产出超出委派范围: {}", patch.path.display()));
+                }
+            }
         }
         if !criteria.custom_rules.is_empty() {
             issues.push(format!(
                 "以下自定义规则需人工确认: {}",
                 criteria.custom_rules.join("; "),
             ));
+        }
+        if contract.artifacts.require_patches && artifacts.patches.is_empty() {
+            issues.push("契约要求 patch，但未产生 patch 记录".into());
+        }
+        if contract.artifacts.require_verification_evidence
+            && artifacts.verification_results.is_empty()
+        {
+            issues.push("契约要求验证证据，但未产生验证记录".into());
+        }
+        if contract.artifacts.require_command_log && artifacts.commands_run.is_empty() {
+            issues.push("契约要求命令日志，但未产生命令记录".into());
         }
         issues
     }
@@ -201,7 +300,9 @@ impl Worker {
                         applied: true,
                     });
                 }
-                HarnessEvent::PatchPreview { path, diff_summary, .. } => {
+                HarnessEvent::PatchPreview {
+                    path, diff_summary, ..
+                } => {
                     if !patches.iter().any(|p: &PatchRecord| p.path == *path) {
                         patches.push(PatchRecord {
                             path: path.clone(),
@@ -210,14 +311,23 @@ impl Worker {
                         });
                     }
                 }
-                HarnessEvent::Verification { command, success: v_success, exit_code, .. } => {
+                HarnessEvent::Verification {
+                    command,
+                    success: v_success,
+                    exit_code,
+                    ..
+                } => {
                     verification_results.push(VerificationRecord {
                         command: command.clone(),
                         success: *v_success,
                         exit_code: *exit_code,
                     });
                 }
-                HarnessEvent::ToolCall { tool_name, success: t_success, .. } => {
+                HarnessEvent::ToolCall {
+                    tool_name,
+                    success: t_success,
+                    ..
+                } => {
                     commands_run.push(CommandRecord {
                         command: tool_name.clone(),
                         exit_code: None,
@@ -312,5 +422,14 @@ mod tests {
             Worker::infer_attention("<digest> daily summary"),
             AttentionLevel::Digest
         );
+    }
+
+    #[test]
+    fn acceptance_requires_evidence_and_declared_artifacts() {
+        let contract = DelegationContract::new("worker", "change code");
+        let issues = Worker::check_acceptance(&WorkerArtifacts::default(), &contract);
+
+        assert!(issues.iter().any(|issue| issue.contains("验证")));
+        assert!(issues.iter().any(|issue| issue.contains("patch")));
     }
 }

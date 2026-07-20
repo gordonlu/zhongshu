@@ -75,8 +75,10 @@ impl Tool for BrowserAutomationTool {
                 return ToolOutput::error(format!("[BLOCKED] {reason}"))
             }
             CheckResult::RequireAuth { request } => {
-                let rid = authority::set_pending(&request.tool, &request.program, &request.command, "");
-                return ToolOutput::auth_required(&request.program, &request.command).with_request_id(rid);
+                let rid =
+                    authority::set_pending(&request.tool, &request.program, &request.command, "");
+                return ToolOutput::auth_required(&request.program, &request.command)
+                    .with_request_id(rid);
             }
             CheckResult::Allow => {}
         }

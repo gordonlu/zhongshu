@@ -130,8 +130,8 @@ async fn main() -> anyhow::Result<()> {
             on_tool_start: Box::new(move |tool, _args| {
                 status_line(tool, true);
             }),
-            on_tool_done: Box::new(move |_tool, _args, success| {
-                if !success {
+            on_tool_done: Box::new(move |_tool, _args, status| {
+                if !status.is_success() {
                     status_line(_tool, false);
                 }
             }),

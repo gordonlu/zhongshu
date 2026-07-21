@@ -205,7 +205,12 @@ impl ZhongshuApp {
                     .lock()
                     .unwrap()
                     .record_user_message(&task.objective);
-                if !self.organization.submit(task) {
+                let ok = if task.mutation {
+                    self.organization.submit_mutation(task)
+                } else {
+                    self.organization.submit(task)
+                };
+                if !ok {
                     ov.toast("组织任务已经在运行。");
                 }
             }

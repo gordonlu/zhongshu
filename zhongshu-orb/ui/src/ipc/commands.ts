@@ -16,6 +16,7 @@ export type UiToOverlayCommand =
         sequential_handoff: boolean
         max_workers?: number
         target_employee?: string
+        mutation?: boolean
       }
     }
   | { type: 'list_organization_employees' }

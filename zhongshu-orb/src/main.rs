@@ -575,6 +575,10 @@ fn main() {
             zhongshu_core::core::Database::new(core_db_path.clone()),
         ),
     );
+    let deeplossless_cfg = zhongshu_core::integration::DeeplosslessConfig {
+        db_path: format!("{}/.deeplossless", config::config_dir().display()),
+        ..Default::default()
+    };
     let organization = Arc::new(OrganizationController::new(
         worker_runtime.clone(),
         organization_roster,
@@ -582,6 +586,8 @@ fn main() {
         response_tx.clone(),
         run_controller.clone(),
         org_checkpoint_store,
+        std::env::current_dir().unwrap_or_default(),
+        Some(deeplossless_cfg),
     ));
 
     let attention_mgr = AttentionManager::new((*eb).clone());

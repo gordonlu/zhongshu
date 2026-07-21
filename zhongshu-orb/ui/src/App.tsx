@@ -539,7 +539,7 @@ export function App() {
             pendingOrganizationObjective.current = null
             focusComposer()
           }}
-          onSubmit={(employees, sequentialHandoff) => {
+          onSubmit={(employees, sequentialHandoff, mutation) => {
             const objective = organizationDialog.objective
             optimisticUserMessages.current.push(objective)
             dispatchChat({ type: 'user_message', content: objective })
@@ -555,6 +555,7 @@ export function App() {
                 })),
                 sequential_handoff: sequentialHandoff,
                 max_workers: employees.length,
+                mutation,
               },
             })
             setComposerText('')

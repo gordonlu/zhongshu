@@ -130,6 +130,8 @@ pub struct OrganizationTaskCommand {
     pub sequential_handoff: bool,
     pub max_workers: Option<usize>,
     pub target_employee: Option<String>,
+    #[serde(default)]
+    pub mutation: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

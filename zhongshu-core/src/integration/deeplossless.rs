@@ -10,6 +10,7 @@ use tracing::info;
 const DEFAULT_UPSTREAM: &str = "https://api.deepseek.com";
 const PORT_RANGE: u16 = 10; // try up to 10 ports from the base
 
+#[derive(Clone)]
 pub struct DeeplosslessConfig {
     pub db_path: String,
     pub api_key: String,

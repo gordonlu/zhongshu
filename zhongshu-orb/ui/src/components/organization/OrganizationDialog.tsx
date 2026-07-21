@@ -7,7 +7,7 @@ type OrganizationDialogProps = {
   employees: OrganizationEmployeeInfo[]
   maxWorkers: number
   onClose: () => void
-  onSubmit: (employees: OrganizationEmployeeInfo[], sequentialHandoff: boolean) => void
+  onSubmit: (employees: OrganizationEmployeeInfo[], sequentialHandoff: boolean, mutation: boolean) => void
 }
 
 export function OrganizationDialog({
@@ -19,6 +19,7 @@ export function OrganizationDialog({
 }: OrganizationDialogProps) {
   const [selectedNames, setSelectedNames] = useState<string[]>([])
   const [sequentialHandoff, setSequentialHandoff] = useState(false)
+  const [mutation, setMutation] = useState(false)
   const selectedEmployees = employees.filter((employee) => selectedNames.includes(employee.name))
 
   const toggleEmployee = (employee: OrganizationEmployeeInfo) => {
@@ -79,6 +80,14 @@ export function OrganizationDialog({
           />
           Sequential handoff between selected roles
         </label>
+        <label className="organization-flow-option" style={{ opacity: mutation ? 1 : 0.6 }}>
+          <input
+            type="checkbox"
+            checked={mutation}
+            onChange={(event) => setMutation(event.target.checked)}
+          />
+          Mutation mode — employees can modify files
+        </label>
 
         <footer className="modal-actions">
           <span className="muted">{selectedEmployees.length}/{maxWorkers} employees</span>
@@ -86,7 +95,7 @@ export function OrganizationDialog({
             type="button"
             className="primary-button"
             disabled={selectedEmployees.length === 0}
-            onClick={() => onSubmit(selectedEmployees, sequentialHandoff)}
+            onClick={() => onSubmit(selectedEmployees, sequentialHandoff, mutation)}
           >
             Assign task
           </button>

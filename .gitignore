@@ -19,3 +19,5 @@ DEEPLOSSLESS_REFERENCE.md
 .codex/
 .agents/
 .worktrees
+scene-calibrator/
+*.config.json

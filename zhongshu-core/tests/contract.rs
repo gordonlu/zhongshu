@@ -77,10 +77,27 @@ impl LlmProvider for ScriptedProvider {
 
     async fn stream_chat(
         &self,
-        _request: ChatCompletionRequest,
-        _on_event: Box<dyn FnMut(StreamEvent) + Send>,
+        request: ChatCompletionRequest,
+        mut on_event: Box<dyn FnMut(StreamEvent) + Send>,
     ) -> anyhow::Result<()> {
-        anyhow::bail!("streaming not used in contract tests")
+        let response = self.chat(request).await?;
+        if let Some(choice) = response.choices.into_iter().next() {
+            let tool_calls = choice.message.tool_calls.unwrap_or_default();
+            let stream_calls: Vec<zhongshu_core::agent::llm::StreamToolCall> = tool_calls
+                .into_iter()
+                .map(|tc| zhongshu_core::agent::llm::StreamToolCall {
+                    id: tc.id,
+                    name: tc.function.name,
+                    arguments: tc.function.arguments,
+                })
+                .collect();
+            on_event(StreamEvent::Finished {
+                finish_reason: choice.finish_reason.unwrap_or_default(),
+                content: choice.message.content,
+                tool_calls: stream_calls,
+            });
+        }
+        Ok(())
     }
 
     fn model_name(&self) -> &str {
@@ -341,6 +358,115 @@ async fn cancel_during_run_returns_interrupted() {
 
     let result = handle.await.unwrap();
     assert_eq!(result.outcome, RunOutcome::Interrupted);
+}
+
+
+
+/// Simulate a crash DURING tool execution: save a dirty checkpoint while
+/// the tool is marked as "started" but before completion.
+#[tokio::test]
+async fn crash_during_tool_detects_inflight_and_reports_unknown_effect() {
+    use zhongshu_core::agent::run_agent;
+    use zhongshu_core::agent::AgentCallbacks;
+    use zhongshu_core::core::checkpoint::{AgentCheckpoint, CheckpointStore};
+    use zhongshu_core::core::ledger::RunLedger;
+    use zhongshu_core::core::Database;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::new(dir.path().join("crash.db"));
+    db.migrate().unwrap();
+
+    let checkpoint_store = CheckpointStore::new(db.clone());
+    let ledger = RunLedger::new(db);
+    let run_id = uuid::Uuid::new_v4();
+
+    // Record the tool start (simulating state at crash time)
+    ledger.record_run_started(&run_id.to_string(), "crash test").unwrap();
+    ledger
+        .record_tool_call(
+            &run_id.to_string(),
+            "noop",
+            "{}",
+            "started",
+            None,
+            Some(&zhongshu_core::agent::run::RunController::idempotency_key(
+                "noop", "{}",
+            )),
+        )
+        .unwrap();
+
+    // Save checkpoint as it would be before tool execution
+    let crash_cp = AgentCheckpoint {
+        run_id: run_id.to_string(),
+        step: 1,
+        tool_calls_made: 0,
+        consecutive_failures: 0,
+        tool_call_counts: HashMap::new(),
+        messages: vec![
+            Message::system("测试助手。"),
+            Message::user("run crashtest"),
+            Message::assistant_with_tools("", vec![ToolCall {
+                id: "call-crash-1".into(),
+                call_type: "function".into(),
+                function: FunctionCall { name: "noop".into(), arguments: "{}".into() },
+            }]),
+        ],
+        created_at: 0,
+    };
+    checkpoint_store.save(&crash_cp, true).unwrap();
+
+    // Verify inflight detection
+    assert!(
+        ledger.has_inflight_tools(&run_id.to_string()).unwrap(),
+        "started tool should be in-flight"
+    );
+
+    // Fresh runtime loading the checkpoint
+    let mut recovery_runtime = AgentRuntime::new(
+        scripted(&[("noop", "{}")]),
+        ToolRegistry::new().register(OkTool),
+        "contract-test",
+        small_budget(),
+    );
+    recovery_runtime.checkpoint_store = Some(checkpoint_store.clone());
+    recovery_runtime.ledger = Some(ledger.clone());
+
+    let callbacks = Arc::new(AgentCallbacks {
+        on_text: Box::new(|_| {}),
+        on_tool_start: Box::new(|_: &str, _: &str| {}),
+        on_tool_done: Box::new(|_: &str, _: &str, _: zhongshu_core::agent::loop_::ToolCompletionStatus| {}),
+        run_id,
+    });
+
+    let recovery_result = run_agent(
+        &mut recovery_runtime,
+        vec![Message::user("recovery test")],
+        Some(callbacks.clone()),
+        "crash-test",
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    // Recovery should complete successfully
+    assert!(
+        matches!(recovery_result.outcome, RunOutcome::CompletedUnverified),
+        "recovery run should complete: got {:?}",
+        recovery_result.outcome
+    );
+
+    // Messages should contain unknown-effect or inflight warning
+    let has_unknown = recovery_result
+        .messages
+        .iter()
+        .any(|m| m.content.contains("unknown_effect") || m.content.contains("状态未知"));
+    assert!(has_unknown, "recovery should report unknown effect for in-flight tool");
+
+    // After recovery, the agent received the unknown-effect observation.
+    // The ledger still preserves the original 'started' record — it is
+    // the crash evidence and is never deleted or overwritten.
 }
 
 /// Tool error observation contains the error message in the tool result.

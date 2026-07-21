@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use zhongshu_core::agent::llm_registry::LlmRegistry;
 use zhongshu_core::agent::run::RunController;
 use zhongshu_core::agent::{
@@ -31,6 +32,8 @@ pub struct OrganizationController {
     busy: Arc<AtomicBool>,
     current_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     current_session: Arc<Mutex<Option<String>>>,
+    cancel_token: Arc<Mutex<Option<CancellationToken>>>,
+    checkpoint_store: Option<zhongshu_core::core::checkpoint::OrganizationCheckpointStore>,
 }
 
 impl OrganizationController {
@@ -40,6 +43,7 @@ impl OrganizationController {
         event_bus: Arc<EventBus>,
         response_tx: ResponseTx,
         run_controller: Arc<RunController>,
+        checkpoint_store: Option<zhongshu_core::core::checkpoint::OrganizationCheckpointStore>,
     ) -> Self {
         Self {
             runtime,
@@ -50,6 +54,8 @@ impl OrganizationController {
             busy: Arc::new(AtomicBool::new(false)),
             current_task: Arc::new(Mutex::new(None)),
             current_session: Arc::new(Mutex::new(None)),
+            cancel_token: Arc::new(Mutex::new(None)),
+            checkpoint_store,
         }
     }
 
@@ -103,6 +109,18 @@ impl OrganizationController {
         let busy = self.busy.clone();
         let current_task = self.current_task.clone();
         let current_session = self.current_session.clone();
+        let cancel_token = self.cancel_token.clone();
+        let checkpoint_store = self.checkpoint_store.clone();
+        // Save checkpoint before spawning so crash recovery can find it.
+        if let Some(ref cs) = checkpoint_store {
+            let staffing_json =
+                serde_json::to_string(&request.staffing).unwrap_or_else(|_| "{}".into());
+            let roster_json =
+                serde_json::to_string(&self.roster).unwrap_or_else(|_| "[]".into());
+            if let Err(e) = cs.save(&task_id, &objective, &staffing_json, &roster_json) {
+                tracing::warn!(error = %e, "failed to save organization checkpoint");
+            }
+        }
         let (start_tx, start_rx) = tokio::sync::oneshot::channel();
 
         event_bus.publish(Event::Agent(AgentEvent::StateChanged {
@@ -115,10 +133,17 @@ impl OrganizationController {
             let runtime = runtime.read().await.clone();
             let orchestrator = Orchestrator::new(runtime, LlmRegistry::new());
             let organization_bus = event_bus.clone();
+            let cancel = CancellationToken::new();
+            *cancel_token.lock().unwrap() = Some(cancel.clone());
             let result = orchestrator
-                .execute_organization_task_with_events(&request, &roster, move |event| {
-                    organization_bus.publish(Event::Organization(event));
-                })
+                .execute_organization_task_with_events(
+                    &request,
+                    &roster,
+                    move |event| {
+                        organization_bus.publish(Event::Organization(event));
+                    },
+                    Some(cancel),
+                )
                 .await;
 
             let (message, final_state, stop_reason) = match result {
@@ -168,6 +193,12 @@ impl OrganizationController {
                 to: AgentState::Idle,
             }));
             run_controller.finish_run(stop_reason).await;
+            // Clean up the organization checkpoint on normal completion.
+            if let Some(ref cs) = checkpoint_store {
+                if let Err(e) = cs.delete(&task_id) {
+                    tracing::warn!(error = %e, "failed to delete organization checkpoint");
+                }
+            }
             current_task.lock().unwrap().take();
             current_session.lock().unwrap().take();
             busy.store(false, Ordering::Release);
@@ -181,7 +212,20 @@ impl OrganizationController {
         let Some(handle) = self.current_task.lock().unwrap().take() else {
             return false;
         };
+        // Trigger graceful cancellation first, then abort the task handle
+        // as a hard fallback for workers that don't check the token.
+        if let Some(token) = self.cancel_token.lock().unwrap().take() {
+            token.cancel();
+        }
         handle.abort();
+        if let Some(ref cs) = self.checkpoint_store {
+            // Clean up checkpoint on cancel (use the session task_id if available).
+            if let Some(task_id) = self.current_session.lock().unwrap().as_ref() {
+                if let Err(e) = cs.delete(task_id) {
+                    tracing::warn!(error = %e, "failed to delete organization checkpoint on cancel");
+                }
+            }
+        }
         if let Some(task_id) = self.current_session.lock().unwrap().take() {
             self.event_bus
                 .publish(Event::Organization(OrganizationEvent::TaskFinished {

@@ -222,6 +222,16 @@ impl Database {
             ",
         )?;
 
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS organization_checkpoints (
+                task_id     TEXT PRIMARY KEY,
+                objective   TEXT NOT NULL,
+                staffing    TEXT NOT NULL,
+                roster      TEXT NOT NULL,
+                created_at  INTEGER NOT NULL
+            );",
+        )?;
+
         tracing::info!("core database migrated at {}", self.path.display());
         Ok(())
     }

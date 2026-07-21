@@ -133,7 +133,11 @@ impl Worker {
         };
         let attention = Worker::infer_attention(last_content);
         let outcome = result.outcome;
-        let success = outcome == crate::agent::RunOutcome::CompletedVerified;
+        let success = matches!(
+            outcome,
+            crate::agent::RunOutcome::CompletedVerified
+                | crate::agent::RunOutcome::CompletedUnverified
+        );
 
         Ok(Report {
             task_id: task.id,

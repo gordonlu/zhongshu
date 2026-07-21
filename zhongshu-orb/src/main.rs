@@ -37,7 +37,7 @@ use zhongshu_core::core::{
 };
 use zhongshu_core::digest::DigestBuilder;
 use zhongshu_core::equipment::EquipmentObserver;
-use zhongshu_core::event::{EventBus, EventLogger, MessageId, ResponseEvent, ResponseRole};
+use zhongshu_core::event::{Event, EventBus, EventLogger, MessageId, ResponseEvent, ResponseRole};
 use zhongshu_core::heartbeat::Heartbeat;
 use zhongshu_core::integration::DeeplosslessProxy;
 use zhongshu_core::rule::{Rule, RuleCondition, RuleEngine, RuleTask};
@@ -570,12 +570,18 @@ fn main() {
             organization_roster.push(built_in);
         }
     }
+    let org_checkpoint_store = Some(
+        zhongshu_core::core::checkpoint::OrganizationCheckpointStore::new(
+            zhongshu_core::core::Database::new(core_db_path.clone()),
+        ),
+    );
     let organization = Arc::new(OrganizationController::new(
         worker_runtime.clone(),
         organization_roster,
         eb.clone(),
         response_tx.clone(),
         run_controller.clone(),
+        org_checkpoint_store,
     ));
 
     let attention_mgr = AttentionManager::new((*eb).clone());
@@ -659,6 +665,30 @@ fn main() {
                 "startup: recovered {} stale inflight tasks",
                 recovered.len()
             );
+        }
+    }
+    // Recover unfinished organization tasks from crash.
+    {
+        let org_store = zhongshu_core::core::checkpoint::OrganizationCheckpointStore::new(
+            Database::new(core_db_path.clone()),
+        );
+        if let Ok(unfinished) = org_store.list_unfinished() {
+            for task_id in &unfinished {
+                tracing::warn!(
+                    task_id = %task_id,
+                    "startup: found unfinished organization task from crash — marking as failed"
+                );
+                eb.publish(Event::Organization(
+                    zhongshu_core::event::OrganizationEvent::TaskFinished {
+                        task_id: task_id.clone(),
+                        status: "cancelled".into(),
+                        reason: Some("进程崩溃，组织任务未完成".into()),
+                    },
+                ));
+                if let Err(e) = org_store.delete(task_id) {
+                    tracing::warn!(error = %e, "failed to delete stale organization checkpoint");
+                }
+            }
         }
     }
     let runbook_store = RunbookStore::new(Database::new(core_db_path.clone()));

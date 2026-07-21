@@ -14,6 +14,7 @@ pub mod suggestion;
 pub mod task;
 
 pub use artifact::ArtifactRepository;
+pub use checkpoint::OrganizationCheckpointStore;
 pub use db::Database;
 pub use event::EventLogStore;
 pub use goal::{GoalRepository, GoalTool};

@@ -169,6 +169,66 @@ impl CheckpointStore {
     }
 }
 
+/// Manages persistence of organization task checkpoints.
+/// Saves the task_id, objective, and staffing request when a task starts.
+/// On crash/restart, `list_unfinished()` returns tasks that never finished.
+#[derive(Clone)]
+pub struct OrganizationCheckpointStore {
+    db: Database,
+}
+
+impl OrganizationCheckpointStore {
+    pub fn new(db: Database) -> Self {
+        Self { db }
+    }
+
+    /// Save or update a checkpoint for an organization task.
+    pub fn save(
+        &self,
+        task_id: &str,
+        objective: &str,
+        staffing_json: &str,
+        roster_json: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.db.conn()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        conn.execute(
+            "INSERT OR REPLACE INTO organization_checkpoints
+             (task_id, objective, staffing, roster, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![task_id, objective, staffing_json, roster_json, now],
+        )?;
+        Ok(())
+    }
+
+    /// Delete a checkpoint when a task finishes or is cancelled.
+    pub fn delete(&self, task_id: &str) -> rusqlite::Result<()> {
+        let conn = self.db.conn()?;
+        conn.execute(
+            "DELETE FROM organization_checkpoints WHERE task_id = ?1",
+            rusqlite::params![task_id],
+        )?;
+        Ok(())
+    }
+
+    /// List all unfinished organization task IDs (those with checkpoints).
+    pub fn list_unfinished(&self) -> rusqlite::Result<Vec<String>> {
+        let conn = self.db.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT task_id FROM organization_checkpoints ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row?);
+        }
+        Ok(ids)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,5 +268,31 @@ mod tests {
             store.latest_unfinished().unwrap().unwrap().run_id,
             "unfinished"
         );
+    }
+
+    #[test]
+    fn organization_checkpoint_save_list_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(dir.path().join("org_checkpoint.db"));
+        db.migrate().unwrap();
+        let store = OrganizationCheckpointStore::new(db);
+
+        assert!(store.list_unfinished().unwrap().is_empty());
+
+        store.save("task-1", "objective 1", r#"{"role":"analyst"}"#, "[]").unwrap();
+        store.save("task-2", "objective 2", r#"{"role":"writer"}"#, "[]").unwrap();
+
+        let unfinished = store.list_unfinished().unwrap();
+        assert_eq!(unfinished.len(), 2);
+        assert!(unfinished.contains(&"task-1".to_string()));
+        assert!(unfinished.contains(&"task-2".to_string()));
+
+        store.delete("task-1").unwrap();
+        let unfinished = store.list_unfinished().unwrap();
+        assert_eq!(unfinished.len(), 1);
+        assert_eq!(unfinished[0], "task-2");
+
+        store.delete("task-2").unwrap();
+        assert!(store.list_unfinished().unwrap().is_empty());
     }
 }

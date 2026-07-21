@@ -736,7 +736,7 @@ impl Orchestrator {
         request: &OrganizationTaskRequest,
         roster: &[AgentProfile],
     ) -> anyhow::Result<OrganizationExecutionReport> {
-        self.execute_organization_task_with_events(request, roster, |_| {})
+        self.execute_organization_task_with_events(request, roster, |_| {}, None)
             .await
     }
 
@@ -748,6 +748,7 @@ impl Orchestrator {
         request: &OrganizationTaskRequest,
         roster: &[AgentProfile],
         mut on_event: F,
+        cancel: Option<tokio_util::sync::CancellationToken>,
     ) -> anyhow::Result<OrganizationExecutionReport>
     where
         F: FnMut(crate::event::OrganizationEvent) + Send,
@@ -838,6 +839,13 @@ impl Orchestrator {
         let mut handoff_summaries = Vec::new();
         let mut previous_employee: Option<String> = None;
         for assignment in &staffed.assignments {
+            // Check for graceful cancellation between workers.
+            if let Some(ref ct) = cancel {
+                if ct.is_cancelled() {
+                    execution_error = Some("cancelled by user".into());
+                    break;
+                }
+            }
             let mut executable = assignment.clone();
             if request.collaboration == CollaborationMode::SequentialHandoff
                 && !handoff_summaries.is_empty()
@@ -867,6 +875,35 @@ impl Orchestrator {
             });
             match self.execute_assignment(&executable).await {
                 Ok(report) => {
+                    // Treat non-success outcomes as worker failures so the
+                    // sequential-handoff loop stops instead of continuing to
+                    // subsequent workers with potentially invalid state.
+                    if !report.success {
+                        trace_events.push(worker_completed_event(
+                            &executable,
+                            Some(request.task_id.clone()),
+                            false,
+                            "failed",
+                            0,
+                        ));
+                        execution_error = if cancel.as_ref().map_or(false, |c| c.is_cancelled()) {
+                            Some("cancelled by user".into())
+                        } else {
+                            Some(format!(
+                                "worker '{}' failed: {:?}",
+                                executable.worker_name,
+                                report.outcome,
+                            ))
+                        };
+                        on_event(OrganizationEvent::EmployeeReported {
+                            task_id: request.task_id.clone(),
+                            employee: executable.worker_name.clone(),
+                            role: executable.profile.specialty.role.as_str().to_string(),
+                            outcome: "failed".into(),
+                            success: false,
+                        });
+                        break;
+                    }
                     trace_events.push(worker_completed_event(
                         &executable,
                         Some(request.task_id.clone()),
@@ -914,10 +951,14 @@ impl Orchestrator {
                         "failed",
                         0,
                     ));
-                    execution_error = Some(format!(
-                        "worker '{}' failed: {error}",
-                        executable.worker_name
-                    ));
+                    execution_error = if cancel.as_ref().map_or(false, |c| c.is_cancelled()) {
+                        Some("cancelled by user".into())
+                    } else {
+                        Some(format!(
+                            "worker '{}' failed: {error}",
+                            executable.worker_name
+                        ))
+                    };
                     on_event(OrganizationEvent::EmployeeReported {
                         task_id: request.task_id.clone(),
                         employee: executable.worker_name.clone(),
@@ -4558,7 +4599,7 @@ pub mod tests {
         let report = orchestrator
             .execute_organization_task_with_events(&request, &roster, |event| {
                 organization_events.push(event);
-            })
+            }, None)
             .await
             .expect("scripted organization execution");
 
@@ -5677,7 +5718,7 @@ pub mod tests {
                 session_id,
                 worker,
                 task_id,
-                success: false,
+                success: true,
                 status,
                 trace_event_count,
             }) if session_id.as_deref() == Some("session-1")
@@ -5756,5 +5797,120 @@ pub mod tests {
 
         assert!(report.findings.contains("一切正常"));
         assert_eq!(report.worker, "orchestrator");
+    }
+
+    #[tokio::test]
+    async fn organization_task_cancelled_before_execution_returns_worker_failed() {
+        use crate::agent::{
+            AssignmentAuthority, CollaborationMode, EmployeeCapability, EmployeeRole,
+            OrganizationTaskRequest, RoleRequirement, StaffingRequest, VerificationPolicy,
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runtime = AgentRuntime::new(
+            OrganizationScriptedProvider {
+                calls: calls.clone(),
+            },
+            ToolRegistry::new(),
+            "organization-scripted",
+            AgentBudget::default(),
+        );
+        let orchestrator = Orchestrator::new(runtime, LlmRegistry::new());
+        let roster = vec![
+            AgentProfile::new("analyst", "ROLE=analyst", vec![], AgentBudget::default())
+                .with_specialty(
+                    EmployeeRole::new("analyst"),
+                    vec![],
+                    "analysis",
+                )
+                .with_verification_policy(VerificationPolicy::NotRequired),
+        ];
+        let request = OrganizationTaskRequest::manager_selected(
+            "test-cancel",
+            "zhongshu",
+            StaffingRequest {
+                objective: "analyze".into(),
+                requirements: vec![
+                    RoleRequirement::required(EmployeeRole::new("analyst"), "analysis"),
+                ],
+                max_workers: Some(1),
+            },
+        );
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+
+        let report = orchestrator
+            .execute_organization_task_with_events(&request, &roster, |_| {}, Some(cancel))
+            .await
+            .expect("cancelled execution should return Ok");
+
+        assert_eq!(report.status, OrganizationExecutionStatus::WorkerFailed);
+        assert!(report.execution_error.as_deref() == Some("cancelled by user"));
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "no worker should have run");
+    }
+
+    #[tokio::test]
+    async fn organization_task_sequential_handoff_stops_on_worker_failure() {
+        use crate::agent::{
+            AssignmentAuthority, CollaborationMode, EmployeeCapability, EmployeeRole,
+            OrganizationTaskRequest, RoleRequirement, StaffingRequest, VerificationPolicy,
+        };
+
+        let runtime = AgentRuntime::new(
+            ReviewScriptedProvider { analyst_fails: true },
+            ToolRegistry::new(),
+            "review-scripted",
+            AgentBudget::default(),
+        );
+        let orchestrator = Orchestrator::new(runtime, LlmRegistry::new());
+        let roster = vec![
+            AgentProfile::new("analyst", "ROLE=analyst", vec![], AgentBudget::default())
+                .with_specialty(
+                    EmployeeRole::new("analyst"),
+                    vec![],
+                    "analysis",
+                )
+                .with_verification_policy(VerificationPolicy::NotRequired),
+            AgentProfile::new("verifier", "ROLE=verifier", vec![], AgentBudget::default())
+                .with_specialty(
+                    EmployeeRole::new("reviewer"),
+                    vec![],
+                    "review",
+                )
+                .with_verification_policy(VerificationPolicy::NotRequired),
+        ];
+        let request = OrganizationTaskRequest::manager_selected(
+            "test-handoff-fail",
+            "zhongshu",
+            StaffingRequest {
+                objective: "analyze with handoff".into(),
+                requirements: vec![
+                    RoleRequirement::required(EmployeeRole::new("analyst"), "analysis"),
+                    RoleRequirement::required(EmployeeRole::new("reviewer"), "review"),
+                ],
+                max_workers: Some(2),
+            },
+        )
+        .with_collaboration(CollaborationMode::SequentialHandoff);
+
+        let report = orchestrator
+            .execute_organization_task_with_events(&request, &roster, |_| {}, None)
+            .await
+            .expect("should return Ok even with worker failure");
+
+        assert_eq!(
+            report.status,
+            OrganizationExecutionStatus::WorkerFailed,
+            "worker failure should propagate to organization status"
+        );
+        assert!(
+            report.execution_error.is_some(),
+            "should report which worker failed"
+        );
+        assert!(
+            report.employee_reports.is_empty() ||
+            report.employee_reports.len() < 2,
+            "only the first worker may have run; the second should have been skipped"
+        );
     }
 }

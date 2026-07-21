@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
@@ -89,6 +89,9 @@ struct Args {
     pro_model: Option<String>,
     case_filter: Option<String>,
     variant_filter: Option<Variant>,
+    max_requests: u64,
+    max_tokens: u64,
+    max_elapsed_secs: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -98,7 +101,46 @@ struct DryRunReport {
     mode: &'static str,
     repeats: usize,
     planned_trials: usize,
+    live_limits: LiveLimits,
     cases: Vec<DryRunCase>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct LiveLimits {
+    max_requests: u64,
+    max_tokens: u64,
+    max_elapsed_secs: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct LiveBudgetSnapshot {
+    limits: LiveLimits,
+    admitted_requests: u64,
+    provider_reported_tokens: u64,
+    elapsed_ms: u128,
+}
+
+#[derive(Debug, Serialize)]
+struct AbortReport {
+    schema_version: u32,
+    suite_id: String,
+    case_id: String,
+    variant: Variant,
+    trial: usize,
+    error: String,
+    live_budget: LiveBudgetSnapshot,
+    completed_trials: usize,
+    evidence_note: &'static str,
+}
+
+impl Default for LiveLimits {
+    fn default() -> Self {
+        Self {
+            max_requests: 12,
+            max_tokens: 40_000,
+            max_elapsed_secs: 180,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -118,6 +160,7 @@ struct TrialResult {
     flash_model: String,
     pro_model: String,
     elapsed_ms: u128,
+    live_limits: LiveLimits,
     status: String,
     outcome: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -170,6 +213,88 @@ struct ProviderUsageMeter {
     responses_missing_usage: AtomicU64,
     prompt_tokens: AtomicU64,
     completion_tokens: AtomicU64,
+}
+
+struct LiveBudgetGuard {
+    limits: LiveLimits,
+    started: Instant,
+    admitted_requests: AtomicU64,
+    provider_tokens: AtomicU64,
+}
+
+impl LiveBudgetGuard {
+    fn new(limits: LiveLimits) -> Self {
+        Self {
+            limits,
+            started: Instant::now(),
+            admitted_requests: AtomicU64::new(0),
+            provider_tokens: AtomicU64::new(0),
+        }
+    }
+
+    fn admit_request(&self) -> anyhow::Result<Duration> {
+        let reported_tokens = self.provider_tokens.load(Ordering::Relaxed);
+        if reported_tokens >= self.limits.max_tokens {
+            anyhow::bail!(
+                "live benchmark token limit {} reached ({} provider-reported tokens)",
+                self.limits.max_tokens,
+                reported_tokens
+            );
+        }
+        let elapsed = self.started.elapsed();
+        let max_elapsed = Duration::from_secs(self.limits.max_elapsed_secs);
+        let remaining = max_elapsed.checked_sub(elapsed).ok_or_else(|| {
+            anyhow::anyhow!(
+                "live benchmark elapsed-time limit {}s reached before provider call",
+                self.limits.max_elapsed_secs
+            )
+        })?;
+        self.admitted_requests
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                (current < self.limits.max_requests).then_some(current + 1)
+            })
+            .map_err(|current| {
+                anyhow::anyhow!(
+                    "live benchmark request limit {} reached ({} calls already admitted)",
+                    self.limits.max_requests,
+                    current
+                )
+            })?;
+        Ok(remaining)
+    }
+
+    fn record_tokens(&self, tokens: u64) -> anyhow::Result<()> {
+        let previous = self.provider_tokens.fetch_add(tokens, Ordering::Relaxed);
+        let total = previous.saturating_add(tokens);
+        if total > self.limits.max_tokens {
+            anyhow::bail!(
+                "live benchmark token limit {} exceeded after provider reported {} total tokens; no further provider calls will run",
+                self.limits.max_tokens,
+                total
+            );
+        }
+        Ok(())
+    }
+
+    fn snapshot(&self) -> LiveBudgetSnapshot {
+        LiveBudgetSnapshot {
+            limits: self.limits,
+            admitted_requests: self.admitted_requests.load(Ordering::Relaxed),
+            provider_reported_tokens: self.provider_tokens.load(Ordering::Relaxed),
+            elapsed_ms: self.started.elapsed().as_millis(),
+        }
+    }
+
+    fn clamp_request_tokens(&self, request: &mut ChatCompletionRequest) {
+        let reported = self.provider_tokens.load(Ordering::Relaxed);
+        let remaining = self.limits.max_tokens.saturating_sub(reported);
+        let cap = remaining.min(u32::MAX as u64) as u32;
+        request.max_tokens = Some(
+            request
+                .max_tokens
+                .map_or(cap, |requested| requested.min(cap)),
+        );
+    }
 }
 
 #[derive(Default)]
@@ -338,14 +463,28 @@ impl ProviderUsageMeter {
 struct MeteredProvider {
     inner: Arc<dyn LlmProvider>,
     meter: Arc<ProviderUsageMeter>,
+    live_budget: Arc<LiveBudgetGuard>,
 }
 
 #[async_trait::async_trait]
 impl LlmProvider for MeteredProvider {
-    async fn chat(&self, request: ChatCompletionRequest) -> anyhow::Result<ChatCompletionResponse> {
+    async fn chat(
+        &self,
+        mut request: ChatCompletionRequest,
+    ) -> anyhow::Result<ChatCompletionResponse> {
+        let remaining = self.live_budget.admit_request()?;
+        self.live_budget.clamp_request_tokens(&mut request);
         self.meter.requests.fetch_add(1, Ordering::Relaxed);
-        match self.inner.chat(request).await {
-            Ok(response) => {
+        let provider_result = tokio::time::timeout(remaining, self.inner.chat(request))
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "live benchmark elapsed-time limit {}s reached during provider call",
+                    self.live_budget.limits.max_elapsed_secs
+                )
+            });
+        match provider_result {
+            Ok(Ok(response)) => {
                 self.meter
                     .successful_responses
                     .fetch_add(1, Ordering::Relaxed);
@@ -356,11 +495,14 @@ impl LlmProvider for MeteredProvider {
                     self.meter
                         .completion_tokens
                         .fetch_add(usage.completion_tokens, Ordering::Relaxed);
-                    if usage.prompt_tokens.saturating_add(usage.completion_tokens) == 0 {
+                    let response_tokens =
+                        usage.prompt_tokens.saturating_add(usage.completion_tokens);
+                    if response_tokens == 0 {
                         return Err(anyhow::anyhow!(
                             "provider response reported zero token usage; stopping cost-blind benchmark"
                         ));
                     }
+                    self.live_budget.record_tokens(response_tokens)?;
                 } else {
                     self.meter
                         .responses_missing_usage
@@ -371,7 +513,7 @@ impl LlmProvider for MeteredProvider {
                 }
                 Ok(response)
             }
-            Err(error) => {
+            Ok(Err(error)) | Err(error) => {
                 self.meter.failed_requests.fetch_add(1, Ordering::Relaxed);
                 Err(error)
             }
@@ -380,27 +522,12 @@ impl LlmProvider for MeteredProvider {
 
     async fn stream_chat(
         &self,
-        request: ChatCompletionRequest,
-        on_event: Box<dyn FnMut(StreamEvent) + Send>,
+        _request: ChatCompletionRequest,
+        _on_event: Box<dyn FnMut(StreamEvent) + Send>,
     ) -> anyhow::Result<()> {
-        self.meter.requests.fetch_add(1, Ordering::Relaxed);
-        match self.inner.stream_chat(request, on_event).await {
-            Ok(()) => {
-                self.meter
-                    .successful_responses
-                    .fetch_add(1, Ordering::Relaxed);
-                // StreamEvent currently has no usage variant, so treating this
-                // as missing prevents cost-blind benchmark results.
-                self.meter
-                    .responses_missing_usage
-                    .fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            }
-            Err(error) => {
-                self.meter.failed_requests.fetch_add(1, Ordering::Relaxed);
-                Err(error)
-            }
-        }
+        Err(anyhow::anyhow!(
+            "live benchmark streaming is disabled because response usage cannot be accounted before cost is incurred"
+        ))
     }
 
     fn model_name(&self) -> &str {
@@ -411,6 +538,7 @@ impl LlmProvider for MeteredProvider {
         Arc::new(Self {
             inner: self.inner.change_model(model),
             meter: self.meter.clone(),
+            live_budget: self.live_budget.clone(),
         })
     }
 
@@ -455,6 +583,7 @@ pub fn run(raw: &[String]) -> Result<(), String> {
     if !args.live {
         return write_dry_run(&args, &suite, suite_dir, &cases, &variants);
     }
+    validate_live_invocation(&args)?;
 
     let flash_model = args
         .flash_model
@@ -474,6 +603,11 @@ pub fn run(raw: &[String]) -> Result<(), String> {
 
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|error| format!("cannot create benchmark runtime: {error}"))?;
+    let live_budget = Arc::new(LiveBudgetGuard::new(LiveLimits {
+        max_requests: args.max_requests,
+        max_tokens: args.max_tokens,
+        max_elapsed_secs: args.max_elapsed_secs,
+    }));
     let mut results = Vec::new();
     let planned_trials = cases.len() * variants.len() * args.repeats;
     for case in cases {
@@ -499,7 +633,32 @@ pub fn run(raw: &[String]) -> Result<(), String> {
                     &pro_api_key,
                     &flash_model,
                     &pro_model,
-                ))?;
+                    &live_budget,
+                ));
+                let result = match result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        let abort_report = write_abort_report(
+                            &args.output,
+                            &suite.id,
+                            case,
+                            variant,
+                            trial,
+                            &error,
+                            live_budget.snapshot(),
+                            results.len(),
+                        );
+                        return match abort_report {
+                            Ok(abort_path) => Err(format!(
+                                "{error}; benchmark abort report: {}",
+                                abort_path.display()
+                            )),
+                            Err(report_error) => Err(format!(
+                                "{error}; additionally failed to write benchmark abort report: {report_error}"
+                            )),
+                        };
+                    }
+                };
                 println!(
                     "[{}/{}] finished status={} elapsed_ms={} keyword_recall={:.2}",
                     results.len() + 1,
@@ -540,6 +699,10 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
     let mut pro_model = None;
     let mut case_filter = None;
     let mut variant_filter = None;
+    let defaults = LiveLimits::default();
+    let mut max_requests = defaults.max_requests;
+    let mut max_tokens = defaults.max_tokens;
+    let mut max_elapsed_secs = defaults.max_elapsed_secs;
     let mut index = 0;
     while index < raw.len() {
         let value = |name: &str, index: usize| {
@@ -617,6 +780,19 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
                 variant_filter = Some(Variant::parse(&value("--variant", index)?)?);
                 index += 2;
             }
+            "--max-requests" => {
+                max_requests = positive_u64("--max-requests", &value("--max-requests", index)?)?;
+                index += 2;
+            }
+            "--max-tokens" => {
+                max_tokens = positive_u64("--max-tokens", &value("--max-tokens", index)?)?;
+                index += 2;
+            }
+            "--max-elapsed-secs" => {
+                max_elapsed_secs =
+                    positive_u64("--max-elapsed-secs", &value("--max-elapsed-secs", index)?)?;
+                index += 2;
+            }
             "--live" => {
                 live = true;
                 index += 1;
@@ -646,7 +822,30 @@ fn parse_args(raw: &[String]) -> Result<Args, String> {
         pro_model,
         case_filter,
         variant_filter,
+        max_requests,
+        max_tokens,
+        max_elapsed_secs,
     })
+}
+
+fn positive_u64(name: &str, value: &str) -> Result<u64, String> {
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|_| format!("{name} must be a positive integer"))?;
+    if parsed == 0 {
+        return Err(format!("{name} must be positive"));
+    }
+    Ok(parsed)
+}
+
+fn validate_live_invocation(args: &Args) -> Result<(), String> {
+    if args.case_filter.is_none() || args.variant_filter.is_none() || args.repeats != 1 {
+        return Err(
+            "live benchmark safety gate requires --case, --variant, and --repeats 1; matrix runs stay disabled until offline qualification passes"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 fn selected_cases<'a>(
@@ -724,6 +923,11 @@ fn write_dry_run(
         mode: "dry_run_no_provider_calls",
         repeats: args.repeats,
         planned_trials: cases.len() * variants.len() * args.repeats,
+        live_limits: LiveLimits {
+            max_requests: args.max_requests,
+            max_tokens: args.max_tokens,
+            max_elapsed_secs: args.max_elapsed_secs,
+        },
         cases: cases
             .iter()
             .map(|case| DryRunCase {
@@ -759,6 +963,7 @@ async fn run_trial(
     pro_api_key: &str,
     flash_model: &str,
     pro_model: &str,
+    live_budget: &Arc<LiveBudgetGuard>,
 ) -> Result<TrialResult, String> {
     let trial_dir = TempDir::new().map_err(|error| format!("cannot create trial dir: {error}"))?;
     let workspace = trial_dir.path().join("workspace");
@@ -813,10 +1018,12 @@ async fn run_trial(
     let flash_provider: Arc<dyn LlmProvider> = Arc::new(MeteredProvider {
         inner: flash_inner,
         meter: flash_usage.clone(),
+        live_budget: live_budget.clone(),
     });
     let pro_provider: Arc<dyn LlmProvider> = Arc::new(MeteredProvider {
         inner: pro_inner,
         meter: pro_usage.clone(),
+        live_budget: live_budget.clone(),
     });
     let tool_policy_meter = Arc::new(ToolPolicyMeter::default());
     // Override the production shell for benchmark runs. Prompt instructions are
@@ -886,7 +1093,7 @@ async fn run_trial(
         Variant::LeadTwoWorkers => {
             let orchestrator = Orchestrator::new(runtime, LlmRegistry::new());
             let handoff = orchestrator
-                .execute_review_handoff(
+                .execute_review_pipeline(
                     &case.prompt,
                     review_profile("analysis-employee", flash_model, false),
                     review_profile("verification-employee", flash_model, true),
@@ -1005,6 +1212,7 @@ async fn run_trial(
         flash_model: flash_model.to_string(),
         pro_model: pro_model.to_string(),
         elapsed_ms,
+        live_limits: live_budget.limits,
         status,
         outcome,
         collaboration,
@@ -1137,6 +1345,11 @@ fn review_profile(name: &str, model: &str, verification: bool) -> AgentProfile {
         budget,
     );
     profile.llm_model = Some(model.to_string());
+    profile.verification_policy = if verification {
+        zhongshu_core::agent::VerificationPolicy::Required
+    } else {
+        zhongshu_core::agent::VerificationPolicy::NotRequired
+    };
     profile
 }
 
@@ -1218,6 +1431,37 @@ fn write_trial(output: &Path, result: &TrialResult) -> Result<(), String> {
     .map_err(|error| format!("cannot write {}: {error}", path.display()))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn write_abort_report(
+    output: &Path,
+    suite_id: &str,
+    case: &Case,
+    variant: Variant,
+    trial: usize,
+    error: &str,
+    live_budget: LiveBudgetSnapshot,
+    completed_trials: usize,
+) -> Result<PathBuf, String> {
+    let path = output.join("aborted.json");
+    let report = AbortReport {
+        schema_version: 1,
+        suite_id: suite_id.to_string(),
+        case_id: case.id.clone(),
+        variant,
+        trial,
+        error: error.to_string(),
+        live_budget,
+        completed_trials,
+        evidence_note: "Request admissions and tokens are invocation-wide counters. Token totals include only provider responses that returned usable usage metadata; an interrupted or usage-missing response can cost more than recorded here.",
+    };
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&report).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    Ok(path)
+}
+
 fn write_summary(output: &Path, suite_id: &str, results: &[TrialResult]) -> Result<(), String> {
     let passed = results.iter().filter(|result| result.score.passed).count();
     let content_rubric_passed = results
@@ -1288,6 +1532,14 @@ mod tests {
     struct UsageProvider;
 
     struct MissingUsageProvider;
+
+    fn test_live_budget() -> Arc<LiveBudgetGuard> {
+        Arc::new(LiveBudgetGuard::new(LiveLimits {
+            max_requests: 10,
+            max_tokens: 1_000,
+            max_elapsed_secs: 30,
+        }))
+    }
 
     #[async_trait::async_trait]
     impl LlmProvider for UsageProvider {
@@ -1372,6 +1624,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(MeteredProvider {
             inner: Arc::new(UsageProvider),
             meter: meter.clone(),
+            live_budget: test_live_budget(),
         });
         provider
             .change_model("other")
@@ -1400,6 +1653,7 @@ mod tests {
         let provider = MeteredProvider {
             inner: Arc::new(MissingUsageProvider),
             meter: meter.clone(),
+            live_budget: test_live_budget(),
         };
         let error = provider
             .chat(ChatCompletionRequest {
@@ -1489,6 +1743,193 @@ mod tests {
         );
         assert_eq!(args.variant_filter, Some(Variant::SingleFlash));
         assert_eq!(args.repeats, 1);
+    }
+
+    #[test]
+    fn parses_live_cost_limits() {
+        let args = parse_args(&[
+            "--suite".into(),
+            "suite.json".into(),
+            "--max-requests".into(),
+            "5".into(),
+            "--max-tokens".into(),
+            "12000".into(),
+            "--max-elapsed-secs".into(),
+            "90".into(),
+        ])
+        .expect("parse limits");
+
+        assert_eq!(args.max_requests, 5);
+        assert_eq!(args.max_tokens, 12_000);
+        assert_eq!(args.max_elapsed_secs, 90);
+    }
+
+    #[test]
+    fn live_matrix_is_rejected_before_provider_setup() {
+        let args = parse_args(&[
+            "--suite".into(),
+            "suite.json".into(),
+            "--live".into(),
+            "--flash-model".into(),
+            "flash".into(),
+            "--pro-model".into(),
+            "pro".into(),
+        ])
+        .expect("parse");
+
+        let error = validate_live_invocation(&args).expect_err("matrix must remain disabled");
+        assert!(error.contains("--case"));
+        assert!(error.contains("--repeats 1"));
+    }
+
+    #[test]
+    fn live_budget_rejects_requests_before_they_exceed_the_cap() {
+        let budget = LiveBudgetGuard::new(LiveLimits {
+            max_requests: 1,
+            max_tokens: 100,
+            max_elapsed_secs: 30,
+        });
+
+        assert!(budget.admit_request().is_ok());
+        let error = budget
+            .admit_request()
+            .expect_err("second request must stop");
+        assert!(error.to_string().contains("request limit 1"));
+        assert_eq!(budget.admitted_requests.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn live_budget_stops_after_provider_reports_token_overrun() {
+        let budget = LiveBudgetGuard::new(LiveLimits {
+            max_requests: 2,
+            max_tokens: 10,
+            max_elapsed_secs: 30,
+        });
+
+        let error = budget.record_tokens(18).expect_err("token limit must stop");
+        assert!(error.to_string().contains("token limit 10 exceeded"));
+        let next_error = budget
+            .admit_request()
+            .expect_err("no provider call may run after token overrun");
+        assert!(next_error.to_string().contains("token limit 10 reached"));
+    }
+
+    #[test]
+    fn live_budget_clamps_each_request_to_reported_remaining_tokens() {
+        let budget = LiveBudgetGuard::new(LiveLimits {
+            max_requests: 2,
+            max_tokens: 100,
+            max_elapsed_secs: 30,
+        });
+        budget
+            .provider_tokens
+            .store(75, std::sync::atomic::Ordering::Relaxed);
+        let mut request = ChatCompletionRequest {
+            model: "model".into(),
+            messages: vec![Message::user("review")],
+            tools: None,
+            tool_choice: None,
+            stream: false,
+            temperature: None,
+            max_tokens: Some(80),
+            reasoning_effort: None,
+        };
+
+        budget.clamp_request_tokens(&mut request);
+
+        assert_eq!(request.max_tokens, Some(25));
+    }
+
+    #[tokio::test]
+    async fn metered_provider_rejects_streaming_before_provider_call() {
+        let meter = Arc::new(ProviderUsageMeter::default());
+        let provider = MeteredProvider {
+            inner: Arc::new(UsageProvider),
+            meter: meter.clone(),
+            live_budget: test_live_budget(),
+        };
+        let error = provider
+            .stream_chat(
+                ChatCompletionRequest {
+                    model: "model".into(),
+                    messages: vec![Message::user("review")],
+                    tools: None,
+                    tool_choice: None,
+                    stream: true,
+                    temperature: None,
+                    max_tokens: None,
+                    reasoning_effort: None,
+                },
+                Box::new(|_| {}),
+            )
+            .await
+            .expect_err("streaming must be rejected before provider use");
+
+        assert!(error.to_string().contains("streaming is disabled"));
+        assert_eq!(meter.snapshot().requests, 0);
+    }
+
+    #[test]
+    fn live_budget_rejects_request_after_elapsed_deadline() {
+        let budget = LiveBudgetGuard {
+            limits: LiveLimits {
+                max_requests: 2,
+                max_tokens: 100,
+                max_elapsed_secs: 1,
+            },
+            started: Instant::now() - Duration::from_secs(2),
+            admitted_requests: AtomicU64::new(0),
+            provider_tokens: AtomicU64::new(0),
+        };
+
+        let error = budget
+            .admit_request()
+            .expect_err("elapsed deadline must stop");
+        assert!(error.to_string().contains("elapsed-time limit 1s"));
+        assert_eq!(budget.admitted_requests.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn abort_report_preserves_cost_counters_and_uncertainty() {
+        let output = TempDir::new().expect("temporary output");
+        let case = Case {
+            id: "case".into(),
+            title: "case".into(),
+            fixture: "fixture".into(),
+            prompt: "review".into(),
+            expected_keywords: vec!["issue".into()],
+            forbidden_keywords: vec![],
+        };
+        let path = write_abort_report(
+            output.path(),
+            "suite",
+            &case,
+            Variant::SingleFlash,
+            1,
+            "request limit reached",
+            LiveBudgetSnapshot {
+                limits: LiveLimits {
+                    max_requests: 2,
+                    max_tokens: 100,
+                    max_elapsed_secs: 30,
+                },
+                admitted_requests: 2,
+                provider_reported_tokens: 75,
+                elapsed_ms: 12,
+            },
+            0,
+        )
+        .expect("write abort report");
+
+        let report: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(path).expect("read abort report"))
+                .expect("parse abort report");
+        assert_eq!(report["live_budget"]["admitted_requests"], 2);
+        assert_eq!(report["live_budget"]["provider_reported_tokens"], 75);
+        assert!(report["evidence_note"]
+            .as_str()
+            .expect("evidence note")
+            .contains("can cost more"));
     }
 
     #[test]

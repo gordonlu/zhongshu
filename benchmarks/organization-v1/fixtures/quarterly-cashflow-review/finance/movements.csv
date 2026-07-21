@@ -1,0 +1,6 @@
+category,amount_cny,certainty
+opening_cash,1200000,confirmed
+customer_receipts,850000,forecast
+payroll,-620000,confirmed
+supplier_payments,-510000,forecast
+tax_payment,-180000,confirmed

@@ -12,7 +12,8 @@ use crate::overlay_assets::{
     OverlayAsset,
 };
 use crate::overlay_contract::{
-    parse_ui_command, AuthRequest, ChatEntry, SettingsConfig, SettingsUpdate, UiToOverlayCommand,
+    parse_ui_command, AuthRequest, ChatEntry, OrganizationTaskCommand, SettingsConfig,
+    SettingsUpdate, UiToOverlayCommand,
 };
 
 pub fn log_selected_asset(platform: &str, asset: &OverlayAsset) {
@@ -87,6 +88,8 @@ pub struct OverlayHostDiagnostics {
 pub struct IpcClones {
     pub pi: Arc<Mutex<VecDeque<String>>>,
     pub pdr: Arc<Mutex<VecDeque<String>>>,
+    pub pdo: Arc<Mutex<VecDeque<OrganizationTaskCommand>>>,
+    pub plo: Arc<Mutex<bool>>,
     pub pa: Arc<Mutex<Option<String>>>,
     pub pd: Arc<Mutex<Option<String>>>,
     pub pp: Arc<Mutex<Option<String>>>,
@@ -112,6 +115,8 @@ pub struct OverlayState {
     pub personality_selected: bool,
     pub pending_input: Arc<Mutex<VecDeque<String>>>,
     pub pending_delegate_review: Arc<Mutex<VecDeque<String>>>,
+    pub pending_delegate_organization: Arc<Mutex<VecDeque<OrganizationTaskCommand>>>,
+    pub pending_list_organization: Arc<Mutex<bool>>,
     pub pending_approve: Arc<Mutex<Option<String>>>,
     pub pending_deny: Arc<Mutex<Option<String>>>,
     pub pending_personality: Arc<Mutex<Option<String>>>,
@@ -137,6 +142,8 @@ impl OverlayState {
             personality_selected: false,
             pending_input: Default::default(),
             pending_delegate_review: Default::default(),
+            pending_delegate_organization: Default::default(),
+            pending_list_organization: Default::default(),
             pending_approve: Default::default(),
             pending_deny: Default::default(),
             pending_personality: Default::default(),
@@ -160,6 +167,8 @@ impl OverlayState {
         IpcClones {
             pi: self.pending_input.clone(),
             pdr: self.pending_delegate_review.clone(),
+            pdo: self.pending_delegate_organization.clone(),
+            plo: self.pending_list_organization.clone(),
             pa: self.pending_approve.clone(),
             pd: self.pending_deny.clone(),
             pp: self.pending_personality.clone(),
@@ -184,6 +193,15 @@ impl OverlayState {
     }
     pub fn take_delegate_review(&self) -> Option<String> {
         self.pending_delegate_review.lock().unwrap().pop_front()
+    }
+    pub fn take_delegate_organization(&self) -> Option<OrganizationTaskCommand> {
+        self.pending_delegate_organization
+            .lock()
+            .unwrap()
+            .pop_front()
+    }
+    pub fn take_list_organization(&self) -> bool {
+        std::mem::take(&mut *self.pending_list_organization.lock().unwrap())
     }
     pub fn take_approve(&self) -> Option<String> {
         self.pending_approve.lock().unwrap().take()
@@ -239,6 +257,12 @@ pub fn make_ipc_handler(clones: IpcClones) -> impl Fn(http::Request<String>) + '
         }
         UiToOverlayCommand::DelegateReview(text) => {
             clones.pdr.lock().unwrap().push_back(text);
+        }
+        UiToOverlayCommand::DelegateOrganization(task) => {
+            clones.pdo.lock().unwrap().push_back(task);
+        }
+        UiToOverlayCommand::ListOrganizationEmployees => {
+            *clones.plo.lock().unwrap() = true;
         }
         UiToOverlayCommand::Stop => {
             *clones.rs.lock().unwrap() = true;

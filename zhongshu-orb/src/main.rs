@@ -5,6 +5,7 @@ mod delegation_service;
 mod handler;
 mod hotkey;
 mod indicator;
+mod organization_service;
 #[cfg(target_os = "linux")]
 mod overlay;
 #[cfg(target_os = "macos")]
@@ -25,7 +26,8 @@ use std::time::Duration;
 use winit::event_loop::EventLoop;
 
 use zhongshu_core::agent::{
-    AgentBudget, AgentProfile, AgentRuntime, AttentionDispatcher, AttentionManager, ModelRouter,
+    AgentBudget, AgentProfile, AgentRuntime, AttentionDispatcher, AttentionManager,
+    EmployeeCapability, EmployeeRole, ModelRouter, VerificationPolicy,
 };
 use zhongshu_core::authority::{self, AuthorityGate};
 use zhongshu_core::core::{
@@ -45,6 +47,7 @@ use zhongshu_core::tool::default_registry;
 
 use app::{AgentController, AgentInbox, TaskWorkerDispatcher};
 use delegation_service::DelegationController;
+use organization_service::OrganizationController;
 
 use handler::ZhongshuApp;
 use tokio::sync::mpsc;
@@ -474,29 +477,53 @@ fn main() {
     ];
     let mut analyst_profile = AgentProfile::new(
         "analysis-employee",
-        "你是中书安排的分析员工。只读审查用户目标和当前项目，引用具体事实，提交风险与建议；不得修改文件，不得声称已经验证。",
+        "你是 review_pipeline 中的分析员工。只读审查用户目标和当前项目，引用具体事实，提交风险与建议；不得修改文件，不得运行测试或其他验证，不得声称已经验证。验证由后续测试员工负责。",
         review_tools.clone(),
         AgentBudget::assistant_default(),
-    );
+    )
+    .with_specialty(
+        EmployeeRole::architect(),
+        vec![
+            EmployeeCapability::architecture_review(),
+            EmployeeCapability::contract_review(),
+        ],
+        "只读分析与风险定位，不负责执行验证",
+    )
+    .with_verification_policy(VerificationPolicy::NotRequired);
     analyst_profile.llm_model = Some(cfg.llm.model_routing.flash_model.clone());
     let mut verifier_tools = review_tools;
     verifier_tools.extend(["shell".into(), "self_test".into()]);
     let mut verifier_profile = AgentProfile::new(
         "verification-employee",
-        "你是中书安排的验证员工。基于分析员工的报告独立复核，只读检查并运行与目标直接相关的验证；不得修改文件。没有新鲜成功证据时必须明确未验证。",
+        "你是 review_pipeline 中的测试员工。基于分析员工的报告独立复核，只读检查并运行与目标直接相关的验证；不得修改文件。没有新鲜成功证据时必须明确未验证。",
         verifier_tools,
         AgentBudget::assistant_default(),
-    );
+    )
+    .with_specialty(
+        EmployeeRole::tester(),
+        vec![
+            EmployeeCapability::test_design(),
+            EmployeeCapability::test_execution(),
+        ],
+        "独立复核与新鲜验证证据",
+    )
+    .with_verification_policy(VerificationPolicy::Required);
     verifier_profile.llm_model = Some(cfg.llm.model_routing.flash_model.clone());
     let delegation = Arc::new(DelegationController::new(
         worker_runtime.clone(),
-        analyst_profile,
-        verifier_profile,
+        analyst_profile.clone(),
+        verifier_profile.clone(),
         llm_registry.clone(),
         eb.clone(),
         response_tx.clone(),
         run_controller.clone(),
     ));
+    let mut organization_verifier_profile = verifier_profile.clone();
+    organization_verifier_profile
+        .tool_names
+        .retain(|tool| tool != "shell" && tool != "self_test");
+    organization_verifier_profile.verification_policy = VerificationPolicy::NotRequired;
+    organization_verifier_profile.specialty.focus = "只读复核；通用组织入口不运行命令验证".into();
 
     services::spawn_task_executor(
         eb.clone(),
@@ -534,6 +561,22 @@ fn main() {
     } else {
         tracing::info!(count = worker_profiles.len(), "loaded worker profiles");
     }
+    let mut organization_roster = worker_profiles.clone();
+    for built_in in [analyst_profile, organization_verifier_profile] {
+        if !organization_roster
+            .iter()
+            .any(|profile| profile.name == built_in.name)
+        {
+            organization_roster.push(built_in);
+        }
+    }
+    let organization = Arc::new(OrganizationController::new(
+        worker_runtime.clone(),
+        organization_roster,
+        eb.clone(),
+        response_tx.clone(),
+        run_controller.clone(),
+    ));
 
     let attention_mgr = AttentionManager::new((*eb).clone());
     let (digest_queue, _attention_handle) = attention_mgr.spawn();
@@ -624,6 +667,7 @@ fn main() {
         controller,
         inbox.clone(),
         delegation,
+        organization,
         eb,
         event_rx,
         response_tx,

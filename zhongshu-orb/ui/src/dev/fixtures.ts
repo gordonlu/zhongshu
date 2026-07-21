@@ -27,6 +27,22 @@ export const demoCodingEvents: OverlayToUiEvent[] = [
     event: { kind: 'plan_created', session_id: 'demo-ui', step_count: 4, risk: 'medium' },
   },
   {
+    type: 'organization',
+    event: { kind: 'task_started', task_id: 'demo-ui', manager: '中书', collaboration: 'sequential_handoff' },
+  },
+  {
+    type: 'organization',
+    event: { kind: 'employee_assigned', task_id: 'demo-ui', employee: 'analysis-employee', role: 'architect', responsibility: 'Review UI evidence', reports_to: '中书' },
+  },
+  {
+    type: 'organization',
+    event: { kind: 'employee_assigned', task_id: 'demo-ui', employee: 'verification-employee', role: 'tester', responsibility: 'Verify rendered behavior', reports_to: '中书' },
+  },
+  {
+    type: 'organization',
+    event: { kind: 'employee_working', task_id: 'demo-ui', employee: 'analysis-employee', role: 'architect' },
+  },
+  {
     type: 'coding',
     event: { kind: 'plan_step_started', session_id: 'demo-ui', step_id: '1', title: 'Define the desktop assistant visual system' },
   },
@@ -43,7 +59,7 @@ export const demoCodingEvents: OverlayToUiEvent[] = [
     event: {
       kind: 'worker_started',
       session_id: 'demo-ui',
-      worker: 'deepseek-worker',
+      worker: 'analysis-employee',
       task_id: 'ui-css-pass',
       owned_files: ['zhongshu-orb/ui/src/styles.css'],
     },
@@ -98,11 +114,31 @@ export const demoCodingEvents: OverlayToUiEvent[] = [
     event: {
       kind: 'worker_completed',
       session_id: 'demo-ui',
-      worker: 'deepseek-worker',
+      worker: 'analysis-employee',
       task_id: 'ui-css-pass',
       success: true,
       status: 'completed',
     },
+  },
+  {
+    type: 'organization',
+    event: { kind: 'employee_reported', task_id: 'demo-ui', employee: 'analysis-employee', role: 'architect', outcome: 'submitted', success: true },
+  },
+  {
+    type: 'organization',
+    event: { kind: 'handoff', task_id: 'demo-ui', from_employee: 'analysis-employee', to_employee: 'verification-employee' },
+  },
+  {
+    type: 'organization',
+    event: { kind: 'employee_working', task_id: 'demo-ui', employee: 'verification-employee', role: 'tester' },
+  },
+  {
+    type: 'organization',
+    event: { kind: 'employee_reported', task_id: 'demo-ui', employee: 'verification-employee', role: 'tester', outcome: 'completed', success: true },
+  },
+  {
+    type: 'organization',
+    event: { kind: 'manager_reviewing', task_id: 'demo-ui', manager: '中书' },
   },
   { type: 'phase_transition', from: 'implementation', to: 'verification' },
   {
@@ -112,5 +148,13 @@ export const demoCodingEvents: OverlayToUiEvent[] = [
   {
     type: 'coding',
     event: { kind: 'replay_available', conversation_id: 42, replay_execution_id: 'demo-replay' },
+  },
+  {
+    type: 'coding',
+    event: { kind: 'plan_step_completed', session_id: 'demo-ui', step_id: '2', status: 'done' },
+  },
+  {
+    type: 'organization',
+    event: { kind: 'task_finished', task_id: 'demo-ui', status: 'accepted' },
   },
 ]

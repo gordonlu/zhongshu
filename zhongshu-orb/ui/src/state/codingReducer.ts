@@ -1,4 +1,4 @@
-import type { CodingUiEvent, OverlayToUiEvent, PatchDiffPayload } from '../ipc/events'
+import type { CodingUiEvent, OrganizationUiEvent, OverlayToUiEvent, PatchDiffPayload } from '../ipc/events'
 
 export type PlanStep = {
   id: string
@@ -9,8 +9,11 @@ export type PlanStep = {
 export type WorkerState = {
   worker: string
   taskId: string
-  status: 'running' | 'submitted' | 'completed' | 'conflict'
+  status: 'assigned' | 'running' | 'reported' | 'submitted' | 'completed' | 'conflict'
   ownedFiles: string[]
+  role?: string
+  responsibility?: string
+  reportsTo?: string
   reason?: string
 }
 
@@ -54,6 +57,14 @@ export type CodingState = {
     conversationId?: number
     replayExecutionId?: string
   }
+  organization?: {
+    taskId: string
+    manager: string
+    collaboration: string
+    status: string
+    reason?: string
+    handoff?: { from: string; to: string }
+  }
 }
 
 export const initialCodingState: CodingState = {
@@ -69,6 +80,7 @@ export const initialCodingState: CodingState = {
 
 export function codingReducer(state: CodingState, event: OverlayToUiEvent): CodingState {
   if (event.type === 'coding') return reduceCodingEvent(state, event.event)
+  if (event.type === 'organization') return reduceOrganizationEvent(state, event.event)
   if (event.type === 'verification') {
     return {
       ...state,
@@ -101,6 +113,80 @@ export function codingReducer(state: CodingState, event: OverlayToUiEvent): Codi
     }
   }
   return state
+}
+
+function reduceOrganizationEvent(state: CodingState, event: OrganizationUiEvent): CodingState {
+  switch (event.kind) {
+    case 'task_started':
+      return {
+        ...state,
+        active: true,
+        sessionId: event.task_id,
+        workers: [],
+        organization: {
+          taskId: event.task_id,
+          manager: event.manager,
+          collaboration: event.collaboration,
+          status: 'staffing',
+        },
+      }
+    case 'employee_assigned':
+      return {
+        ...state,
+        active: true,
+        workers: upsertWorker(state.workers, {
+          worker: event.employee,
+          taskId: `${event.task_id}:${event.employee}`,
+          status: 'assigned',
+          ownedFiles: [],
+          role: event.role,
+          responsibility: event.responsibility,
+          reportsTo: event.reports_to,
+        }),
+      }
+    case 'employee_working':
+      return {
+        ...state,
+        active: true,
+        workers: updateOrganizationWorker(state.workers, event.employee, {
+          status: 'running',
+          role: event.role,
+        }),
+        organization: state.organization ? { ...state.organization, status: 'working' } : state.organization,
+      }
+    case 'employee_reported':
+      const reportFailed = ['failed', 'blocked', 'interrupted'].includes(event.outcome)
+      return {
+        ...state,
+        workers: updateOrganizationWorker(state.workers, event.employee, {
+          status: reportFailed ? 'conflict' : 'reported',
+          role: event.role,
+          reason: reportFailed ? event.outcome : undefined,
+        }),
+      }
+    case 'handoff':
+      return {
+        ...state,
+        organization: state.organization
+          ? { ...state.organization, status: 'handoff', handoff: { from: event.from_employee, to: event.to_employee } }
+          : state.organization,
+      }
+    case 'manager_reviewing':
+      return {
+        ...state,
+        organization: state.organization
+          ? { ...state.organization, manager: event.manager, status: 'manager_reviewing' }
+          : state.organization,
+      }
+    case 'task_finished':
+      return {
+        ...state,
+        active: false,
+        organization: state.organization
+          ? { ...state.organization, status: event.status, reason: event.reason }
+          : state.organization,
+      }
+  }
 }
 
 function reduceCodingEvent(state: CodingState, event: CodingUiEvent): CodingState {
@@ -260,9 +346,17 @@ function stepTitle(steps: PlanStep[], stepId: string): string {
 }
 
 function upsertWorker(workers: WorkerState[], next: WorkerState): WorkerState[] {
-  const index = workers.findIndex((worker) => worker.taskId === next.taskId)
+  const index = workers.findIndex((worker) => worker.taskId === next.taskId || worker.worker === next.worker)
   if (index < 0) return [...workers, next]
   return workers.map((worker, itemIndex) => (itemIndex === index ? { ...worker, ...next } : worker))
+}
+
+function updateOrganizationWorker(
+  workers: WorkerState[],
+  employee: string,
+  patch: Partial<WorkerState>,
+): WorkerState[] {
+  return workers.map((worker) => (worker.worker === employee ? { ...worker, ...patch } : worker))
 }
 
 function updateWorker(

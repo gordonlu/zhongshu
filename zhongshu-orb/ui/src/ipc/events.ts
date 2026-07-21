@@ -63,6 +63,24 @@ export type CodingUiEvent =
   | { kind: 'context_included'; description: string; estimated_tokens: number }
   | { kind: 'replay_available'; conversation_id?: number; replay_execution_id?: string }
 
+export type OrganizationUiEvent =
+  | { kind: 'task_started'; task_id: string; manager: string; collaboration: string }
+  | { kind: 'employee_assigned'; task_id: string; employee: string; role: string; responsibility: string; reports_to: string }
+  | { kind: 'employee_working'; task_id: string; employee: string; role: string }
+  | { kind: 'employee_reported'; task_id: string; employee: string; role: string; outcome: string; success: boolean }
+  | { kind: 'handoff'; task_id: string; from_employee: string; to_employee: string }
+  | { kind: 'manager_reviewing'; task_id: string; manager: string }
+  | { kind: 'task_finished'; task_id: string; status: string; reason?: string }
+
+export type OrganizationEmployeeInfo = {
+  name: string
+  role: string
+  capabilities: string[]
+  focus: string
+  read_only_eligible: boolean
+  blocked_by?: string
+}
+
 export type OverlayToUiEvent =
   | { type: 'user_message'; content: string }
   | { type: 'stop' }
@@ -82,6 +100,8 @@ export type OverlayToUiEvent =
   | { type: 'mode_change'; mode: string }
   | { type: 'zoom'; active: boolean }
   | { type: 'coding'; event: CodingUiEvent }
+  | { type: 'organization'; event: OrganizationUiEvent }
+  | { type: 'organization_roster'; employees: OrganizationEmployeeInfo[]; max_workers: number }
   | { type: 'verification'; command: string; success: boolean; exit_code?: number; step?: string }
   | { type: 'recovery_feedback'; rule_id: string; message: string }
   | { type: 'phase_transition'; from: string; to: string }

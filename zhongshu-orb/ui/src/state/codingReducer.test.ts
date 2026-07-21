@@ -130,4 +130,29 @@ describe('codingReducer', () => {
     expect(next.verifications).toEqual([])
     expect(next.recoveryMessages).toEqual([])
   })
+
+  it('tracks organization staffing, handoff, manager review, and terminal state', () => {
+    const events: OverlayToUiEvent[] = [
+      { type: 'organization', event: { kind: 'task_started', task_id: 'org-1', manager: '中书', collaboration: 'sequential_handoff' } },
+      { type: 'organization', event: { kind: 'employee_assigned', task_id: 'org-1', employee: 'analyst', role: 'architect', responsibility: 'review', reports_to: '中书' } },
+      { type: 'organization', event: { kind: 'employee_assigned', task_id: 'org-1', employee: 'verifier', role: 'tester', responsibility: 'verify', reports_to: '中书' } },
+      { type: 'organization', event: { kind: 'employee_working', task_id: 'org-1', employee: 'analyst', role: 'architect' } },
+      { type: 'organization', event: { kind: 'employee_reported', task_id: 'org-1', employee: 'analyst', role: 'architect', outcome: 'submitted', success: true } },
+      { type: 'organization', event: { kind: 'handoff', task_id: 'org-1', from_employee: 'analyst', to_employee: 'verifier' } },
+      { type: 'organization', event: { kind: 'manager_reviewing', task_id: 'org-1', manager: '中书' } },
+      { type: 'organization', event: { kind: 'task_finished', task_id: 'org-1', status: 'accepted' } },
+    ]
+
+    const state = events.reduce(codingReducer, initialCodingState)
+
+    expect(state.active).toBe(false)
+    expect(state.organization).toMatchObject({
+      taskId: 'org-1',
+      manager: '中书',
+      status: 'accepted',
+      handoff: { from: 'analyst', to: 'verifier' },
+    })
+    expect(state.workers).toHaveLength(2)
+    expect(state.workers[0]).toMatchObject({ worker: 'analyst', role: 'architect', status: 'reported' })
+  })
 })

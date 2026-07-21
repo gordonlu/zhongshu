@@ -4,7 +4,7 @@ use crate::agent::contract::{
     WorkerOutcome,
 };
 use crate::agent::llm::{LlmProvider, Message};
-use crate::agent::loop_::{run_agent, AgentCallbacks};
+use crate::agent::loop_::{run_agent_with_verification_policy, AgentCallbacks};
 use crate::agent::profile::AgentProfile;
 use crate::agent::report::Report;
 use crate::agent::runtime::AgentRuntime;
@@ -110,12 +110,13 @@ impl Worker {
             )),
         ];
 
-        let result = run_agent(
+        let result = run_agent_with_verification_policy(
             &mut scoped_runtime,
             messages,
             callbacks,
             &task.source,
             CancellationToken::new(),
+            profile.verification_policy.explicit_requirement(),
         )
         .await?;
 

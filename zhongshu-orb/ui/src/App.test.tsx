@@ -194,6 +194,65 @@ describe('App IPC interactions', () => {
     })
   })
 
+  it('builds a bounded read-only organization task from the configured roster', async () => {
+    const postMessage = installWebViewHost()
+    const { App } = await import('./App')
+
+    render(<App />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Coding' }))
+    const composer = screen.getByPlaceholderText('Describe the task or review request...')
+    fireEvent.change(composer, { target: { value: 'review quarterly cash flow' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Build an organization team' }))
+    expect(JSON.parse(postMessage.mock.calls.at(-1)?.[0] ?? '{}')).toEqual({
+      type: 'list_organization_employees',
+    })
+
+    act(() => {
+      window.handleIpc?.({
+        type: 'organization_roster',
+        max_workers: 3,
+        employees: [
+          {
+            name: 'accountant',
+            role: 'management_accountant',
+            capabilities: ['cash_flow_forecasting'],
+            focus: 'cash flow',
+            read_only_eligible: true,
+          },
+          {
+            name: 'unsafe-editor',
+            role: 'writer',
+            capabilities: [],
+            focus: 'copy',
+            read_only_eligible: false,
+            blocked_by: 'edit',
+          },
+        ],
+      })
+    })
+
+    expect(screen.getByRole('dialog', { name: 'Build organization team' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /unsafe-editor/ })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: /accountant/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Assign task' }))
+
+    expect(JSON.parse(postMessage.mock.calls.at(-1)?.[0] ?? '{}')).toEqual({
+      type: 'delegate_organization',
+      task: {
+        objective: 'review quarterly cash flow',
+        requirements: [{
+          role: 'management_accountant',
+          capabilities: ['cash_flow_forecasting'],
+          responsibility: '负责目标中与 management_accountant 相关的工作',
+          required: true,
+        }],
+        sequential_handoff: false,
+        max_workers: 1,
+      },
+    })
+  })
+
   it('closes modal surfaces before hiding the overlay on Escape', async () => {
     const postMessage = installWebViewHost()
     const { App } = await import('./App')

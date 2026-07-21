@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use zhongshu_core::event::OrganizationEvent;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PatchDiffPayload {
@@ -95,6 +96,42 @@ pub struct SettingsUpdate {
     pub mode: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OrganizationEmployeeInfo {
+    pub name: String,
+    pub role: String,
+    pub capabilities: Vec<String>,
+    pub focus: String,
+    pub read_only_eligible: bool,
+    pub blocked_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OrganizationRoleCommand {
+    pub role: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    pub responsibility: String,
+    #[serde(default = "default_true")]
+    pub required: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OrganizationTaskCommand {
+    pub objective: String,
+    pub requirements: Vec<OrganizationRoleCommand>,
+    #[serde(default)]
+    pub sequential_handoff: bool,
+    pub max_workers: Option<usize>,
+    pub target_employee: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OverlayToUiEvent {
@@ -146,6 +183,13 @@ pub enum OverlayToUiEvent {
     },
     Coding {
         event: CodingUiEvent,
+    },
+    Organization {
+        event: OrganizationEvent,
+    },
+    OrganizationRoster {
+        employees: Vec<OrganizationEmployeeInfo>,
+        max_workers: usize,
     },
     Verification {
         command: String,
@@ -241,6 +285,8 @@ pub enum CodingUiEvent {
 pub enum UiToOverlayCommand {
     Submit(String),
     DelegateReview(String),
+    DelegateOrganization(OrganizationTaskCommand),
+    ListOrganizationEmployees,
     Stop,
     NewConversation,
     Approve(String),
@@ -347,6 +393,14 @@ pub fn parse_ui_command(body: &str) -> UiToOverlayCommand {
             .filter(|text| !text.trim().is_empty())
             .map(|text| UiToOverlayCommand::DelegateReview(text.to_string()))
             .unwrap_or(UiToOverlayCommand::Unknown),
+        Some("delegate_organization") => serde_json::from_value::<OrganizationTaskCommand>(
+            msg.get("task").cloned().unwrap_or(serde_json::Value::Null),
+        )
+        .ok()
+        .filter(valid_organization_task)
+        .map(UiToOverlayCommand::DelegateOrganization)
+        .unwrap_or(UiToOverlayCommand::Unknown),
+        Some("list_organization_employees") => UiToOverlayCommand::ListOrganizationEmployees,
         Some("stop") => UiToOverlayCommand::Stop,
         Some("new_conversation") => UiToOverlayCommand::NewConversation,
         Some("approve") => {
@@ -390,6 +444,30 @@ pub fn parse_ui_command(body: &str) -> UiToOverlayCommand {
             .unwrap_or(UiToOverlayCommand::Unknown),
         _ => UiToOverlayCommand::Unknown,
     }
+}
+
+fn valid_organization_task(task: &OrganizationTaskCommand) -> bool {
+    let worker_limit_valid = match task.max_workers {
+        Some(limit) => limit > 0 && limit <= zhongshu_core::agent::DEFAULT_MAX_WORKERS_PER_TASK,
+        None => true,
+    };
+    let target_valid = match task.target_employee.as_deref() {
+        Some(employee) => !employee.trim().is_empty() && task.requirements.len() == 1,
+        None => true,
+    };
+    !task.objective.trim().is_empty()
+        && !task.requirements.is_empty()
+        && task.requirements.len() <= zhongshu_core::agent::DEFAULT_MAX_WORKERS_PER_TASK
+        && worker_limit_valid
+        && task.requirements.iter().all(|requirement| {
+            !requirement.role.trim().is_empty()
+                && !requirement.responsibility.trim().is_empty()
+                && requirement
+                    .capabilities
+                    .iter()
+                    .all(|capability| !capability.trim().is_empty())
+        })
+        && target_valid
 }
 
 fn settings_from_value(value: &serde_json::Value) -> Option<SettingsUpdate> {
@@ -455,6 +533,27 @@ mod tests {
     }
 
     #[test]
+    fn parses_bounded_structured_organization_command() {
+        let command = parse_ui_command(
+            r#"{"type":"delegate_organization","task":{"objective":"review cash flow","requirements":[{"role":"management_accountant","capabilities":["cash_flow_forecasting"],"responsibility":"prepare forecast","required":true}],"sequential_handoff":false,"max_workers":1}}"#,
+        );
+
+        let UiToOverlayCommand::DelegateOrganization(task) = command else {
+            panic!("expected organization command");
+        };
+        assert_eq!(task.objective, "review cash flow");
+        assert_eq!(task.requirements[0].role, "management_accountant");
+        assert_eq!(task.max_workers, Some(1));
+
+        assert_eq!(
+            parse_ui_command(
+                r#"{"type":"delegate_organization","task":{"objective":"too many","requirements":[{"role":"a","responsibility":"a"},{"role":"b","responsibility":"b"},{"role":"c","responsibility":"c"},{"role":"d","responsibility":"d"}],"sequential_handoff":false}}"#,
+            ),
+            UiToOverlayCommand::Unknown
+        );
+    }
+
+    #[test]
     fn parses_settings_command() {
         let cmd = parse_ui_command(
             r#"{"type":"save_settings","config":{"api_base":"https://example.test","model":"m","mode":"coding","max_context_tokens":100000}}"#,
@@ -509,5 +608,24 @@ mod tests {
                 UiToOverlayCommand::StartDrag,
             ]
         );
+    }
+
+    #[test]
+    fn organization_event_serializes_with_stable_ipc_tags() {
+        let event = OverlayToUiEvent::Organization {
+            event: OrganizationEvent::EmployeeAssigned {
+                task_id: "org-1".into(),
+                employee: "analyst".into(),
+                role: "architect".into(),
+                responsibility: "review".into(),
+                reports_to: "中书".into(),
+            },
+        };
+
+        let json = serde_json::to_value(event).expect("organization event json");
+        assert_eq!(json["type"], "organization");
+        assert_eq!(json["event"]["kind"], "employee_assigned");
+        assert_eq!(json["event"]["role"], "architect");
+        assert_eq!(json["event"]["reports_to"], "中书");
     }
 }

@@ -12,5 +12,18 @@ describe('validateCommand', () => {
     expect(validateCommand({ type: 'toggle_zoom' })).toBe(true)
     expect(validateCommand({ type: 'start_drag' })).toBe(true)
     expect(validateCommand({ type: 'delegate_review', text: 'review this' })).toBe(true)
+    expect(validateCommand({
+      type: 'delegate_organization',
+      task: {
+        objective: 'review cash flow',
+        requirements: [{
+          role: 'management_accountant',
+          capabilities: ['cash_flow_forecasting'],
+          responsibility: 'prepare forecast',
+          required: true,
+        }],
+        sequential_handoff: false,
+      },
+    })).toBe(true)
   })
 })

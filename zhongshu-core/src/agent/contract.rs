@@ -244,6 +244,10 @@ impl From<&DelegationContract> for AgentProfile {
             .cloned()
             .collect();
 
+        // Contract acceptance is a parent-side gate: a worker may submit an
+        // unverified report for a later verifier. Do not infer runtime
+        // verification ownership from `verification_required`; specialized
+        // workflows must set AgentProfile.verification_policy explicitly.
         AgentProfile::new(
             &contract.worker,
             format!("你是一个 AI 助手，任务是：{}", contract.task_description),

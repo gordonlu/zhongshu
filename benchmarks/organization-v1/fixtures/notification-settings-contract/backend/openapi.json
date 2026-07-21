@@ -1,0 +1,10 @@
+{
+  "path": "/api/settings/notifications",
+  "get_response": {
+    "email_enabled": true
+  },
+  "put_request": {
+    "email_enabled": "boolean"
+  },
+  "supported_channels": ["email"]
+}

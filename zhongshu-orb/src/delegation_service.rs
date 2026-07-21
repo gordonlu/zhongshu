@@ -12,7 +12,7 @@ use zhongshu_core::event::{
 
 use crate::app::publish_harness_events;
 
-/// Production entrypoint for the first bounded multi-agent workflow:
+/// Production entrypoint for the dedicated bounded review pipeline:
 /// one low-cost analyst hands a report to one low-cost verifier, then the
 /// primary model summarizes while deterministic evidence rules decide whether
 /// the Lead may accept the result.
@@ -26,6 +26,7 @@ pub struct DelegationController {
     run_controller: Arc<RunController>,
     busy: Arc<AtomicBool>,
     current_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    current_session: Arc<Mutex<Option<String>>>,
 }
 
 impl DelegationController {
@@ -48,6 +49,7 @@ impl DelegationController {
             run_controller,
             busy: Arc::new(AtomicBool::new(false)),
             current_task: Arc::new(Mutex::new(None)),
+            current_session: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -72,7 +74,9 @@ impl DelegationController {
         let response_tx = self.response_tx.clone();
         let busy = self.busy.clone();
         let current_task = self.current_task.clone();
+        let current_session = self.current_session.clone();
         let session_id = format!("delegation-{}", uuid::Uuid::new_v4());
+        *current_session.lock().unwrap() = Some(session_id.clone());
         let run_id = self.run_controller.start_run(&goal);
         let run_controller = self.run_controller.clone();
         let (start_tx, start_rx) = tokio::sync::oneshot::channel();
@@ -91,8 +95,15 @@ impl DelegationController {
             let _ = start_rx.await;
             let runtime = runtime.read().await.clone();
             let orchestrator = Orchestrator::new(runtime, LlmRegistry::new());
+            let organization_bus = event_bus.clone();
             let result = orchestrator
-                .execute_review_handoff(&goal, analyst_profile, verifier_profile, &session_id)
+                .execute_review_pipeline_with_events(
+                    &goal,
+                    analyst_profile,
+                    verifier_profile,
+                    &session_id,
+                    move |event| organization_bus.publish(Event::Organization(event)),
+                )
                 .await;
 
             let (message, final_state) = match result {
@@ -147,6 +158,7 @@ impl DelegationController {
                 })
                 .await;
             current_task.lock().unwrap().take();
+            current_session.lock().unwrap().take();
             // Clear the stored handle before reopening admission. Otherwise a
             // new submission can install its handle in the small window
             // between these operations and this completed task would remove it.
@@ -162,6 +174,15 @@ impl DelegationController {
             return false;
         };
         handle.abort();
+        if let Some(task_id) = self.current_session.lock().unwrap().take() {
+            self.event_bus.publish(Event::Organization(
+                zhongshu_core::event::OrganizationEvent::TaskFinished {
+                    task_id,
+                    status: "cancelled".into(),
+                    reason: Some("cancelled by user".into()),
+                },
+            ));
+        }
         self.busy.store(false, Ordering::Release);
         let run_controller = self.run_controller.clone();
         tokio::spawn(async move {
@@ -216,7 +237,11 @@ fn deterministic_summary(report: &zhongshu_core::agent::LeadReviewReport) -> Str
     text
 }
 
-async fn emit_assistant_message(response_tx: &ResponseTx, run_id: uuid::Uuid, message: &str) {
+pub(crate) async fn emit_assistant_message(
+    response_tx: &ResponseTx,
+    run_id: uuid::Uuid,
+    message: &str,
+) {
     let id = MessageId::new();
     if response_tx
         .send(ResponseEvent::MessageStarted {
@@ -268,6 +293,7 @@ mod tests {
     fn deterministic_summary_keeps_acceptance_reasons_visible() {
         let report = LeadReviewReport {
             status: WorkerExecutionStatus::Submitted,
+            recovery: zhongshu_core::agent::ReviewPipelineRecovery::NotNeeded,
             analyst: report("analyst", RunOutcome::CompletedUnverified, "found issue"),
             verifier: report("verifier", RunOutcome::CompletedUnverified, "no tests"),
             acceptance_reasons: vec!["missing verification".into()],

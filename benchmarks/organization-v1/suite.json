@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "id": "organization-v1",
+  "cases": [
+    {
+      "id": "notification-settings-contract",
+      "fixture": "fixtures/notification-settings-contract",
+      "request": {
+        "objective": "Align the notification settings API, React panel, and user-facing copy without adding unsupported product claims.",
+        "requirements": [
+          {
+            "role": "backend",
+            "capabilities": ["api_implementation", "contract_review"],
+            "responsibility": "Define the canonical notification settings API contract.",
+            "required": true
+          },
+          {
+            "role": "frontend",
+            "capabilities": ["ui_implementation"],
+            "responsibility": "Align the React panel and request payload with the canonical API contract.",
+            "required": true
+          },
+          {
+            "role": "writer",
+            "capabilities": ["product_copy"],
+            "responsibility": "Align labels and help copy with capabilities actually supported by the contract.",
+            "required": true
+          }
+        ],
+        "max_workers": 3
+      },
+      "expected_mode": "multi_specialist",
+      "expected_roles": ["backend", "frontend", "writer"],
+      "forbidden_roles": ["tester", "architect"]
+    },
+    {
+      "id": "quarterly-cashflow-review",
+      "fixture": "fixtures/quarterly-cashflow-review",
+      "request": {
+        "objective": "Prepare a quarterly cash-flow forecast and check it against the company's liquidity policy.",
+        "requirements": [
+          {
+            "role": "management_accountant",
+            "capabilities": ["cash_flow_forecasting", "variance_analysis"],
+            "responsibility": "Build the forecast and explain material movements.",
+            "required": true
+          },
+          {
+            "role": "treasury_reviewer",
+            "capabilities": ["liquidity_policy_review"],
+            "responsibility": "Check the forecast against the liquidity floor and escalation policy.",
+            "required": true
+          }
+        ],
+        "max_workers": 2
+      },
+      "expected_mode": "multi_specialist",
+      "expected_roles": ["management_accountant", "treasury_reviewer"],
+      "forbidden_roles": ["frontend", "backend", "writer", "customer_support"]
+    }
+  ]
+}

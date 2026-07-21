@@ -1,6 +1,7 @@
 import { type MouseEvent, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import {
   BookOpen,
+  Building2,
   CheckCircle2,
   CircleStop,
   ClipboardList,
@@ -20,7 +21,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { createIpcBridge } from './ipc/bridge'
-import type { AuthRequest, OverlayToUiEvent, SettingsConfig } from './ipc/events'
+import type { AuthRequest, OrganizationEmployeeInfo, OverlayToUiEvent, SettingsConfig } from './ipc/events'
 import { chatReducer, initialChatState } from './state/chatReducer'
 import { codingReducer, initialCodingState } from './state/codingReducer'
 import { ChatStream } from './components/chat/ChatStream'
@@ -29,6 +30,7 @@ import { CodingWorkbench } from './components/coding/CodingWorkbench'
 import { ApprovalBar } from './components/ApprovalBar'
 import { SettingsDialog } from './components/settings/SettingsDialog'
 import { ResourceDialog } from './components/resources/ResourceDialog'
+import { OrganizationDialog } from './components/organization/OrganizationDialog'
 import { demoCodingEvents } from './dev/fixtures'
 
 const bridge = createIpcBridge()
@@ -53,6 +55,12 @@ type ResourceDialogState = {
   items: unknown[]
 }
 
+type OrganizationDialogState = {
+  objective: string
+  employees: OrganizationEmployeeInfo[]
+  maxWorkers: number
+}
+
 export function App() {
   const [chatState, dispatchChat] = useReducer(chatReducer, initialChatState)
   const [codingState, dispatchCoding] = useReducer(codingReducer, initialCodingState)
@@ -60,6 +68,7 @@ export function App() {
   const [authRequest, setAuthRequest] = useState<AuthRequest | null>(null)
   const [settingsConfig, setSettingsConfig] = useState<SettingsConfig | null>(null)
   const [resourceDialog, setResourceDialog] = useState<ResourceDialogState | null>(null)
+  const [organizationDialog, setOrganizationDialog] = useState<OrganizationDialogState | null>(null)
   const [workbenchOpen, setWorkbenchOpen] = useState(true)
   const [zoomActive, setZoomActive] = useState(false)
   const [isMaximized, setIsMaximized] = useState(false)
@@ -72,6 +81,7 @@ export function App() {
   const optimisticUserMessages = useRef<string[]>([])
   const pendingDelta = useRef('')
   const pendingDeltaFrame = useRef<number | null>(null)
+  const pendingOrganizationObjective = useRef<string | null>(null)
 
   const focusComposer = () => {
     composerRef.current?.focus({ preventScroll: true })
@@ -122,6 +132,15 @@ export function App() {
         setResourceDialog({ kind: 'runbooks', items: event.runbooks })
       } else if (event.type === 'equipment') {
         setResourceDialog({ kind: 'equipment', items: event.items })
+      } else if (event.type === 'organization_roster') {
+        const objective = pendingOrganizationObjective.current
+        if (objective) {
+          setOrganizationDialog({
+            objective,
+            employees: event.employees,
+            maxWorkers: event.max_workers,
+          })
+        }
       } else if (event.type === 'toast') {
         setToast(event.text)
       } else if (event.type === 'zoom') {
@@ -184,6 +203,12 @@ export function App() {
         focusComposer()
         return
       }
+      if (organizationDialog) {
+        setOrganizationDialog(null)
+        pendingOrganizationObjective.current = null
+        focusComposer()
+        return
+      }
       if (showPersonality) {
         setShowPersonality(false)
         focusComposer()
@@ -194,7 +219,7 @@ export function App() {
 
     document.addEventListener('keydown', handleEscape)
     return () => document.removeEventListener('keydown', handleEscape)
-  }, [resourceDialog, settingsConfig, showPersonality])
+  }, [organizationDialog, resourceDialog, settingsConfig, showPersonality])
 
   const isCodingMode = mode === 'coding' || codingState.active
   const submitComposer = (delegateReview = false) => {
@@ -215,9 +240,15 @@ export function App() {
   const statusText = useMemo(() => {
     if (authRequest) return `Approval: ${authRequest.tool}`
     if (codingState.verifications.some((item) => !item.success)) return 'Verification failed'
+    if (codingState.organization?.status === 'manager_reviewing') return 'Manager reviewing'
+    if (codingState.organization?.status === 'accepted') return 'Organization task accepted'
+    if (codingState.organization?.status === 'submitted') return 'Organization task submitted'
+    if (['blocked', 'worker_failed', 'review_findings', 'cancelled'].includes(codingState.organization?.status ?? '')) {
+      return `Organization task ${codingState.organization?.status.replaceAll('_', ' ')}`
+    }
     if (codingState.active) return 'Coding task running'
     return chatState.runtimeState
-  }, [authRequest, chatState.runtimeState, codingState.active, codingState.verifications])
+  }, [authRequest, chatState.runtimeState, codingState.active, codingState.organization?.status, codingState.verifications])
 
   return (
   <>
@@ -263,6 +294,22 @@ export function App() {
           <span>{statusText}</span>
         </div>
         <div className="titlebar-actions">
+          {isCodingMode ? (
+            <button
+              type="button"
+              className="icon-button optional-title-action"
+              aria-label="Build an organization team"
+              data-tooltip-dir="below"
+              data-tooltip="Build a team"
+              disabled={!composerText.trim()}
+              onClick={() => {
+                pendingOrganizationObjective.current = composerText.trim()
+                bridge.send({ type: 'list_organization_employees' })
+              }}
+            >
+              <Building2 size={iconSize} />
+            </button>
+          ) : null}
           {isCodingMode ? (
             <button
               type="button"
@@ -479,6 +526,42 @@ export function App() {
           onToggleEquipment={(id) => bridge.send({ type: 'toggle_equipment', id })}
           onCancelTask={(task_id) => bridge.send({ type: 'cancel_task', task_id })}
           onCompleteTask={(task_id) => bridge.send({ type: 'complete_task', task_id })}
+        />
+      ) : null}
+
+      {organizationDialog ? (
+        <OrganizationDialog
+          objective={organizationDialog.objective}
+          employees={organizationDialog.employees}
+          maxWorkers={organizationDialog.maxWorkers}
+          onClose={() => {
+            setOrganizationDialog(null)
+            pendingOrganizationObjective.current = null
+            focusComposer()
+          }}
+          onSubmit={(employees, sequentialHandoff) => {
+            const objective = organizationDialog.objective
+            optimisticUserMessages.current.push(objective)
+            dispatchChat({ type: 'user_message', content: objective })
+            bridge.send({
+              type: 'delegate_organization',
+              task: {
+                objective,
+                requirements: employees.map((employee) => ({
+                  role: employee.role,
+                  capabilities: employee.capabilities,
+                  responsibility: `负责目标中与 ${employee.role} 相关的工作`,
+                  required: true,
+                })),
+                sequential_handoff: sequentialHandoff,
+                max_workers: employees.length,
+              },
+            })
+            setComposerText('')
+            setOrganizationDialog(null)
+            pendingOrganizationObjective.current = null
+            focusComposer()
+          }}
         />
       ) : null}
 

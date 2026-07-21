@@ -21,11 +21,22 @@ names:
 cargo xtask benchmark \
   --suite benchmarks/review-v1/suite.json \
   --live \
-  --repeats 3 \
+  --repeats 1 \
+  --case completion-admission-race \
+  --variant single_flash \
   --flash-model YOUR_FLASH_MODEL \
   --pro-model YOUR_PRO_MODEL \
-  --output .roadmap/project-review-2026-07-17/benchmarks/run-001
+  --output .roadmap/project-review-2026-07-17/benchmarks/canary-001
 ```
+
+Live mode is currently canary-only: it requires `--case`, `--variant`, and
+`--repeats 1`. A single invocation is capped across Lead and workers at 12
+provider requests, 40,000 provider-reported tokens, and 180 seconds. Override
+these downward or, after an explicit cost review, upward with
+`--max-requests`, `--max-tokens`, and `--max-elapsed-secs`.
+Each non-streaming request also has its output-token parameter clamped to the
+remaining provider-reported budget. Streaming is rejected before a provider
+call because this runner cannot account its usage safely.
 
 Do not begin with the full matrix. Run one cheap canary first:
 
@@ -37,11 +48,15 @@ cargo xtask benchmark \
   --variant single_flash \
   --flash-model YOUR_FLASH_MODEL \
   --pro-model YOUR_PRO_MODEL \
+  --max-requests 8 \
+  --max-tokens 25000 \
+  --max-elapsed-secs 120 \
   --output .roadmap/project-review-2026-07-17/benchmarks/canary-001
 ```
 
 Valid variants are `single_flash`, `single_pro`, and `lead_two_workers`.
-Omitting `--case` or `--variant` expands that dimension to the full suite.
+Omitting `--case` or `--variant` expands that dimension only for dry-run;
+live matrix execution is rejected by the safety gate.
 
 Lead and workers may use different OpenAI-compatible providers:
 
@@ -80,6 +95,13 @@ only the exact fixture paths `./Cargo.toml` and `./src/lib.rs`. The exposed
 `cargo test` call; it cannot interpret shell syntax, change cwd, or create
 helper scripts.
 
+If a live trial aborts, the runner writes `aborted.json` in the selected output
+directory before returning an error. It records the invocation-wide request
+admissions, provider-reported tokens, elapsed time, failed case/variant, and the
+error. Its token count is intentionally qualified: an interrupted response or a
+response without usable `usage` metadata may have incurred additional provider
+cost that the runner cannot measure.
+
 Result schema v2 reports four dimensions separately:
 
 - `content_rubric_passed`: the smoke-grade keyword rubric passed. For
@@ -94,3 +116,8 @@ Result schema v2 reports four dimensions separately:
 and tool-policy compliance. Recovery is reported without rewriting a real
 `WorkerFailed` status as success. The keyword rubric is not a substitute for
 blinded quality review.
+
+`lead_two_workers` specifically benchmarks the dedicated `review_pipeline`.
+It is not the general multi-employee organization benchmark. Role staffing is
+covered offline in `../organization-v1` until its execution and handoff gates
+are qualified without provider calls.

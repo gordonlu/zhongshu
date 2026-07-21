@@ -13,13 +13,18 @@ export function CodingWorkbench({ state }: { state: CodingState }) {
   const visibleChanges = latestItems(state.changes)
   const visibleVerifications = latestItems(state.verifications)
   const visibleRecovery = latestItems(state.recoveryMessages)
+  const runStatus = state.active
+    ? 'In progress'
+    : state.organization?.status
+      ? state.organization.status.replaceAll('_', ' ')
+      : 'Standby'
 
   return (
     <aside className="workbench" aria-label="Coding workbench">
       <header className="workbench-header">
         <div>
           <span>Agent run</span>
-          <strong>{state.active ? 'In progress' : 'Standby'}</strong>
+          <strong>{runStatus}</strong>
         </div>
         <div className="workbench-metrics" aria-label="Run metrics">
           <span>{state.steps.length} steps</span>
@@ -29,6 +34,23 @@ export function CodingWorkbench({ state }: { state: CodingState }) {
       </header>
 
       <RunSummary state={state} />
+
+      <section className="workbench-section organization-section">
+        <div className="section-heading">
+          <h2>Organization</h2>
+          <span>{state.organization?.status ?? 'standby'}</span>
+        </div>
+        {state.organization ? (
+          <div className="organization-card">
+            <div><span>Manager</span><strong>{state.organization.manager}</strong></div>
+            <div><span>Flow</span><strong>{state.organization.collaboration.replaceAll('_', ' ')}</strong></div>
+            {state.organization.handoff ? (
+              <p>{state.organization.handoff.from} → {state.organization.handoff.to}</p>
+            ) : null}
+            {state.organization.reason ? <p className="organization-reason">{state.organization.reason}</p> : null}
+          </div>
+        ) : <p className="muted">No organization task.</p>}
+      </section>
 
       <section className="workbench-section">
         <div className="section-heading">
@@ -55,7 +77,7 @@ export function CodingWorkbench({ state }: { state: CodingState }) {
         {visibleWorkers.map((worker) => (
           <div key={worker.taskId} className={`workbench-row ${worker.status}`}>
             <span title={worker.reason ?? worker.ownedFiles.join(', ')}>
-              {worker.worker}
+              {worker.worker}{worker.role ? ` · ${worker.role}` : ''}
               {worker.reason ? ` - ${worker.reason}` : ''}
             </span>
             <strong>{worker.status}</strong>

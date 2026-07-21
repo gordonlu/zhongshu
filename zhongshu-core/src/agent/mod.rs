@@ -8,6 +8,7 @@ pub mod llm;
 pub mod llm_registry;
 pub mod loop_;
 pub mod orchestrator;
+pub mod organization;
 pub mod profile;
 pub mod report;
 pub mod router;
@@ -19,17 +20,29 @@ pub use attention::AttentionLevel;
 pub use attention_manager::AttentionManager;
 pub use dispatcher::AttentionDispatcher;
 pub use loop_::{
-    run_agent, run_agent_with_context, AgentBudget, AgentCallbacks, LoopResult, RunOutcome,
-    StopReason,
+    run_agent, run_agent_with_context, run_agent_with_verification_policy, AgentBudget,
+    AgentCallbacks, LoopResult, RunOutcome, StopReason,
 };
 pub use orchestrator::{
-    AssignmentFileOverlap, Conflict, FileClaimCoordinator, LeadReviewReport, Orchestrator,
-    OwnershipViolation, WorkerAssignment, WorkerExecutionReport, WorkerExecutionStatus,
-    WorkerFileClaim, WorkerFileClaimConflict, WorkerFileClaimReleaseFailure, WorkerFileClaimReport,
+    AssignmentFileOverlap, Conflict, EmployeeWorkReport, FileClaimCoordinator, LeadReviewReport,
+    ManagerAcceptanceReport, ManagerAcceptanceStatus, Orchestrator, OrganizationExecutionReport,
+    OrganizationExecutionStatus, OrganizationFileScope, OrganizationMutationReport,
+    OwnershipViolation, PatchProposalSubmission, ReviewPipelineRecovery, StaffedTask,
+    WorkerAssignment, WorkerExecutionReport, WorkerExecutionStatus, WorkerFileClaim,
+    WorkerFileClaimConflict, WorkerFileClaimReleaseFailure, WorkerFileClaimReport,
     WorkerMergeReview, WorkerMergeStatus, WorkerPatchApplyFailure, WorkerPatchApplyReport,
     WorkerPatchDecision, WorkerPatchPipelineReport, WorkerPatchPipelineStatus, WorkerPatchProposal,
+    SUBMIT_PATCH_PROPOSAL_TOOL,
 };
-pub use profile::AgentProfile;
+pub use organization::{
+    AssignmentAuthority, CollaborationMode, DispatchTarget, EmployeeAssignment, OrganizationRouter,
+    OrganizationTaskRequest, RoleRequirement, StaffingDecision, StaffingMode, StaffingPolicy,
+    StaffingRequest, UnfilledRequirement, DEFAULT_MAX_EMPLOYEE_ROSTER,
+    DEFAULT_MAX_WORKERS_PER_TASK,
+};
+pub use profile::{
+    AgentProfile, EmployeeCapability, EmployeeRole, EmployeeSpecialty, VerificationPolicy,
+};
 pub use report::Report;
 pub use router::{Complexity, ModelRouter};
 pub use runtime::AgentRuntime;

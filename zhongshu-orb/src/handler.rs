@@ -22,6 +22,7 @@ use crate::config::AppConfig;
 use crate::delegation_service::DelegationController;
 use crate::hotkey::HotkeyManager;
 use crate::indicator::Indicator;
+use crate::organization_service::OrganizationController;
 use uuid::Uuid;
 
 use crate::overlay::{AuthRequest, OverlayHandle};
@@ -51,6 +52,7 @@ pub struct ZhongshuApp {
     pub runtime: tokio::runtime::Runtime,
     pub inbox: Arc<AgentInbox>,
     pub delegation: Arc<DelegationController>,
+    pub organization: Arc<OrganizationController>,
     pub indicator: Option<Indicator>,
     pub indicator_state: AgentState,
     pub overlay: Option<OverlayHandle>,
@@ -92,6 +94,7 @@ impl ZhongshuApp {
         controller: Arc<AgentController>,
         inbox: Arc<AgentInbox>,
         delegation: Arc<DelegationController>,
+        organization: Arc<OrganizationController>,
         event_bus: Arc<EventBus>,
         event_rx: EventRx,
         response_tx: ResponseTx,
@@ -116,6 +119,7 @@ impl ZhongshuApp {
             controller,
             inbox,
             delegation,
+            organization,
             indicator: None,
             indicator_state: AgentState::Idle,
             proxy,
@@ -176,8 +180,41 @@ impl ZhongshuApp {
             None => return,
         };
 
+        if ov.take_list_organization() {
+            let employees = self.runtime.block_on(self.organization.employees());
+            ov.send(
+                &serde_json::to_value(OverlayToUiEvent::OrganizationRoster {
+                    employees,
+                    max_workers: zhongshu_core::agent::DEFAULT_MAX_WORKERS_PER_TASK,
+                })
+                .unwrap_or_default(),
+            );
+        }
+        if let Some(task) = ov.take_delegate_organization() {
+            if !self.controller.is_idle()
+                || self.delegation.is_busy()
+                || self.organization.is_busy()
+            {
+                ov.toast("当前已有任务运行，请结束后再组建团队。");
+            } else {
+                ov.send(&serde_json::json!({
+                    "type": "user_message",
+                    "content": task.objective,
+                }));
+                self.observer
+                    .lock()
+                    .unwrap()
+                    .record_user_message(&task.objective);
+                if !self.organization.submit(task) {
+                    ov.toast("组织任务已经在运行。");
+                }
+            }
+        }
         if let Some(text) = ov.take_delegate_review() {
-            if !self.controller.is_idle() || self.delegation.is_busy() {
+            if !self.controller.is_idle()
+                || self.delegation.is_busy()
+                || self.organization.is_busy()
+            {
                 ov.toast("当前已有任务运行，请结束后再委派。");
             } else {
                 ov.send(&serde_json::json!({"type": "user_message", "content": text}));
@@ -196,8 +233,8 @@ impl ZhongshuApp {
             }
             ov.send(&serde_json::json!({"type": "user_message", "content": text}));
             self.observer.lock().unwrap().record_user_message(&text);
-            if self.delegation.is_busy() {
-                ov.toast("双员工协作正在运行，请先停止或等待汇报。");
+            if self.delegation.is_busy() || self.organization.is_busy() {
+                ov.toast("员工协作正在运行，请先停止或等待汇报。");
             } else {
                 self.inbox.submit(text);
             }
@@ -398,7 +435,7 @@ impl ZhongshuApp {
             self.delete_all_history();
         }
         if ov.take_stop() {
-            if self.delegation.cancel() {
+            if self.delegation.cancel() || self.organization.cancel() {
                 ov.send(&serde_json::json!({"type": "stop"}));
                 return;
             }
@@ -902,6 +939,14 @@ impl ZhongshuApp {
                                         }));
                                     }
                                 }
+                            }
+                        }
+                        Event::Organization(event) => {
+                            if let Some(ref ov) = self.overlay {
+                                ov.send(
+                                    &serde_json::to_value(OverlayToUiEvent::Organization { event })
+                                        .unwrap_or_default(),
+                                );
                             }
                         }
                         Event::Run(run_event) => match run_event {

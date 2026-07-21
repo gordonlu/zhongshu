@@ -705,6 +705,47 @@ textarea:focus-visible {
   margin-bottom: 14px;
 }
 
+.organization-card {
+  display: grid;
+  gap: 7px;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent-soft) 48%, var(--surface));
+  padding: 9px;
+}
+
+.organization-card > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.organization-card span,
+.organization-card p {
+  color: var(--quiet);
+  font-size: 11px;
+}
+
+.organization-card strong {
+  min-width: 0;
+  color: var(--text);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.organization-card p {
+  margin: 0;
+  border-top: 1px solid var(--border);
+  padding-top: 7px;
+}
+
+.organization-card .organization-reason {
+  color: var(--amber);
+}
+
 .section-heading {
   display: flex;
   align-items: center;
@@ -1104,6 +1145,85 @@ textarea:focus-visible {
   justify-content: space-between;
   gap: 8px;
   padding: 12px;
+}
+
+.organization-dialog .modal-header > div {
+  min-width: 0;
+}
+
+.organization-dialog .modal-header p {
+  margin: 4px 0 0;
+  overflow: hidden;
+  color: var(--quiet);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.organization-employee-list {
+  display: grid;
+  min-height: 0;
+  gap: 7px;
+  overflow: auto;
+  padding: 12px;
+}
+
+.organization-employee {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  padding: 9px 10px;
+  text-align: left;
+}
+
+.organization-employee:hover:not(:disabled),
+.organization-employee.selected {
+  border-color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.organization-employee:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.organization-employee > span:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.organization-employee strong,
+.organization-employee small,
+.employee-eligibility {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.organization-employee small,
+.employee-eligibility {
+  color: var(--quiet);
+  font-size: 11px;
+}
+
+.organization-employee.selected .employee-eligibility {
+  color: var(--accent);
+}
+
+.organization-flow-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+  padding: 10px 12px;
 }
 
 .modal-header {

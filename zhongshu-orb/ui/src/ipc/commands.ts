@@ -3,6 +3,22 @@ import type { SettingsConfig } from './events'
 export type UiToOverlayCommand =
   | { type: 'submit'; text: string }
   | { type: 'delegate_review'; text: string }
+  | {
+      type: 'delegate_organization'
+      task: {
+        objective: string
+        requirements: {
+          role: string
+          capabilities: string[]
+          responsibility: string
+          required: boolean
+        }[]
+        sequential_handoff: boolean
+        max_workers?: number
+        target_employee?: string
+      }
+    }
+  | { type: 'list_organization_employees' }
   | { type: 'stop' }
   | { type: 'new_conversation' }
   | { type: 'approve'; request_id: string }
@@ -29,6 +45,15 @@ export function validateCommand(command: UiToOverlayCommand): boolean {
     case 'submit':
     case 'delegate_review':
       return command.text.trim().length > 0
+    case 'delegate_organization':
+      return command.task.objective.trim().length > 0
+        && command.task.requirements.length > 0
+        && command.task.requirements.length <= 3
+        && command.task.requirements.every((requirement) => (
+          requirement.role.trim().length > 0
+          && requirement.responsibility.trim().length > 0
+          && requirement.capabilities.every((capability) => capability.trim().length > 0)
+        ))
     case 'approve':
     case 'deny':
       return command.request_id.length > 0

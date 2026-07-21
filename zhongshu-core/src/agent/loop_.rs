@@ -153,13 +153,27 @@ impl ToolCompletionStatus {
 /// After completion the final message list is returned inside `LoopResult`.
 pub async fn run_agent(
     runtime: &mut AgentRuntime,
-    mut messages: Vec<Message>,
+    messages: Vec<Message>,
     callbacks: Option<Arc<AgentCallbacks>>,
     source: &str,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<LoopResult> {
-    if user_requested_verification(&messages) {
+    run_agent_with_verification_policy(runtime, messages, callbacks, source, cancel_token, None)
+        .await
+}
+
+pub async fn run_agent_with_verification_policy(
+    runtime: &mut AgentRuntime,
+    mut messages: Vec<Message>,
+    callbacks: Option<Arc<AgentCallbacks>>,
+    source: &str,
+    cancel_token: CancellationToken,
+    verification_required: Option<bool>,
+) -> anyhow::Result<LoopResult> {
+    if verification_required.unwrap_or_else(|| user_requested_verification(&messages)) {
         runtime.harness_state.verification.required = true;
+    } else if verification_required == Some(false) {
+        runtime.harness_state.verification.required = false;
     }
     runtime.harness_state.trace.events.clear();
     record_trace(
@@ -1396,6 +1410,36 @@ mod tests {
     fn detects_user_verification_request() {
         let messages = vec![Message::user("please run tests before finalizing")];
         assert!(user_requested_verification(&messages));
+    }
+
+    #[tokio::test]
+    async fn explicit_not_required_policy_overrides_embedded_verification_language() {
+        let provider = ScriptedProvider {
+            script: Arc::new(vec![(
+                "__text__".into(),
+                "analysis report submitted".into(),
+                true,
+            )]),
+            idx: Arc::new(Mutex::new(0)),
+        };
+        let mut runtime =
+            AgentRuntime::new(provider, ToolRegistry::new(), "scripted", small_budget());
+
+        let result = run_agent_with_verification_policy(
+            &mut runtime,
+            vec![Message::user(
+                "analyze this task; another employee will run verification",
+            )],
+            None,
+            "test",
+            CancellationToken::new(),
+            Some(false),
+        )
+        .await
+        .expect("analysis role should finish without owning verification");
+
+        assert_eq!(result.outcome, RunOutcome::CompletedUnverified);
+        assert!(!runtime.harness_state.verification.required);
     }
 
     #[test]

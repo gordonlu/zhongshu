@@ -57,6 +57,7 @@ pub enum Event {
     Agent(AgentEvent),
     Tool(ToolEvent),
     Harness(HarnessUiEvent),
+    Organization(OrganizationEvent),
     Task(TaskEvent),
     Memory(MemoryEvent),
     Goal(GoalEvent),
@@ -92,6 +93,15 @@ impl Event {
                 HarnessUiEvent::ContextIncluded { .. } => "context_included",
                 HarnessUiEvent::ContextPressure { .. } => "context_pressure",
                 HarnessUiEvent::ReplayAvailable { .. } => "replay_available",
+            },
+            Event::Organization(e) => match e {
+                OrganizationEvent::TaskStarted { .. } => "organization_task_started",
+                OrganizationEvent::EmployeeAssigned { .. } => "organization_employee_assigned",
+                OrganizationEvent::EmployeeWorking { .. } => "organization_employee_working",
+                OrganizationEvent::EmployeeReported { .. } => "organization_employee_reported",
+                OrganizationEvent::Handoff { .. } => "organization_handoff",
+                OrganizationEvent::ManagerReviewing { .. } => "organization_manager_reviewing",
+                OrganizationEvent::TaskFinished { .. } => "organization_task_finished",
             },
             Event::Task(e) => match e {
                 TaskEvent::Triggered { .. } => "task_triggered",
@@ -133,6 +143,53 @@ impl Event {
             },
         }
     }
+}
+
+/// Observable organization lifecycle emitted by real orchestration work.
+///
+/// These events describe completed state transitions; presentation layers may
+/// animate between them but must not synthesize additional progress states.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OrganizationEvent {
+    TaskStarted {
+        task_id: String,
+        manager: String,
+        collaboration: String,
+    },
+    EmployeeAssigned {
+        task_id: String,
+        employee: String,
+        role: String,
+        responsibility: String,
+        reports_to: String,
+    },
+    EmployeeWorking {
+        task_id: String,
+        employee: String,
+        role: String,
+    },
+    EmployeeReported {
+        task_id: String,
+        employee: String,
+        role: String,
+        outcome: String,
+        success: bool,
+    },
+    Handoff {
+        task_id: String,
+        from_employee: String,
+        to_employee: String,
+    },
+    ManagerReviewing {
+        task_id: String,
+        manager: String,
+    },
+    TaskFinished {
+        task_id: String,
+        status: String,
+        reason: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

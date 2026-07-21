@@ -891,6 +891,24 @@ impl AgentController {
                     stop_reason = format!("{:?}", rr.stop_reason);
                     overall_success =
                         rr.outcome == zhongshu_core::agent::RunOutcome::CompletedVerified;
+                    // Build and log an exportable RunReceipt.
+                    let receipt = zhongshu_core::core::receipt::RunReceipt::from_loop_result(
+                        &rr,
+                        &run_id.to_string(),
+                        &runtime.model,
+                        &runtime.budget,
+                        0,
+                        vec![],
+                        vec![],
+                        false,
+                    );
+                    tracing::info!(
+                        run_id = %receipt.run_id,
+                        outcome = %receipt.stop_reason,
+                        tools = receipt.tool_calls_made,
+                        tokens = receipt.estimated_tokens,
+                        "run receipt"
+                    );
                     let _ = tx
                         .send(ResponseEvent::MessageCompleted { id: aid, run_id })
                         .await;

@@ -16,13 +16,18 @@ export function DagControlPanel({
 }: DagControlPanelProps) {
   const [abandonReasons, setAbandonReasons] = useState<Record<string, string>>({})
 
-  if (graphs.length === 0) {
-    return <p className="muted">No durable DAG requires attention.</p>
+  const needsAttention = (view: OrganizationGraphView) =>
+    view.graph.nodes.some((node) => node.state === 'recovery_required' || node.state === 'running' || node.state === 'pending')
+
+  const attentionGraphs = graphs.filter(needsAttention)
+
+  if (attentionGraphs.length === 0) {
+    return null
   }
 
   return (
     <div className="dag-control-list">
-      {graphs.map((view) => {
+      {attentionGraphs.map((view) => {
         const graph = view.graph
         const latestResult = [...recoveryResults]
           .reverse()

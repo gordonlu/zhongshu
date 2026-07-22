@@ -22,6 +22,12 @@ const CONTROL_PREFIXES: &[&str] = &[
     "</observation",
     "<lcm_context",
     "</lcm_context",
+    "<tool_result",
+    "</tool_result",
+    "<system>",
+    "</system>",
+    "<compressed_summary",
+    "</compressed_summary",
 ];
 
 /// Filters agent protocol control tokens from the raw LLM stream
@@ -31,6 +37,9 @@ const CONTROL_PREFIXES: &[&str] = &[
 ///   `<final_answer>`, `</final_answer>`
 ///   `<final-answer>`, `</final-answer>`
 ///   `<observation ...>`, `</observation>`
+///   `<tool_result ...>`, `</tool_result>`
+///   `<system>`, `</system>`
+///   `<compressed_summary>`, `</compressed_summary>`
 ///
 /// Handles split tokens across chunk boundaries via a pending buffer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,7 +82,13 @@ impl ControlTokenFilter {
                 || lower.starts_with("<observation")
                 || lower.starts_with("</observation")
                 || lower.starts_with("<lcm_context")
-                || lower.starts_with("</lcm_context");
+                || lower.starts_with("</lcm_context")
+                || lower.starts_with("<tool_result")
+                || lower.starts_with("</tool_result")
+                || lower.starts_with("<system>")
+                || lower.starts_with("</system>")
+                || lower.starts_with("<compressed_summary")
+                || lower.starts_with("</compressed_summary");
 
             if !is_control {
                 // Check if this `<` could be the start of an incomplete

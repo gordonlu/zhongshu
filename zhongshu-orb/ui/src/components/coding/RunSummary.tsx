@@ -42,6 +42,10 @@ export function buildRunSummary(state: CodingState): SummaryItem[] {
     state.verifications.length > 0 &&
     failedChecks === 0
 
+  const idle = !state.active && !state.phase && !state.sessionId && state.workers.length === 0 && state.changes.length === 0 && state.verifications.length === 0
+
+  if (idle) return []
+
   return [
     {
       label: 'Outcome',
@@ -51,9 +55,7 @@ export function buildRunSummary(state: CodingState): SummaryItem[] {
           ? 'Awaiting verification'
           : reviewReady
             ? 'Review ready'
-            : state.active
-              ? 'Running'
-              : 'Standby',
+            : 'Running',
       detail: needsAttention
         ? `${failedChecks} failed checks, ${conflictedWorkers} conflicts`
         : awaitsVerification
@@ -63,11 +65,11 @@ export function buildRunSummary(state: CodingState): SummaryItem[] {
           : state.risk
             ? `${state.risk} risk`
             : undefined,
-      tone: needsAttention ? 'bad' : awaitsVerification ? 'warn' : reviewReady ? 'good' : state.active ? 'warn' : 'neutral',
+      tone: needsAttention ? 'bad' : awaitsVerification ? 'warn' : reviewReady ? 'good' : 'warn',
     },
     {
       label: 'Phase',
-      value: state.phase ? `${state.phase.from} -> ${state.phase.to}` : state.sessionId ? state.sessionId : 'waiting',
+      value: state.phase ? `${state.phase.from} -> ${state.phase.to}` : state.sessionId ?? 'executing',
       detail: state.planStepCount ? `${state.steps.length}/${state.planStepCount} plan steps` : undefined,
       tone: state.phase ? 'warn' : 'neutral',
     },

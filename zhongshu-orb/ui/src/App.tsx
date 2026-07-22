@@ -75,7 +75,12 @@ export function App() {
   const [theme, setTheme] = useState<Theme>(initialTheme)
   const [toast, setToast] = useState<string | null>(null)
   const [showPersonality, setShowPersonality] = useState(false)
-  const [composerText, setComposerText] = useState('')
+  const [composerText, setComposerText] = useState(() => window.localStorage.getItem('zhongshu.draft') ?? '')
+  const setComposerTextWithDraft = (value: string) => {
+    setComposerText(value)
+    if (!value) window.localStorage.removeItem('zhongshu.draft')
+    else window.localStorage.setItem('zhongshu.draft', value)
+  }
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const demoLoaded = useRef(false)
   const optimisticUserMessages = useRef<string[]>([])
@@ -229,7 +234,7 @@ export function App() {
     optimisticUserMessages.current.push(text)
     dispatchChat({ type: 'user_message', content: text })
     bridge.send(delegateReview ? { type: 'delegate_review', text } : { type: 'submit', text })
-    setComposerText('')
+    setComposerTextWithDraft('')
     focusComposer()
   }
   const startWindowDrag = (event: MouseEvent<HTMLElement>) => {
@@ -443,7 +448,7 @@ export function App() {
             state={chatState}
             onLoadMore={chatState.hasMoreHistory ? () => bridge.send({ type: 'load_more' }) : undefined}
             onPrompt={(prompt) => {
-              setComposerText(prompt)
+              setComposerTextWithDraft(prompt)
               focusComposer()
             }}
             suggestions={assistantPrompts}
@@ -491,11 +496,25 @@ export function App() {
         >
           <CircleStop size={16} />
         </button>
+        {chatState.runtimeState !== 'idle' && chatState.runtimeState !== 'done' ? (
+          <div className="composer-busy-indicator" data-state={chatState.runtimeState}>
+            <span className="composer-busy-label">
+              {chatState.runtimeState === 'thinking' ? 'Thinking' : 'Busy'}
+            </span>
+            <span className="composer-busy-hint">Typing will interrupt</span>
+          </div>
+        ) : null}
+        {authRequest ? (
+          <div className="composer-auth-notice" title={authRequest.command}>
+            <ShieldAlert size={12} />
+            <span>Approve or deny the {authRequest.tool} request above</span>
+          </div>
+        ) : null}
         <Composer
           ref={composerRef}
           value={composerText}
           placeholder={isCodingMode ? 'Describe the task or review request...' : 'Ask Zhongshu what to do next.'}
-          onChange={setComposerText}
+          onChange={setComposerTextWithDraft}
           onSubmit={() => submitComposer()}
         />
         {isCodingMode ? (
@@ -536,6 +555,10 @@ export function App() {
           onSave={(config) => {
             bridge.send({ type: 'save_settings', config })
             setSettingsConfig(null)
+          }}
+          onClearCache={() => {
+            localStorage.clear()
+            window.location.reload()
           }}
         />
       ) : null}
@@ -583,7 +606,7 @@ export function App() {
                 file_scopes: mutation ? fileScopes : undefined,
               },
             })
-            setComposerText('')
+            setComposerTextWithDraft('')
             setOrganizationDialog(null)
             pendingOrganizationObjective.current = null
             focusComposer()

@@ -20,7 +20,7 @@ describe('CodingWorkbench', () => {
     expect(screen.getByText('multi agent')).toBeInTheDocument()
     expect(screen.getByText('specialist work can proceed independently')).toBeInTheDocument()
     expect(screen.getByText('2 delegated employees')).toBeInTheDocument()
-    expect(screen.getByText('No organization task.')).toBeInTheDocument()
+    expect(screen.queryByText('No organization task.')).not.toBeInTheDocument()
   })
 
   it('keeps long sessions responsive by rendering the latest workbench rows', () => {

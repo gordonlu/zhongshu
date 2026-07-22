@@ -5,6 +5,7 @@ export type ChatMessage = {
   role: 'user' | 'assistant' | 'system'
   content: string
   toolCalls: ToolCallEntry[]
+  interrupted?: true
 }
 
 export type ToolActivity = {
@@ -47,8 +48,25 @@ export function chatReducer(state: ChatState, event: OverlayToUiEvent): ChatStat
         ],
         streamingAssistant: '',
       }
-    case 'stop':
-      return { ...state, streamingAssistant: '' }
+    case 'stop': {
+      if (!state.streamingAssistant.trim()) return { ...state, streamingAssistant: '' }
+      const partialContent = state.streamingAssistant.trimEnd()
+      return {
+        ...state,
+        messages: [
+          ...state.messages,
+          {
+            id: nextMessageId('assistant'),
+            role: 'assistant',
+            content: partialContent,
+            toolCalls: state.toolActivities.map(toolActivityToEntry),
+            interrupted: true,
+          },
+        ],
+        streamingAssistant: '',
+        toolActivities: [],
+      }
+    }
     case 'delta':
       return {
         ...state,

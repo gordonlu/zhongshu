@@ -1,4 +1,5 @@
-import { CheckCircle2, Loader2, XCircle } from 'lucide-react'
+import { useState } from 'react'
+import { CheckCircle2, ChevronDown, ChevronRight, Loader2, XCircle } from 'lucide-react'
 import type { ToolActivity } from '../../state/chatReducer'
 import type { ToolCallEntry } from '../../ipc/events'
 
@@ -26,18 +27,41 @@ export function ToolCallGroup({
   return (
     <div className="tool-call-group" aria-label="Tool activity">
       {rows.map((row) => (
-        <div key={row.id} className="tool-call-row">
-          {row.status === 'running' ? (
-            <Loader2 size={iconSize} className="spin" />
-          ) : row.success ? (
-            <CheckCircle2 size={iconSize} />
-          ) : (
-            <XCircle size={iconSize} />
-          )}
-          <span>{row.name}</span>
-          <strong>{row.status === 'running' ? 'running' : row.success ? 'done' : 'failed'}</strong>
-        </div>
+        <ToolCallRow key={row.id} row={row} />
       ))}
+    </div>
+  )
+}
+
+function ToolCallRow({
+  row,
+}: {
+  row: { id: string; name: string; status: 'running' | 'done'; success?: boolean }
+}) {
+  const [collapsed, setCollapsed] = useState(true)
+  const running = row.status === 'running'
+
+  return (
+    <div className="tool-call-row">
+      <button
+        type="button"
+        className="tool-call-toggle"
+        onClick={() => setCollapsed((v) => !v)}
+        aria-label={collapsed ? 'Expand' : 'Collapse'}
+      >
+        {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+      </button>
+      {running ? (
+        <Loader2 size={iconSize} className="spin" />
+      ) : row.success ? (
+        <CheckCircle2 size={iconSize} />
+      ) : (
+        <XCircle size={iconSize} />
+      )}
+      <span className="tool-call-name">{row.name}</span>
+      {!collapsed ? (
+        <span className="tool-call-detail">details here</span>
+      ) : null}
     </div>
   )
 }

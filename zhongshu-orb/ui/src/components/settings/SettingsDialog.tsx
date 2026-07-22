@@ -9,6 +9,7 @@ type SettingsDialogProps = {
   onClose: () => void
   onSave: (config: SettingsConfig) => void
   onDeleteHistory: () => void
+  onClearCache?: () => void
 }
 
 function fmtTokens(n: number): string {
@@ -16,9 +17,10 @@ function fmtTokens(n: number): string {
   return `${n / 1_000}K`
 }
 
-export function SettingsDialog({ config, onClose, onSave, onDeleteHistory }: SettingsDialogProps) {
+export function SettingsDialog({ config, onClose, onSave, onDeleteHistory, onClearCache }: SettingsDialogProps) {
   const [draft, setDraft] = useState<SettingsConfig>(config)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [search, setSearch] = useState('')
 
   useEffect(() => {
     setDraft(config)
@@ -34,22 +36,30 @@ export function SettingsDialog({ config, onClose, onSave, onDeleteHistory }: Set
           </button>
         </header>
 
+        <div className="settings-search">
+          <input
+            type="search"
+            placeholder="Search settings..."
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+        </div>
         <div className="settings-grid">
-          <label>
+          <label data-search={search ? (search && !'API base'.toLowerCase().includes(search.toLowerCase()) ? 'hide' : '') : ''} className={search && !'API base'.toLowerCase().includes(search.toLowerCase()) ? 'setting-hidden' : ''}>
             API base
             <input
               value={draft.api_base}
               onChange={(event) => setDraft({ ...draft, api_base: event.target.value })}
             />
           </label>
-          <label>
+          <label className={search && !'Model'.toLowerCase().includes(search.toLowerCase()) ? 'setting-hidden' : ''}>
             Model
             <input
               value={draft.model}
               onChange={(event) => setDraft({ ...draft, model: event.target.value })}
             />
           </label>
-          <label>
+          <label className={search && !'Personality'.toLowerCase().includes(search.toLowerCase()) ? 'setting-hidden' : ''}>
             Personality
             <select
               value={PERSONALITY_OPTIONS.includes(draft.personality) ? draft.personality : ''}
@@ -62,7 +72,7 @@ export function SettingsDialog({ config, onClose, onSave, onDeleteHistory }: Set
               ))}
             </select>
           </label>
-          <label>
+          <label className={search && !'API key'.toLowerCase().includes(search.toLowerCase()) ? 'setting-hidden' : ''}>
             API key
             <input
               type="password"
@@ -70,8 +80,15 @@ export function SettingsDialog({ config, onClose, onSave, onDeleteHistory }: Set
               placeholder={draft.api_key_saved ? 'Saved in native key store' : ''}
               onChange={(event) => setDraft({ ...draft, api_key: event.target.value })}
             />
+            <span className="settings-key-source">
+              {draft.api_key
+                ? draft.api_key_saved
+                  ? 'From system credential store'
+                  : 'From DEEPSEEK_API_KEY env var'
+                : 'Not configured'}
+            </span>
           </label>
-          <label>
+          <label className={search && !'Mode'.toLowerCase().includes(search.toLowerCase()) ? 'setting-hidden' : ''}>
             Mode
             <select
               value={draft.mode ?? 'assistant'}
@@ -82,7 +99,7 @@ export function SettingsDialog({ config, onClose, onSave, onDeleteHistory }: Set
               <option value="coding">Coding</option>
             </select>
           </label>
-          <label className="settings-slider-label">
+          <label className={`settings-slider-label${search && !'Max context tokens'.toLowerCase().includes(search.toLowerCase()) ? ' setting-hidden' : ''}`}>
             <span>Max context tokens <strong>{draft.max_context_tokens ? fmtTokens(draft.max_context_tokens) : ''}</strong></span>
             <input
               type="range"
@@ -103,21 +120,21 @@ export function SettingsDialog({ config, onClose, onSave, onDeleteHistory }: Set
               <span>1M</span>
             </div>
           </label>
-          <label>
+          <label className={search && !'Proxy port'.toLowerCase().includes(search.toLowerCase()) ? 'setting-hidden' : ''}>
             Proxy port
             <input
               value={draft.proxy_port ?? ''}
               onChange={(event) => setDraft({ ...draft, proxy_port: event.target.value || undefined })}
             />
           </label>
-          <label>
+          <label className={search && !'Background interval'.toLowerCase().includes(search.toLowerCase()) ? 'setting-hidden' : ''}>
             Background interval
             <input
               value={draft.bg_interval ?? ''}
               onChange={(event) => setDraft({ ...draft, bg_interval: event.target.value || undefined })}
             />
           </label>
-          <label className="settings-checkbox">
+          <label className={`settings-checkbox${search && !'Background work'.toLowerCase().includes(search.toLowerCase()) ? ' setting-hidden' : ''}`}>
             <input
               type="checkbox"
               checked={draft.bg_enabled ?? false}
@@ -125,7 +142,7 @@ export function SettingsDialog({ config, onClose, onSave, onDeleteHistory }: Set
             />
             Background work
           </label>
-          <label className="settings-checkbox">
+          <label className={`settings-checkbox${search && !'Self-evolving equipment'.toLowerCase().includes(search.toLowerCase()) ? ' setting-hidden' : ''}`}>
             <input
               type="checkbox"
               checked={draft.auto_evolve ?? false}
@@ -133,7 +150,7 @@ export function SettingsDialog({ config, onClose, onSave, onDeleteHistory }: Set
             />
             Self-evolving equipment
           </label>
-          <label className="settings-checkbox settings-wide">
+          <label className={`settings-checkbox settings-wide${search && !'Intelligent multi-agent'.toLowerCase().includes(search.toLowerCase()) ? ' setting-hidden' : ''}`}>
             <input
               type="checkbox"
               checked={draft.auto_multi_agent ?? false}
@@ -147,7 +164,7 @@ export function SettingsDialog({ config, onClose, onSave, onDeleteHistory }: Set
               <small>Allow Zhongshu to form a bounded team when specialization or parallel work is worthwhile.</small>
             </span>
           </label>
-          <label className="settings-wide">
+          <label className={`settings-wide${search && !'Background prompt'.toLowerCase().includes(search.toLowerCase()) ? ' setting-hidden' : ''}`}>
             Background prompt
             <textarea
               value={draft.bg_prompt ?? ''}
@@ -161,6 +178,7 @@ export function SettingsDialog({ config, onClose, onSave, onDeleteHistory }: Set
           {confirmDelete ? (
             <div className="confirm-delete">
               <span>Are you sure?</span>
+              <span className="confirm-delete-note">This removes conversation history. Associated memory entries are not deleted.</span>
               <button type="button" className="danger-button" onClick={() => { onDeleteHistory(); setConfirmDelete(false) }}>
                 Yes, delete
               </button>
@@ -169,9 +187,16 @@ export function SettingsDialog({ config, onClose, onSave, onDeleteHistory }: Set
               </button>
             </div>
           ) : (
-            <button type="button" className="danger-button" onClick={() => setConfirmDelete(true)}>
-              Delete history
-            </button>
+            <>
+              <button type="button" className="danger-button" onClick={() => setConfirmDelete(true)}>
+                Delete history
+              </button>
+              {onClearCache ? (
+                <button type="button" className="secondary-button" onClick={onClearCache}>
+                  Clear cached data
+                </button>
+              ) : null}
+            </>
           )}
           <button type="button" className="secondary-button" onClick={onClose}>
             Cancel

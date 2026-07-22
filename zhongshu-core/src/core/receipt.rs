@@ -3,8 +3,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent::loop_::{LoopResult, RunOutcome, StopReason};
 use crate::agent::llm::Message;
+use crate::agent::loop_::{LoopResult, RunOutcome};
 use crate::harness::trace::event::HarnessEvent;
 
 /// A structured, exportable receipt for a single agent run.
@@ -219,7 +219,7 @@ impl RunReceipt {
 #[cfg(test)]
 mod tests {
     use super::*;
-use crate::agent::loop_::{LoopResult, RunOutcome, StopReason};
+    use crate::agent::loop_::{LoopResult, RunOutcome, StopReason};
     use crate::agent::AgentBudget;
     use crate::harness::trace::event::HarnessEvent;
 

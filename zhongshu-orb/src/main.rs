@@ -1,5 +1,6 @@
 mod agent;
 mod app;
+mod auto_delegation_service;
 mod config;
 mod delegation_service;
 mod handler;
@@ -31,9 +32,9 @@ use zhongshu_core::agent::{
 };
 use zhongshu_core::authority::{self, AuthorityGate};
 use zhongshu_core::core::{
-    Database, EventLogStore, GoalRepository, GoalTool, MemoryCandidateStore, MemoryPolicy,
-    MemoryQueryTool, ObservationStore, RunLedger, RunbookStore, Scheduler, SuggestionEngine,
-    SuggestionTool, TaskRepository, TaskTool,
+    Database, DurableExecutionRunner, EventLogStore, ExecutionGraphStore, GoalRepository, GoalTool,
+    MemoryCandidateStore, MemoryPolicy, MemoryQueryTool, ObservationStore, RunLedger, RunbookStore,
+    Scheduler, SuggestionEngine, SuggestionTool, TaskRepository, TaskTool,
 };
 use zhongshu_core::digest::DigestBuilder;
 use zhongshu_core::equipment::EquipmentObserver;
@@ -46,6 +47,7 @@ use zhongshu_core::task::{FileWatchTrigger, ReminderTrigger, TaskScheduler};
 use zhongshu_core::tool::default_registry;
 
 use app::{AgentController, AgentInbox, TaskWorkerDispatcher};
+use auto_delegation_service::AutoDelegationController;
 use delegation_service::DelegationController;
 use organization_service::OrganizationController;
 
@@ -466,6 +468,20 @@ fn main() {
         },
     );
     worker_runtime_value.ledger = Some(RunLedger::new(Database::new(core_db_path.clone())));
+    let mut planner_runtime_value = worker_runtime_value.clone();
+    let planner_model = if cfg.llm.model_routing.enabled {
+        cfg.llm.model_routing.pro_model.clone()
+    } else {
+        cfg.llm.model.clone()
+    };
+    planner_runtime_value.provider = provider.change_model(&planner_model);
+    planner_runtime_value.model = planner_model;
+    planner_runtime_value.reasoning_effort = cfg
+        .llm
+        .model_routing
+        .enabled
+        .then(|| cfg.llm.model_routing.reasoning_agent.clone());
+    let planner_runtime = Arc::new(tokio::sync::RwLock::new(planner_runtime_value));
     let worker_runtime = Arc::new(tokio::sync::RwLock::new(worker_runtime_value));
 
     let review_tools = vec![
@@ -524,6 +540,58 @@ fn main() {
         .retain(|tool| tool != "shell" && tool != "self_test");
     organization_verifier_profile.verification_policy = VerificationPolicy::NotRequired;
     organization_verifier_profile.specialty.focus = "只读复核；通用组织入口不运行命令验证".into();
+    let sandbox_employee_budget = || AgentBudget {
+        max_steps: 12,
+        max_tool_calls: 64,
+        per_tool_limit: 32,
+        token_limit: 16_000,
+        llm_timeout: Duration::from_secs(120),
+        tool_timeout: Duration::from_secs(120),
+    };
+    let mut implementation_profile = AgentProfile::new(
+        "implementation-employee",
+        "你是通用实施员工。只在用户明确开启 Mutation mode 并分配文件 scope 后修改文件；先读取相关上下文，在隔离沙箱中完成最小改动，运行与任务直接相关的轻量验证，再通过 submit_patch_proposal 提交实际差异。不得修改 scope 外文件，不得声称未执行的验证已经通过。",
+        vec![
+            "read_file".into(),
+            "list_dir".into(),
+            "search_files".into(),
+            "grep".into(),
+            "glob".into(),
+            "write_file".into(),
+            "edit".into(),
+            "shell".into(),
+        ],
+        sandbox_employee_budget(),
+    )
+    .with_specialty(
+        EmployeeRole::generalist(),
+        Vec::new(),
+        "限定 scope 的实现、修改与轻量验证",
+    )
+    .with_verification_policy(VerificationPolicy::Required);
+    implementation_profile.llm_model = Some(cfg.llm.model_routing.flash_model.clone());
+    let mut integration_profile = AgentProfile::new(
+        "integration-employee",
+        "你是通用集成员工。只在用户明确开启 Mutation mode 并分配文件 scope 后工作；读取共享上下文，但只修改自己的 scope。在隔离沙箱中完成最小改动和轻量验证，通过 submit_patch_proposal 提交实际差异，并清楚汇报与其他员工输出的接口假设。不得修改 scope 外文件，不得声称未执行的验证已经通过。",
+        vec![
+            "read_file".into(),
+            "list_dir".into(),
+            "search_files".into(),
+            "grep".into(),
+            "glob".into(),
+            "write_file".into(),
+            "edit".into(),
+            "shell".into(),
+        ],
+        sandbox_employee_budget(),
+    )
+    .with_specialty(
+        EmployeeRole::generalist(),
+        Vec::new(),
+        "独立 scope 的实现、集成检查与轻量验证",
+    )
+    .with_verification_policy(VerificationPolicy::Required);
+    integration_profile.llm_model = Some(cfg.llm.model_routing.flash_model.clone());
 
     services::spawn_task_executor(
         eb.clone(),
@@ -535,8 +603,8 @@ fn main() {
             vec![],
             AgentBudget {
                 max_steps: 80,
-                max_tool_calls: 160,
-                per_tool_limit: 40,
+                max_tool_calls: 256,
+                per_tool_limit: 128,
                 token_limit: 128_000,
                 llm_timeout: Duration::from_secs(240),
                 tool_timeout: Duration::from_secs(120),
@@ -562,7 +630,12 @@ fn main() {
         tracing::info!(count = worker_profiles.len(), "loaded worker profiles");
     }
     let mut organization_roster = worker_profiles.clone();
-    for built_in in [analyst_profile, organization_verifier_profile] {
+    for built_in in [
+        analyst_profile,
+        organization_verifier_profile,
+        implementation_profile,
+        integration_profile,
+    ] {
         if !organization_roster
             .iter()
             .any(|profile| profile.name == built_in.name)
@@ -575,19 +648,21 @@ fn main() {
             zhongshu_core::core::Database::new(core_db_path.clone()),
         ),
     );
-    let deeplossless_cfg = zhongshu_core::integration::DeeplosslessConfig {
-        db_path: format!("{}/.deeplossless", config::config_dir().display()),
-        ..Default::default()
-    };
     let organization = Arc::new(OrganizationController::new(
         worker_runtime.clone(),
+        planner_runtime,
         organization_roster,
         eb.clone(),
         response_tx.clone(),
         run_controller.clone(),
         org_checkpoint_store,
         std::env::current_dir().unwrap_or_default(),
-        Some(deeplossless_cfg),
+        proxy.clone(),
+    ));
+    let auto_delegation = Arc::new(AutoDelegationController::new(
+        organization.clone(),
+        inbox.clone(),
+        eb.clone(),
     ));
 
     let attention_mgr = AttentionManager::new((*eb).clone());
@@ -678,8 +753,63 @@ fn main() {
         let org_store = zhongshu_core::core::checkpoint::OrganizationCheckpointStore::new(
             Database::new(core_db_path.clone()),
         );
+        let graph_task_ids = match org_store.list_unfinished_graphs() {
+            Ok(task_ids) => task_ids,
+            Err(error) => {
+                tracing::error!(%error, "failed to inspect unfinished organization graphs");
+                Vec::new()
+            }
+        };
+        for task_id in &graph_task_ids {
+            let recovery =
+                r.block_on(DurableExecutionRunner::new(org_store.clone()).recover(task_id));
+            match recovery {
+                Ok(Some(recovered)) => {
+                    let reason = if recovered.report.recovery_required_nodes.is_empty() {
+                        "组织任务在进程退出前未完成，等待显式恢复".to_string()
+                    } else {
+                        format!(
+                            "以下节点的外部效果未知，必须先核对：{}",
+                            recovered.report.recovery_required_nodes.join(", ")
+                        )
+                    };
+                    tracing::warn!(
+                        task_id = %task_id,
+                        store_version = recovered.store_version,
+                        recovery_required = ?recovered.report.recovery_required_nodes,
+                        "startup: retained unfinished organization graph for reconciliation"
+                    );
+                    eb.publish(Event::Organization(
+                        zhongshu_core::event::OrganizationEvent::TaskFinished {
+                            task_id: task_id.clone(),
+                            status: "recovery_required".into(),
+                            reason: Some(reason),
+                        },
+                    ));
+                }
+                Ok(None) => {
+                    tracing::warn!(task_id = %task_id, "unfinished graph disappeared during recovery scan");
+                }
+                Err(error) => {
+                    tracing::error!(task_id = %task_id, %error, "failed to recover organization graph");
+                    eb.publish(Event::Organization(
+                        zhongshu_core::event::OrganizationEvent::TaskFinished {
+                            task_id: task_id.clone(),
+                            status: "recovery_required".into(),
+                            reason: Some(format!("恢复 checkpoint 失败：{error}")),
+                        },
+                    ));
+                }
+            }
+        }
         if let Ok(unfinished) = org_store.list_unfinished() {
             for task_id in &unfinished {
+                if graph_task_ids.contains(task_id) {
+                    if let Err(error) = org_store.delete(task_id) {
+                        tracing::warn!(%error, task_id = %task_id, "failed to remove superseded legacy organization checkpoint");
+                    }
+                    continue;
+                }
                 tracing::warn!(
                     task_id = %task_id,
                     "startup: found unfinished organization task from crash — marking as failed"
@@ -704,6 +834,7 @@ fn main() {
         inbox.clone(),
         delegation,
         organization,
+        auto_delegation,
         eb,
         event_rx,
         response_tx,

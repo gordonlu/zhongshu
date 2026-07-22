@@ -133,6 +133,20 @@ export function SettingsDialog({ config, onClose, onSave, onDeleteHistory }: Set
             />
             Self-evolving equipment
           </label>
+          <label className="settings-checkbox settings-wide">
+            <input
+              type="checkbox"
+              checked={draft.auto_multi_agent ?? false}
+              onChange={(event) => setDraft((current) => ({
+                ...current,
+                auto_multi_agent: event.target.checked,
+              }))}
+            />
+            <span>
+              Intelligent multi-agent orchestration
+              <small>Allow Zhongshu to form a bounded team when specialization or parallel work is worthwhile.</small>
+            </span>
+          </label>
           <label className="settings-wide">
             Background prompt
             <textarea

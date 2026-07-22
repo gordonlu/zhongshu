@@ -140,6 +140,14 @@ pub struct DeeplosslessFileConflictsResult {
     pub conflicts: Vec<DeeplosslessFileConflict>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeeplosslessFileClaimFact {
+    pub agent_id: String,
+    pub file_path: String,
+    pub operation: String,
+    pub conv_id: i64,
+}
+
 /// Aggregate facts exported by Deeplossless for one isolated benchmark DB.
 /// Zhongshu stores this reference in benchmark results instead of copying raw
 /// prompts, responses, or replay events into a second fact store.
@@ -579,6 +587,19 @@ impl DeeplosslessProxy {
         Ok(resp.json().await?)
     }
 
+    /// Read the durable active-claim registry, including conversation IDs
+    /// omitted by the compatibility HTTP endpoint.
+    pub async fn file_claim_facts(&self) -> anyhow::Result<Vec<DeeplosslessFileClaimFact>> {
+        let expanded = self.db_path.replacen(
+            "~",
+            &std::env::var("HOME").unwrap_or_else(|_| ".".into()),
+            1,
+        );
+        tokio::task::spawn_blocking(move || read_file_claim_facts(&expanded))
+            .await
+            .map_err(|error| anyhow::anyhow!("file claim fact query task failed: {error}"))?
+    }
+
     /// Load recent chat history with correct roles from the messages table.
     /// Opens a direct read-only SQLite connection to lcm.db.
     /// Returns a list of (role, content) pairs from the most recent conversation.
@@ -725,6 +746,25 @@ impl DeeplosslessProxy {
     }
 }
 
+fn read_file_claim_facts(path: &str) -> anyhow::Result<Vec<DeeplosslessFileClaimFact>> {
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut statement = conn.prepare(
+        "SELECT agent_id, file_path, operation, conv_id
+         FROM agent_active_files ORDER BY agent_id, file_path",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(DeeplosslessFileClaimFact {
+            agent_id: row.get(0)?,
+            file_path: row.get(1)?,
+            operation: row.get(2)?,
+            conv_id: row.get(3)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(anyhow::Error::from)
+}
+
 fn validate_file_claim(
     agent_id: &str,
     file_path: &str,
@@ -798,6 +838,37 @@ async fn bind_socket(start_port: u16) -> anyhow::Result<(tokio::net::TcpListener
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_claim_facts_with_conversation_identity_from_real_sqlite() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("claims.db");
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE agent_active_files (
+                    agent_id TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    conv_id INTEGER NOT NULL
+                );
+                INSERT INTO agent_active_files VALUES ('worker', 'src/a.rs', 'edit', 42);",
+            )
+            .unwrap();
+        drop(connection);
+
+        let facts = read_file_claim_facts(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(
+            facts,
+            vec![DeeplosslessFileClaimFact {
+                agent_id: "worker".into(),
+                file_path: "src/a.rs".into(),
+                operation: "edit".into(),
+                conv_id: 42,
+            }]
+        );
+    }
 
     /// Create a DeeplosslessProxy with a temporary in-memory database
     /// and a random port. Returns the proxy and the base URL.

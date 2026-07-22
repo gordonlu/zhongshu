@@ -3,6 +3,28 @@ import { codingReducer, initialCodingState } from './codingReducer'
 import type { OverlayToUiEvent } from '../ipc/events'
 
 describe('codingReducer', () => {
+  it('records the automatic routing decision without pretending execution started', () => {
+    const state = codingReducer(initialCodingState, {
+      type: 'organization',
+      event: {
+        kind: 'routing_decided',
+        routing_id: 'auto-route-1',
+        strategy: 'single_agent',
+        reason: 'merge risk too high',
+        worker_count: 0,
+      },
+    })
+
+    expect(state.active).toBe(false)
+    expect(state.organization).toBeUndefined()
+    expect(state.autoDelegation).toEqual({
+      routingId: 'auto-route-1',
+      strategy: 'single_agent',
+      reason: 'merge risk too high',
+      workerCount: 0,
+    })
+  })
+
   it('builds coding workbench state from typed events', () => {
     const events: OverlayToUiEvent[] = [
       { type: 'coding', event: { kind: 'plan_created', session_id: 's1', step_count: 2, risk: 'low' } },
@@ -154,5 +176,123 @@ describe('codingReducer', () => {
     })
     expect(state.workers).toHaveLength(2)
     expect(state.workers[0]).toMatchObject({ worker: 'analyst', role: 'architect', status: 'reported' })
+  })
+
+  it('keeps an orphaned startup recovery terminal visible', () => {
+    const state = codingReducer(initialCodingState, {
+      type: 'organization',
+      event: {
+        kind: 'task_finished',
+        task_id: 'crashed-org',
+        status: 'recovery_required',
+        reason: 'apply effect is unknown',
+      },
+    })
+
+    expect(state.active).toBe(false)
+    expect(state.organization).toEqual({
+      taskId: 'crashed-org',
+      manager: '中书',
+      collaboration: 'recovery',
+      status: 'recovery_required',
+      reason: 'apply effect is unknown',
+    })
+  })
+
+  it('does not let a stale terminal event overwrite another organization task', () => {
+    const active = codingReducer(initialCodingState, {
+      type: 'organization',
+      event: {
+        kind: 'task_started',
+        task_id: 'current-org',
+        manager: '中书',
+        collaboration: 'independent',
+      },
+    })
+
+    const state = codingReducer(active, {
+      type: 'organization',
+      event: { kind: 'task_finished', task_id: 'old-org', status: 'cancelled' },
+    })
+
+    expect(state).toEqual(active)
+  })
+
+  it('replaces durable graph snapshots and upserts recovery results by task', () => {
+    const graph = {
+      store_version: 2,
+      graph: {
+        task_id: 'mutation-1',
+        nodes: [{
+          id: 'apply',
+          kind: 'apply',
+          objective: 'apply patch',
+          requirements: { capabilities: [], read_only: false },
+          state: 'recovery_required' as const,
+        }],
+        edges: [],
+        artifacts: [],
+        transitions: [],
+        reconciliations: [],
+        effect_intents: [],
+      },
+    }
+    const listed = codingReducer(initialCodingState, {
+      type: 'organization_graphs',
+      graphs: [graph],
+    })
+    const recoveredGraph = {
+      ...graph,
+      store_version: 3,
+      graph: {
+        ...graph.graph,
+        nodes: [{ ...graph.graph.nodes[0], state: 'succeeded' as const }],
+      },
+    }
+    const recovered = codingReducer(listed, {
+      type: 'organization_recovery',
+      result: {
+        task_id: 'mutation-1',
+        node_id: 'apply',
+        action: 'reconcile',
+        assessment: 'confirmed_succeeded',
+        reason: 'workspace matches planned post-state',
+        evidence_refs: ['workspace:src/lib.rs:sha256:b'],
+        executed_cleanup_nodes: ['release', 'finalize'],
+        graph: recoveredGraph,
+      },
+    })
+
+    expect(recovered.organizationGraphs).toHaveLength(1)
+    expect(recovered.organizationGraphs[0]?.store_version).toBe(3)
+    expect(recovered.organizationGraphs[0]?.graph.nodes[0]?.state).toBe('succeeded')
+    expect(recovered.organizationRecoveryResults[0]?.executed_cleanup_nodes).toEqual(['release', 'finalize'])
+  })
+
+  it('does not enter active coding mode for terminal audit history alone', () => {
+    const state = codingReducer(initialCodingState, {
+      type: 'organization_graphs',
+      graphs: [{
+        store_version: 9,
+        graph: {
+          task_id: 'finished-mutation',
+          nodes: [{
+            id: 'finalize',
+            kind: 'finalize',
+            objective: 'finish',
+            requirements: { capabilities: [], read_only: false },
+            state: 'succeeded',
+          }],
+          edges: [],
+          artifacts: [],
+          transitions: [],
+          reconciliations: [],
+          effect_intents: [],
+        },
+      }],
+    })
+
+    expect(state.active).toBe(false)
+    expect(state.organizationGraphs).toHaveLength(1)
   })
 })

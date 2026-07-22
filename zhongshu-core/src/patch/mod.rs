@@ -164,6 +164,127 @@ impl PatchEngine {
         result.map_err(|error| PatchAttemptFailure::from_error(kind, Some(path), error))
     }
 
+    /// Compute the final content hashes for an ordered patch set without
+    /// writing files. Multiple operations on one file are simulated in order.
+    pub fn plan_operations(
+        &mut self,
+        operations: &[PatchOperation],
+    ) -> Result<Vec<PatchFileEffectPlan>, PatchAttemptFailure> {
+        #[derive(Debug)]
+        struct VirtualFile {
+            before: String,
+            current: String,
+            existed_before: bool,
+        }
+
+        let mut files = BTreeMap::<PathBuf, VirtualFile>::new();
+        for operation in operations {
+            let kind = operation.kind();
+            let requested_path = operation.path().to_path_buf();
+            let resolved = self
+                .resolve_workspace_path(&requested_path)
+                .map_err(|error| {
+                    PatchAttemptFailure::from_error(kind, Some(requested_path.clone()), error)
+                })?;
+            if !files.contains_key(&resolved) {
+                let initial = if resolved.exists() {
+                    let snapshot = self.read(&requested_path).map_err(|error| {
+                        PatchAttemptFailure::from_error(
+                            PatchOperationKind::Read,
+                            Some(requested_path.clone()),
+                            error,
+                        )
+                    })?;
+                    VirtualFile {
+                        before: snapshot.content.clone(),
+                        current: snapshot.content,
+                        existed_before: true,
+                    }
+                } else if matches!(
+                    operation,
+                    PatchOperation::WriteFile(WholeFileRequest {
+                        allow_create: true,
+                        ..
+                    })
+                ) {
+                    if let Some(parent) = resolved.parent() {
+                        if !parent.exists() {
+                            let error = PatchError::ParentDirectoryMissing {
+                                path: parent.to_path_buf(),
+                            };
+                            return Err(PatchAttemptFailure::from_error(
+                                kind,
+                                Some(requested_path),
+                                error,
+                            ));
+                        }
+                    }
+                    VirtualFile {
+                        before: String::new(),
+                        current: String::new(),
+                        existed_before: false,
+                    }
+                } else {
+                    let error = PatchError::FileNotRead {
+                        path: resolved.clone(),
+                    };
+                    return Err(PatchAttemptFailure::from_error(
+                        PatchOperationKind::Read,
+                        Some(requested_path),
+                        error,
+                    ));
+                };
+                files.insert(resolved.clone(), initial);
+            }
+
+            let file = files
+                .get_mut(&resolved)
+                .expect("virtual file inserted before simulation");
+            let updated = match operation {
+                PatchOperation::Replace(request) => apply_replace(&file.current, request),
+                PatchOperation::MultiReplace(request) => {
+                    apply_multi_replace(&file.current, &request.edits)
+                }
+                PatchOperation::WriteFile(request) => {
+                    if !file.existed_before && !request.allow_create {
+                        Err(PatchError::FileNotRead {
+                            path: resolved.clone(),
+                        })
+                    } else if file.current == request.content {
+                        Err(PatchError::NoOp)
+                    } else {
+                        Ok(request.content.clone())
+                    }
+                }
+            }
+            .map_err(|error| {
+                PatchAttemptFailure::from_error(kind, Some(requested_path.clone()), error)
+            })?;
+            file.current = updated;
+        }
+
+        files
+            .into_iter()
+            .map(|(path, file)| {
+                let relative = path
+                    .strip_prefix(&self.workspace_root)
+                    .expect("resolved patch path is inside workspace")
+                    .to_path_buf();
+                Ok(PatchFileEffectPlan {
+                    path: relative,
+                    before_hash: content_hash(&file.before),
+                    after_hash: content_hash(&file.current),
+                    existed_before: file.existed_before,
+                })
+            })
+            .collect()
+    }
+
+    pub fn has_read(&self, path: impl AsRef<Path>) -> Result<bool, PatchError> {
+        let path = self.resolve_workspace_path(path.as_ref())?;
+        Ok(self.reads.contains_key(&path))
+    }
+
     fn apply_preview(&mut self, preview: PatchPreview) -> Result<PatchResult, PatchError> {
         write_text_preserving(
             &preview.path,
@@ -537,6 +658,14 @@ pub struct PatchDiff {
     pub after_hash: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatchFileEffectPlan {
+    pub path: PathBuf,
+    pub before_hash: String,
+    pub after_hash: String,
+    pub existed_before: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PatchDiffPayload {
     pub summary: String,
@@ -607,7 +736,7 @@ impl PatchDiffPayload {
             "no text diff captured".to_string()
         };
 
-        let diff_hash = stable_hash(&unified_diff);
+        let diff_hash = content_hash(&unified_diff);
 
         Self {
             summary,
@@ -629,8 +758,8 @@ impl PatchDiff {
             replace_all,
             removed_lines: before.lines().count(),
             added_lines: after.lines().count(),
-            before_hash: stable_hash(before),
-            after_hash: stable_hash(after),
+            before_hash: content_hash(before),
+            after_hash: content_hash(after),
         }
     }
 }
@@ -1039,12 +1168,10 @@ fn is_unc_path(path: &Path) -> bool {
     path.to_string_lossy().starts_with("\\\\")
 }
 
-fn stable_hash(text: &str) -> String {
-    use std::hash::{Hash, Hasher};
+pub fn content_hash(text: &str) -> String {
+    use sha2::{Digest, Sha256};
 
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    text.hash(&mut hasher);
-    format!("{:x}", hasher.finish())
+    format!("{:x}", Sha256::digest(text.as_bytes()))
 }
 
 #[cfg(test)]
@@ -1317,5 +1444,43 @@ mod tests {
             .evidence
             .suggested_action
             .contains("read the target file"));
+    }
+
+    #[test]
+    fn plans_ordered_multi_operation_effect_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("copy.txt");
+        std::fs::write(&path, "old\n").unwrap();
+        let mut engine = PatchEngine::new(dir.path()).unwrap();
+        let operations = vec![
+            PatchOperation::Replace(ReplaceRequest::once("copy.txt", "old", "middle")),
+            PatchOperation::Replace(ReplaceRequest::once("copy.txt", "middle", "new")),
+        ];
+
+        let plan = engine.plan_operations(&operations).unwrap();
+
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].path, PathBuf::from("copy.txt"));
+        assert_eq!(plan[0].before_hash, content_hash("old\n"));
+        assert_eq!(plan[0].after_hash, content_hash("new\n"));
+        assert!(plan[0].existed_before);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "old\n");
+    }
+
+    #[test]
+    fn plans_created_file_with_absent_before_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = PatchEngine::new(dir.path()).unwrap();
+        let operations = vec![PatchOperation::WriteFile(WholeFileRequest::create(
+            "created.txt",
+            "created\n",
+        ))];
+
+        let plan = engine.plan_operations(&operations).unwrap();
+
+        assert_eq!(plan[0].before_hash, content_hash(""));
+        assert_eq!(plan[0].after_hash, content_hash("created\n"));
+        assert!(!plan[0].existed_before);
+        assert!(!dir.path().join("created.txt").exists());
     }
 }

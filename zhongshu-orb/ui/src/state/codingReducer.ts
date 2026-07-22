@@ -1,4 +1,4 @@
-import type { CodingUiEvent, OrganizationUiEvent, OverlayToUiEvent, PatchDiffPayload } from '../ipc/events'
+import type { CodingUiEvent, OrganizationGraphView, OrganizationRecoveryResult, OrganizationUiEvent, OverlayToUiEvent, PatchDiffPayload } from '../ipc/events'
 
 export type PlanStep = {
   id: string
@@ -42,6 +42,8 @@ export type CodingState = {
   changes: ChangeState[]
   verifications: VerificationState[]
   recoveryMessages: string[]
+  organizationGraphs: OrganizationGraphView[]
+  organizationRecoveryResults: OrganizationRecoveryResult[]
   contextIncluded: {
     description: string
     estimatedTokens: number
@@ -65,6 +67,12 @@ export type CodingState = {
     reason?: string
     handoff?: { from: string; to: string }
   }
+  autoDelegation?: {
+    routingId: string
+    strategy: string
+    reason: string
+    workerCount: number
+  }
 }
 
 export const initialCodingState: CodingState = {
@@ -75,12 +83,28 @@ export const initialCodingState: CodingState = {
   changes: [],
   verifications: [],
   recoveryMessages: [],
+  organizationGraphs: [],
+  organizationRecoveryResults: [],
   contextIncluded: [],
 }
 
 export function codingReducer(state: CodingState, event: OverlayToUiEvent): CodingState {
   if (event.type === 'coding') return reduceCodingEvent(state, event.event)
   if (event.type === 'organization') return reduceOrganizationEvent(state, event.event)
+  if (event.type === 'organization_graphs') {
+    const hasUnfinishedGraph = event.graphs.some((view) => (
+      view.graph.nodes.some((node) => !['succeeded', 'failed', 'skipped', 'cancelled'].includes(node.state))
+    ))
+    return { ...state, active: state.active || hasUnfinishedGraph, organizationGraphs: event.graphs }
+  }
+  if (event.type === 'organization_recovery') {
+    return {
+      ...state,
+      active: true,
+      organizationGraphs: upsertOrganizationGraph(state.organizationGraphs, event.result.graph),
+      organizationRecoveryResults: [...state.organizationRecoveryResults, event.result],
+    }
+  }
   if (event.type === 'verification') {
     return {
       ...state,
@@ -115,8 +139,27 @@ export function codingReducer(state: CodingState, event: OverlayToUiEvent): Codi
   return state
 }
 
+function upsertOrganizationGraph(
+  graphs: OrganizationGraphView[],
+  next: OrganizationGraphView,
+): OrganizationGraphView[] {
+  const index = graphs.findIndex((view) => view.graph.task_id === next.graph.task_id)
+  if (index === -1) return [...graphs, next]
+  return graphs.map((view, viewIndex) => viewIndex === index ? next : view)
+}
+
 function reduceOrganizationEvent(state: CodingState, event: OrganizationUiEvent): CodingState {
   switch (event.kind) {
+    case 'routing_decided':
+      return {
+        ...state,
+        autoDelegation: {
+          routingId: event.routing_id,
+          strategy: event.strategy,
+          reason: event.reason,
+          workerCount: event.worker_count,
+        },
+      }
     case 'task_started':
       return {
         ...state,
@@ -179,12 +222,20 @@ function reduceOrganizationEvent(state: CodingState, event: OrganizationUiEvent)
           : state.organization,
       }
     case 'task_finished':
+      if (state.organization && state.organization.taskId !== event.task_id) return state
       return {
         ...state,
         active: false,
+        sessionId: event.task_id,
         organization: state.organization
           ? { ...state.organization, status: event.status, reason: event.reason }
-          : state.organization,
+          : {
+              taskId: event.task_id,
+              manager: '中书',
+              collaboration: 'recovery',
+              status: event.status,
+              reason: event.reason,
+            },
       }
   }
 }

@@ -1,4 +1,7 @@
 use crate::agent::llm::Message;
+use crate::agent::{
+    ExecutionGraphCheckpoint, ExecutionNodeState, EXECUTION_GRAPH_CHECKPOINT_VERSION,
+};
 use crate::core::db::Database;
 use rusqlite::OptionalExtension;
 use std::collections::HashMap;
@@ -177,6 +180,78 @@ pub struct OrganizationCheckpointStore {
     db: Database,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredExecutionGraphCheckpoint {
+    pub version: u64,
+    pub checkpoint: ExecutionGraphCheckpoint,
+    pub updated_at: u64,
+}
+
+#[derive(Debug)]
+pub enum ExecutionGraphStoreError {
+    Database(rusqlite::Error),
+    Serialization(serde_json::Error),
+    VersionConflict { expected: u64, actual: u64 },
+    UnsupportedCheckpointVersion(u32),
+    EmptyTaskId,
+}
+
+impl std::fmt::Display for ExecutionGraphStoreError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Database(error) => write!(formatter, "execution graph database error: {error}"),
+            Self::Serialization(error) => {
+                write!(formatter, "execution graph serialization error: {error}")
+            }
+            Self::VersionConflict { expected, actual } => write!(
+                formatter,
+                "execution graph version conflict: expected {expected}, actual {actual}"
+            ),
+            Self::UnsupportedCheckpointVersion(version) => {
+                write!(
+                    formatter,
+                    "unsupported execution graph checkpoint version {version}"
+                )
+            }
+            Self::EmptyTaskId => write!(formatter, "execution graph task id is empty"),
+        }
+    }
+}
+
+impl std::error::Error for ExecutionGraphStoreError {}
+
+impl From<rusqlite::Error> for ExecutionGraphStoreError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Database(error)
+    }
+}
+
+impl From<serde_json::Error> for ExecutionGraphStoreError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Serialization(error)
+    }
+}
+
+/// Durable storage boundary for versioned execution-graph checkpoints.
+/// `expected_version = 0` creates a new task; subsequent writes must use the
+/// version returned by the preceding successful save.
+pub trait ExecutionGraphStore {
+    fn save_graph_cas(
+        &self,
+        checkpoint: &ExecutionGraphCheckpoint,
+        expected_version: u64,
+    ) -> Result<u64, ExecutionGraphStoreError>;
+
+    fn load_graph(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<StoredExecutionGraphCheckpoint>, ExecutionGraphStoreError>;
+
+    fn list_unfinished_graphs(&self) -> Result<Vec<String>, ExecutionGraphStoreError>;
+
+    fn delete_graph(&self, task_id: &str) -> Result<(), ExecutionGraphStoreError>;
+}
+
 impl OrganizationCheckpointStore {
     pub fn new(db: Database) -> Self {
         Self { db }
@@ -217,9 +292,8 @@ impl OrganizationCheckpointStore {
     /// List all unfinished organization task IDs (those with checkpoints).
     pub fn list_unfinished(&self) -> rusqlite::Result<Vec<String>> {
         let conn = self.db.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT task_id FROM organization_checkpoints ORDER BY created_at",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT task_id FROM organization_checkpoints ORDER BY created_at")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut ids = Vec::new();
         for row in rows {
@@ -227,11 +301,143 @@ impl OrganizationCheckpointStore {
         }
         Ok(ids)
     }
+
+    /// Return a bounded set of recent execution graphs for the desktop
+    /// control plane, including clean terminal graphs for post-run audit.
+    pub fn list_recent_graphs(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<String>, ExecutionGraphStoreError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.db.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT task_id FROM organization_graph_checkpoints
+             ORDER BY updated_at DESC, task_id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![limit as u64], |row| {
+            row.get::<_, String>(0)
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(ExecutionGraphStoreError::Database)
+    }
+}
+
+impl ExecutionGraphStore for OrganizationCheckpointStore {
+    fn save_graph_cas(
+        &self,
+        checkpoint: &ExecutionGraphCheckpoint,
+        expected_version: u64,
+    ) -> Result<u64, ExecutionGraphStoreError> {
+        let task_id = checkpoint.graph.task_id.trim();
+        if task_id.is_empty() {
+            return Err(ExecutionGraphStoreError::EmptyTaskId);
+        }
+        if checkpoint.schema_version != EXECUTION_GRAPH_CHECKPOINT_VERSION {
+            return Err(ExecutionGraphStoreError::UnsupportedCheckpointVersion(
+                checkpoint.schema_version,
+            ));
+        }
+        let encoded = serde_json::to_string(checkpoint)?;
+        let clean_terminal = checkpoint_is_clean_terminal(checkpoint);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        let mut conn = self.db.conn()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let actual = tx
+            .query_row(
+                "SELECT version FROM organization_graph_checkpoints WHERE task_id = ?1",
+                rusqlite::params![task_id],
+                |row| row.get::<_, u64>(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        if actual != expected_version {
+            return Err(ExecutionGraphStoreError::VersionConflict {
+                expected: expected_version,
+                actual,
+            });
+        }
+        let next_version = actual + 1;
+        tx.execute(
+            "INSERT INTO organization_graph_checkpoints
+             (task_id, version, checkpoint, clean_terminal, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(task_id) DO UPDATE SET
+                version = excluded.version,
+                checkpoint = excluded.checkpoint,
+                clean_terminal = excluded.clean_terminal,
+                updated_at = excluded.updated_at",
+            rusqlite::params![task_id, next_version, encoded, clean_terminal as i64, now],
+        )?;
+        tx.commit()?;
+        Ok(next_version)
+    }
+
+    fn load_graph(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<StoredExecutionGraphCheckpoint>, ExecutionGraphStoreError> {
+        let conn = self.db.conn()?;
+        let row = conn
+            .query_row(
+                "SELECT version, checkpoint, updated_at
+                 FROM organization_graph_checkpoints WHERE task_id = ?1",
+                rusqlite::params![task_id],
+                |row| {
+                    Ok((
+                        row.get::<_, u64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, u64>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        row.map(|(version, encoded, updated_at)| {
+            Ok(StoredExecutionGraphCheckpoint {
+                version,
+                checkpoint: serde_json::from_str(&encoded)?,
+                updated_at,
+            })
+        })
+        .transpose()
+    }
+
+    fn list_unfinished_graphs(&self) -> Result<Vec<String>, ExecutionGraphStoreError> {
+        let conn = self.db.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT task_id FROM organization_graph_checkpoints
+             WHERE clean_terminal = 0 ORDER BY updated_at, task_id",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(ExecutionGraphStoreError::Database)
+    }
+
+    fn delete_graph(&self, task_id: &str) -> Result<(), ExecutionGraphStoreError> {
+        let conn = self.db.conn()?;
+        conn.execute(
+            "DELETE FROM organization_graph_checkpoints WHERE task_id = ?1",
+            rusqlite::params![task_id],
+        )?;
+        Ok(())
+    }
+}
+
+fn checkpoint_is_clean_terminal(checkpoint: &ExecutionGraphCheckpoint) -> bool {
+    !checkpoint.graph.nodes.is_empty()
+        && checkpoint.graph.nodes.iter().all(|node| {
+            node.state.is_terminal() && node.state != ExecutionNodeState::RecoveryRequired
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::{ExecutionGraph, ExecutionNode, ExecutionNodeKind};
     use crate::core::ledger::RunLedger;
 
     fn checkpoint(run_id: &str) -> AgentCheckpoint {
@@ -279,8 +485,12 @@ mod tests {
 
         assert!(store.list_unfinished().unwrap().is_empty());
 
-        store.save("task-1", "objective 1", r#"{"role":"analyst"}"#, "[]").unwrap();
-        store.save("task-2", "objective 2", r#"{"role":"writer"}"#, "[]").unwrap();
+        store
+            .save("task-1", "objective 1", r#"{"role":"analyst"}"#, "[]")
+            .unwrap();
+        store
+            .save("task-2", "objective 2", r#"{"role":"writer"}"#, "[]")
+            .unwrap();
 
         let unfinished = store.list_unfinished().unwrap();
         assert_eq!(unfinished.len(), 2);
@@ -294,5 +504,82 @@ mod tests {
 
         store.delete("task-2").unwrap();
         assert!(store.list_unfinished().unwrap().is_empty());
+    }
+
+    #[test]
+    fn execution_graph_store_reopens_and_rejects_stale_cas_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("graph_checkpoint.db");
+        let db = Database::new(path.clone());
+        db.migrate().unwrap();
+        let store = OrganizationCheckpointStore::new(db);
+        let mut graph = ExecutionGraph::new("graph-task").unwrap();
+        graph
+            .add_node(ExecutionNode::pending(
+                "work",
+                ExecutionNodeKind::Work,
+                "external work",
+            ))
+            .unwrap();
+        graph.start_node("work").unwrap();
+        let running_checkpoint = graph.checkpoint();
+
+        let version_one = store.save_graph_cas(&running_checkpoint, 0).unwrap();
+        assert_eq!(version_one, 1);
+        let loaded = store.load_graph("graph-task").unwrap().unwrap();
+        assert_eq!(loaded.version, 1);
+        let (recovered, recovery) =
+            ExecutionGraph::recover_from_checkpoint(loaded.checkpoint).unwrap();
+        assert_eq!(recovery.recovery_required_nodes, vec!["work"]);
+        let version_two = store.save_graph_cas(&recovered.checkpoint(), 1).unwrap();
+        assert_eq!(version_two, 2);
+
+        let stale_error = store.save_graph_cas(&running_checkpoint, 1).unwrap_err();
+        assert!(matches!(
+            stale_error,
+            ExecutionGraphStoreError::VersionConflict {
+                expected: 1,
+                actual: 2
+            }
+        ));
+
+        let reopened = OrganizationCheckpointStore::new(Database::new(path));
+        let loaded = reopened.load_graph("graph-task").unwrap().unwrap();
+        assert_eq!(loaded.version, 2);
+        assert_eq!(
+            loaded.checkpoint.graph.nodes[0].state,
+            ExecutionNodeState::RecoveryRequired
+        );
+        assert_eq!(
+            reopened.list_unfinished_graphs().unwrap(),
+            vec!["graph-task"]
+        );
+        reopened.delete_graph("graph-task").unwrap();
+        assert!(reopened.load_graph("graph-task").unwrap().is_none());
+    }
+
+    #[test]
+    fn clean_terminal_graph_is_retained_but_not_listed_unfinished() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(dir.path().join("terminal_graph.db"));
+        db.migrate().unwrap();
+        let store = OrganizationCheckpointStore::new(db);
+        let mut graph = ExecutionGraph::new("finished-task").unwrap();
+        graph
+            .add_node(ExecutionNode::pending(
+                "finalize",
+                ExecutionNodeKind::Finalize,
+                "finish",
+            ))
+            .unwrap();
+        graph.start_node("finalize").unwrap();
+        graph.complete_node("finalize", Vec::new()).unwrap();
+
+        store.save_graph_cas(&graph.checkpoint(), 0).unwrap();
+
+        assert!(store.list_unfinished_graphs().unwrap().is_empty());
+        assert!(store.load_graph("finished-task").unwrap().is_some());
+        assert_eq!(store.list_recent_graphs(8).unwrap(), vec!["finished-task"]);
+        assert!(store.list_recent_graphs(0).unwrap().is_empty());
     }
 }

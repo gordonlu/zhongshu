@@ -379,11 +379,7 @@ impl EquipmentObserver {
     /// Record a user message observation (called from orb layer).
     pub fn record_user_message(&mut self, content: &str) {
         let scrubbed = scrub_message(content);
-        let truncated = if scrubbed.len() > 200 {
-            format!("{}...", &scrubbed[..197])
-        } else {
-            scrubbed
-        };
+        let truncated = truncate_chars_with_ellipsis(&scrubbed, 200);
         self.store.push(Observation {
             timestamp: now(),
             kind: ObservationKind::UserMessage { content: truncated },
@@ -672,6 +668,16 @@ prompt.md        # 由中书根据 manifest 自动生成并注入 system prompt
     }
 }
 
+fn truncate_chars_with_ellipsis(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_owned();
+    }
+    let retained = max_chars.saturating_sub(3);
+    let mut truncated = value.chars().take(retained).collect::<String>();
+    truncated.push_str(&".".repeat(max_chars.min(3)));
+    truncated
+}
+
 /// Parse LLM response to an equipment proposal into a Manifest.
 /// Returns None if the LLM declined ("无需装备") or parsing failed.
 pub fn parse_proposal_response(text: &str) -> Option<Manifest> {
@@ -789,6 +795,22 @@ mod tests {
     }
 
     #[test]
+    fn observer_truncates_long_utf8_user_message_on_character_boundary() {
+        let mut observer = EquipmentObserver::new();
+        let prompt =
+            "只修改 status=pending 改为 status=passed；在沙箱中运行测试并提交实际差异。".repeat(12);
+
+        observer.record_user_message(&prompt);
+
+        let ObservationKind::UserMessage { content } = &observer.store().all()[0].kind else {
+            panic!("expected user message observation");
+        };
+        assert_eq!(content.chars().count(), 200);
+        assert!(content.ends_with("..."));
+        assert!(std::str::from_utf8(content.as_bytes()).is_ok());
+    }
+
+    #[test]
     fn usage_report_empty_when_no_observations() {
         let obs = EquipmentObserver::new();
         let report = obs.usage_report();
@@ -805,7 +827,7 @@ mod tests {
         // should pass, but the 2-day check may fail since all timestamps are "now".
         //
         // Add enough tool + user observations to clear thresholds.
-        for i in 0..6 {
+        for _ in 0..6 {
             obs.observe(&Event::Tool(ToolEvent::Started {
                 name: "shell".into(),
                 run_id: "test".into(),

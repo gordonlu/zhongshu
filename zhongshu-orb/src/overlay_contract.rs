@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use zhongshu_core::agent::ExecutionGraphSnapshot;
 use zhongshu_core::event::OrganizationEvent;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -74,6 +75,7 @@ pub struct SettingsConfig {
     pub bg_interval: Option<String>,
     pub bg_prompt: Option<String>,
     pub auto_evolve: Option<bool>,
+    pub auto_multi_agent: Option<bool>,
     pub max_context_tokens: Option<u32>,
     pub mode: Option<String>,
 }
@@ -92,6 +94,7 @@ pub struct SettingsUpdate {
     pub bg_interval: Option<String>,
     pub bg_prompt: Option<String>,
     pub auto_evolve: Option<bool>,
+    pub auto_multi_agent: Option<bool>,
     pub max_context_tokens: Option<u32>,
     pub mode: Option<String>,
 }
@@ -104,6 +107,8 @@ pub struct OrganizationEmployeeInfo {
     pub focus: String,
     pub read_only_eligible: bool,
     pub blocked_by: Option<String>,
+    pub sandbox_eligible: bool,
+    pub sandbox_blocked_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -111,10 +116,19 @@ pub struct OrganizationEmployeeInfo {
 pub struct OrganizationRoleCommand {
     pub role: String,
     #[serde(default)]
+    pub employee: Option<String>,
+    #[serde(default)]
     pub capabilities: Vec<String>,
     pub responsibility: String,
     #[serde(default = "default_true")]
     pub required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OrganizationFileScopeCommand {
+    pub employee: String,
+    pub owned_files: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -132,6 +146,43 @@ pub struct OrganizationTaskCommand {
     pub target_employee: Option<String>,
     #[serde(default)]
     pub mutation: bool,
+    #[serde(default)]
+    pub workspace_mode: zhongshu_core::agent::WorkerWorkspaceMode,
+    #[serde(default)]
+    pub file_scopes: Vec<OrganizationFileScopeCommand>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OrganizationGraphView {
+    pub store_version: u64,
+    pub graph: ExecutionGraphSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OrganizationRecoveryCommand {
+    pub task_id: String,
+    pub node_id: String,
+    pub action: OrganizationRecoveryAction,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OrganizationRecoveryAction {
+    Reconcile,
+    Abandon,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OrganizationRecoveryResult {
+    pub task_id: String,
+    pub node_id: String,
+    pub action: OrganizationRecoveryAction,
+    pub assessment: String,
+    pub reason: String,
+    pub evidence_refs: Vec<String>,
+    pub executed_cleanup_nodes: Vec<String>,
+    pub graph: OrganizationGraphView,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -192,6 +243,12 @@ pub enum OverlayToUiEvent {
     OrganizationRoster {
         employees: Vec<OrganizationEmployeeInfo>,
         max_workers: usize,
+    },
+    OrganizationGraphs {
+        graphs: Vec<OrganizationGraphView>,
+    },
+    OrganizationRecovery {
+        result: OrganizationRecoveryResult,
     },
     Verification {
         command: String,
@@ -289,6 +346,8 @@ pub enum UiToOverlayCommand {
     DelegateReview(String),
     DelegateOrganization(OrganizationTaskCommand),
     ListOrganizationEmployees,
+    ListOrganizationGraphs,
+    RecoverOrganization(OrganizationRecoveryCommand),
     Stop,
     NewConversation,
     Approve(String),
@@ -403,6 +462,13 @@ pub fn parse_ui_command(body: &str) -> UiToOverlayCommand {
         .map(UiToOverlayCommand::DelegateOrganization)
         .unwrap_or(UiToOverlayCommand::Unknown),
         Some("list_organization_employees") => UiToOverlayCommand::ListOrganizationEmployees,
+        Some("list_organization_graphs") => UiToOverlayCommand::ListOrganizationGraphs,
+        Some("reconcile_organization") => {
+            parse_organization_recovery(&msg, OrganizationRecoveryAction::Reconcile)
+        }
+        Some("abandon_organization_recovery") => {
+            parse_organization_recovery(&msg, OrganizationRecoveryAction::Abandon)
+        }
         Some("stop") => UiToOverlayCommand::Stop,
         Some("new_conversation") => UiToOverlayCommand::NewConversation,
         Some("approve") => {
@@ -448,6 +514,36 @@ pub fn parse_ui_command(body: &str) -> UiToOverlayCommand {
     }
 }
 
+fn parse_organization_recovery(
+    message: &serde_json::Value,
+    action: OrganizationRecoveryAction,
+) -> UiToOverlayCommand {
+    let Some(task_id) = message.get("task_id").and_then(serde_json::Value::as_str) else {
+        return UiToOverlayCommand::Unknown;
+    };
+    let Some(node_id) = message.get("node_id").and_then(serde_json::Value::as_str) else {
+        return UiToOverlayCommand::Unknown;
+    };
+    let reason = message
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .map(str::to_owned);
+    if task_id.trim().is_empty()
+        || node_id.trim().is_empty()
+        || (action == OrganizationRecoveryAction::Abandon && reason.is_none())
+    {
+        return UiToOverlayCommand::Unknown;
+    }
+    UiToOverlayCommand::RecoverOrganization(OrganizationRecoveryCommand {
+        task_id: task_id.to_owned(),
+        node_id: node_id.to_owned(),
+        action,
+        reason,
+    })
+}
+
 fn valid_organization_task(task: &OrganizationTaskCommand) -> bool {
     let worker_limit_valid = match task.max_workers {
         Some(limit) => limit > 0 && limit <= zhongshu_core::agent::DEFAULT_MAX_WORKERS_PER_TASK,
@@ -457,10 +553,46 @@ fn valid_organization_task(task: &OrganizationTaskCommand) -> bool {
         Some(employee) => !employee.trim().is_empty() && task.requirements.len() == 1,
         None => true,
     };
+    let mut selected_employees = std::collections::BTreeSet::new();
+    let selected_employees_valid = task.requirements.iter().all(|requirement| {
+        requirement.employee.as_deref().map_or(true, |employee| {
+            !employee.trim().is_empty() && selected_employees.insert(employee)
+        })
+    });
+    let mut scoped_employees = std::collections::BTreeSet::new();
+    let file_scopes_valid = task.file_scopes.iter().all(|scope| {
+        !scope.employee.trim().is_empty()
+            && scoped_employees.insert(scope.employee.as_str())
+            && !scope.owned_files.is_empty()
+            && scope.owned_files.iter().all(|file| {
+                let path = std::path::Path::new(file);
+                !file.trim().is_empty()
+                    && !path.is_absolute()
+                    && !path
+                        .components()
+                        .any(|component| matches!(component, std::path::Component::ParentDir))
+            })
+    });
+    let mutation_scopes_match = if task.mutation {
+        !selected_employees.is_empty()
+            && selected_employees
+                == scoped_employees
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>()
+    } else {
+        task.file_scopes.is_empty()
+    };
+    let workspace_mode_valid = task.mutation
+        || task.workspace_mode == zhongshu_core::agent::WorkerWorkspaceMode::ProposalOnly;
     !task.objective.trim().is_empty()
         && !task.requirements.is_empty()
         && task.requirements.len() <= zhongshu_core::agent::DEFAULT_MAX_WORKERS_PER_TASK
         && worker_limit_valid
+        && selected_employees_valid
+        && file_scopes_valid
+        && mutation_scopes_match
+        && workspace_mode_valid
         && task.requirements.iter().all(|requirement| {
             !requirement.role.trim().is_empty()
                 && !requirement.responsibility.trim().is_empty()
@@ -503,6 +635,7 @@ fn settings_from_value(value: &serde_json::Value) -> Option<SettingsUpdate> {
             .and_then(|v| v.as_str())
             .map(String::from),
         auto_evolve: cfg.get("auto_evolve").and_then(|v| v.as_bool()),
+        auto_multi_agent: cfg.get("auto_multi_agent").and_then(|v| v.as_bool()),
         max_context_tokens: cfg
             .get("max_context_tokens")
             .and_then(|v| v.as_u64())
@@ -556,9 +689,62 @@ mod tests {
     }
 
     #[test]
+    fn mutation_command_requires_matching_safe_file_scopes() {
+        let valid = parse_ui_command(
+            r#"{"type":"delegate_organization","task":{"objective":"update copy","requirements":[{"role":"writer","employee":"writer-a","responsibility":"copy"}],"max_workers":1,"mutation":true,"workspace_mode":"isolated_sandbox","file_scopes":[{"employee":"writer-a","owned_files":["src/copy.rs"]}]}}"#,
+        );
+        let UiToOverlayCommand::DelegateOrganization(valid) = valid else {
+            panic!("expected organization command");
+        };
+        assert_eq!(
+            valid.workspace_mode,
+            zhongshu_core::agent::WorkerWorkspaceMode::IsolatedSandbox
+        );
+
+        for invalid in [
+            r#"{"type":"delegate_organization","task":{"objective":"update copy","requirements":[{"role":"writer","employee":"writer-a","responsibility":"copy"}],"max_workers":1,"mutation":true}}"#,
+            r#"{"type":"delegate_organization","task":{"objective":"update copy","requirements":[{"role":"writer","employee":"writer-a","responsibility":"copy"}],"max_workers":1,"mutation":true,"file_scopes":[{"employee":"writer-a","owned_files":["../outside"]}]}}"#,
+            r#"{"type":"delegate_organization","task":{"objective":"update copy","requirements":[{"role":"writer","employee":"writer-a","responsibility":"copy"}],"max_workers":1,"mutation":true,"file_scopes":[{"employee":"writer-b","owned_files":["src/copy.rs"]}]}}"#,
+            r#"{"type":"delegate_organization","task":{"objective":"review copy","requirements":[{"role":"writer","employee":"writer-a","responsibility":"copy"}],"max_workers":1,"workspace_mode":"isolated_sandbox"}}"#,
+        ] {
+            assert_eq!(parse_ui_command(invalid), UiToOverlayCommand::Unknown);
+        }
+    }
+
+    #[test]
+    fn recovery_commands_require_graph_identity_and_explicit_abandon_reason() {
+        assert_eq!(
+            parse_ui_command(
+                r#"{"type":"reconcile_organization","task_id":"mutation-1","node_id":"apply"}"#,
+            ),
+            UiToOverlayCommand::RecoverOrganization(OrganizationRecoveryCommand {
+                task_id: "mutation-1".into(),
+                node_id: "apply".into(),
+                action: OrganizationRecoveryAction::Reconcile,
+                reason: None,
+            })
+        );
+        assert!(matches!(
+            parse_ui_command(
+                r#"{"type":"abandon_organization_recovery","task_id":"mutation-1","node_id":"apply","reason":"operator inspected partial output"}"#,
+            ),
+            UiToOverlayCommand::RecoverOrganization(OrganizationRecoveryCommand {
+                action: OrganizationRecoveryAction::Abandon,
+                ..
+            })
+        ));
+        assert_eq!(
+            parse_ui_command(
+                r#"{"type":"abandon_organization_recovery","task_id":"mutation-1","node_id":"apply","reason":"  "}"#,
+            ),
+            UiToOverlayCommand::Unknown
+        );
+    }
+
+    #[test]
     fn parses_settings_command() {
         let cmd = parse_ui_command(
-            r#"{"type":"save_settings","config":{"api_base":"https://example.test","model":"m","mode":"coding","max_context_tokens":100000}}"#,
+            r#"{"type":"save_settings","config":{"api_base":"https://example.test","model":"m","mode":"coding","max_context_tokens":100000,"auto_multi_agent":true}}"#,
         );
 
         match cmd {
@@ -567,6 +753,7 @@ mod tests {
                 assert_eq!(settings.model.as_deref(), Some("m"));
                 assert_eq!(settings.mode.as_deref(), Some("coding"));
                 assert_eq!(settings.max_context_tokens, Some(100000));
+                assert_eq!(settings.auto_multi_agent, Some(true));
             }
             other => panic!("unexpected command: {other:?}"),
         }

@@ -54,6 +54,7 @@ pub struct SettingsConfig {
     pub bg_interval: Option<String>,
     pub bg_prompt: Option<String>,
     pub auto_evolve: Option<bool>,
+    pub auto_multi_agent: Option<bool>,
     pub max_context_tokens: Option<u32>,
     pub mode: Option<String>,
 }
@@ -70,6 +71,7 @@ pub struct SettingsUpdate {
     pub bg_interval: Option<String>,
     pub bg_prompt: Option<String>,
     pub auto_evolve: Option<bool>,
+    pub auto_multi_agent: Option<bool>,
     pub max_context_tokens: Option<u32>,
     pub mode: Option<String>,
 }

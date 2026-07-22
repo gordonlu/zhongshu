@@ -433,8 +433,8 @@ fn smoke_context_pack_crops_excess_evidence() {
 fn smoke_budget_assistant_defaults() {
     let b = AgentBudget::assistant_default();
     assert_eq!(b.max_steps, 80);
-    assert_eq!(b.max_tool_calls, 160);
-    assert_eq!(b.per_tool_limit, 40);
+    assert_eq!(b.max_tool_calls, 256);
+    assert_eq!(b.per_tool_limit, 128);
     assert_eq!(b.token_limit, 500_000);
     assert_eq!(b.llm_timeout.as_secs(), 240);
     assert_eq!(b.tool_timeout.as_secs(), 120);
@@ -444,8 +444,8 @@ fn smoke_budget_assistant_defaults() {
 fn smoke_budget_coding_defaults() {
     let b = AgentBudget::coding_default();
     assert_eq!(b.max_steps, 200);
-    assert_eq!(b.max_tool_calls, 400);
-    assert_eq!(b.per_tool_limit, 200);
+    assert_eq!(b.max_tool_calls, 1024);
+    assert_eq!(b.per_tool_limit, 512);
     assert_eq!(b.token_limit, 1_000_000);
     assert_eq!(b.llm_timeout.as_secs(), 600);
     assert_eq!(b.tool_timeout.as_secs(), 300);

@@ -5,13 +5,24 @@ use crate::agent::llm_registry::{LlmClient, LlmRegistry};
 use crate::agent::organization::{
     AssignmentAuthority, CollaborationMode, DispatchTarget, EmployeeAssignment, OrganizationRouter,
     OrganizationTaskRequest, StaffingDecision, StaffingMode, StaffingPolicy, StaffingRequest,
-    DEFAULT_MAX_EMPLOYEE_ROSTER, DEFAULT_MAX_WORKERS_PER_TASK,
+    WorkerWorkspaceMode, DEFAULT_MAX_EMPLOYEE_ROSTER, DEFAULT_MAX_WORKERS_PER_TASK,
 };
 use crate::agent::profile::AgentProfile;
 use crate::agent::report::Report;
 use crate::agent::runtime::AgentRuntime;
+use crate::agent::sandbox::WorkerSandbox;
 use crate::agent::worker::Worker;
 use crate::agent::AttentionLevel;
+#[cfg(test)]
+use crate::agent::ExecutionNodeState;
+use crate::agent::{
+    ExecutionArtifact, ExecutionGraphError, ExecutionGraphSnapshot, MutationExecutionGraphPlan,
+    NodeExecutionOutcome,
+};
+use crate::core::{
+    file_claim_effect_intents, workspace_effect_intents, DurableExecutionRunner,
+    ExecutionGraphStore, OrganizationCheckpointStore,
+};
 use crate::harness::architecture::index::ProjectIndex;
 use crate::harness::trace::event::HarnessEvent;
 use crate::integration::{
@@ -39,6 +50,81 @@ pub struct StaffedTask {
     pub assignments: Vec<WorkerAssignment>,
 }
 
+type OrganizationDurableRunner = DurableExecutionRunner<OrganizationCheckpointStore>;
+
+async fn admit_organization_node(
+    runner: Option<&OrganizationDurableRunner>,
+    graph: &mut crate::agent::ExecutionGraph,
+    store_version: &mut u64,
+    node_id: &str,
+) -> anyhow::Result<()> {
+    if let Some(runner) = runner {
+        runner.admit_node(graph, store_version, node_id).await?;
+    } else {
+        graph.start_node(node_id)?;
+    }
+    Ok(())
+}
+
+async fn admit_organization_batch(
+    runner: Option<&OrganizationDurableRunner>,
+    graph: &mut crate::agent::ExecutionGraph,
+    store_version: &mut u64,
+    node_ids: &[String],
+) -> anyhow::Result<()> {
+    if let Some(runner) = runner {
+        runner
+            .admit_ready_batch(graph, store_version, node_ids)
+            .await?;
+    } else {
+        graph.start_ready_batch(node_ids)?;
+    }
+    Ok(())
+}
+
+async fn record_organization_outcome(
+    runner: Option<&OrganizationDurableRunner>,
+    graph: &mut crate::agent::ExecutionGraph,
+    store_version: &mut u64,
+    node_id: &str,
+    outcome: NodeExecutionOutcome,
+) -> anyhow::Result<()> {
+    if let Some(runner) = runner {
+        runner
+            .record_outcome(graph, store_version, node_id, &outcome)
+            .await?;
+        return Ok(());
+    }
+    match outcome {
+        NodeExecutionOutcome::Succeeded(artifacts) => graph.complete_node(node_id, artifacts)?,
+        NodeExecutionOutcome::Failed(reason) => graph.fail_node(node_id, reason)?,
+        NodeExecutionOutcome::Cancelled(reason) => graph.cancel_node(node_id, reason)?,
+        NodeExecutionOutcome::Deferred => {
+            return Err(ExecutionGraphError::SchedulerStalled(vec![node_id.into()]).into());
+        }
+    }
+    Ok(())
+}
+
+async fn commit_organization_transition<F>(
+    runner: Option<&OrganizationDurableRunner>,
+    graph: &mut crate::agent::ExecutionGraph,
+    store_version: &mut u64,
+    transition: F,
+) -> anyhow::Result<()>
+where
+    F: FnOnce(&mut crate::agent::ExecutionGraph) -> Result<(), ExecutionGraphError>,
+{
+    if let Some(runner) = runner {
+        runner
+            .commit_deterministic(graph, store_version, transition)
+            .await?;
+    } else {
+        transition(graph)?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrganizationExecutionStatus {
@@ -46,6 +132,7 @@ pub enum OrganizationExecutionStatus {
     Blocked,
     Completed,
     Submitted,
+    Cancelled,
     WorkerFailed,
 }
 
@@ -67,6 +154,9 @@ pub struct OrganizationExecutionReport {
     pub employee_reports: Vec<EmployeeWorkReport>,
     pub execution_error: Option<String>,
     pub trace_events: Vec<HarnessEvent>,
+    /// Neutral, append-only execution state. The organization fields above are
+    /// retained as a compatibility projection for existing desktop clients.
+    pub execution_graph: ExecutionGraphSnapshot,
 }
 
 impl OrganizationExecutionReport {
@@ -105,6 +195,7 @@ pub struct OrganizationMutationReport {
     pub employee_reports: Vec<EmployeeWorkReport>,
     pub pipeline: Option<WorkerPatchPipelineReport>,
     pub manager_acceptance: ManagerAcceptanceReport,
+    pub execution_graph: ExecutionGraphSnapshot,
 }
 
 impl OrganizationMutationReport {
@@ -381,6 +472,96 @@ struct SubmitPatchProposalTool {
     collector: std::sync::Arc<std::sync::Mutex<PatchProposalCollector>>,
 }
 
+struct SubmitSandboxProposalTool {
+    worker: String,
+    collector: std::sync::Arc<std::sync::Mutex<PatchProposalCollector>>,
+    sandbox: WorkerSandbox,
+}
+
+#[async_trait]
+impl crate::tool::Tool for SubmitSandboxProposalTool {
+    fn name(&self) -> &str {
+        SUBMIT_PATCH_PROPOSAL_TOOL
+    }
+
+    fn description(&self) -> &str {
+        "Seal this employee's isolated sandbox and submit its actual changed files for deterministic manager review. Call this only after all sandbox edits are complete."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["summary"],
+            "properties": {
+                "summary": { "type": "string", "minLength": 1 },
+                "verification_commands": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                }
+            }
+        })
+    }
+
+    fn spec(&self) -> crate::tool::ToolSpec {
+        crate::tool::ToolSpec::new(SUBMIT_PATCH_PROPOSAL_TOOL)
+            .with_effect(crate::tool::ToolEffect::Memory)
+            .read_only(true)
+            .workspace_scope(crate::tool::WorkspaceScope::WorkspaceOnly)
+            .requires_approval(false)
+            .side_effect(crate::tool::SideEffect::ReadOnly)
+    }
+
+    async fn execute(&self, arguments: &serde_json::Value) -> crate::tool::ToolOutput {
+        let Some(summary) = arguments.get("summary").and_then(serde_json::Value::as_str) else {
+            return crate::tool::ToolOutput::error("summary must be a string");
+        };
+        if summary.trim().is_empty() {
+            return crate::tool::ToolOutput::error("summary must not be empty");
+        }
+        let verification_commands = match arguments.get("verification_commands") {
+            None => Vec::new(),
+            Some(value) => match serde_json::from_value::<Vec<String>>(value.clone()) {
+                Ok(commands) if commands.iter().all(|command| !command.trim().is_empty()) => {
+                    commands
+                }
+                _ => {
+                    return crate::tool::ToolOutput::error(
+                        "verification_commands must contain non-empty strings",
+                    )
+                }
+            },
+        };
+        let operations = match self.sandbox.collect_operations_and_seal() {
+            Ok(operations) => operations,
+            Err(error) => return crate::tool::ToolOutput::error(error.to_string()),
+        };
+        let files = operations
+            .iter()
+            .map(|operation| operation.path().to_path_buf())
+            .collect::<Vec<_>>();
+        let submission = PatchProposalSubmission {
+            summary: summary.trim().into(),
+            files,
+            verification_commands,
+            operations,
+        };
+        match self
+            .collector
+            .lock()
+            .unwrap()
+            .record(&self.worker, submission)
+        {
+            Ok(()) => crate::tool::ToolOutput::success(serde_json::json!({
+                "accepted_for_review": true,
+                "employee": self.worker,
+                "sandbox_sealed": true
+            })),
+            Err(error) => crate::tool::ToolOutput::error(error),
+        }
+    }
+}
+
 #[async_trait]
 impl crate::tool::Tool for SubmitPatchProposalTool {
     fn name(&self) -> &str {
@@ -583,6 +764,20 @@ pub struct WorkerPatchPipelineReport {
     pub apply_report: WorkerPatchApplyReport,
 }
 
+#[derive(Debug, Clone)]
+pub struct ReviewedWorkerPatchPipeline {
+    session_id: Option<String>,
+    pub execution: WorkerExecutionReport,
+    pub merge_review: WorkerMergeReview,
+}
+
+#[derive(Debug, Clone)]
+pub struct AppliedWorkerPatchPipeline {
+    pub execution: WorkerExecutionReport,
+    pub merge_review: WorkerMergeReview,
+    pub apply_report: WorkerPatchApplyReport,
+}
+
 impl WorkerPatchPipelineReport {
     pub fn passed(&self) -> bool {
         self.status == WorkerPatchPipelineStatus::Applied && self.apply_report.passed()
@@ -637,6 +832,7 @@ pub struct Orchestrator {
     pub runtime: AgentRuntime,
     pub registry: LlmRegistry,
     pub max_concurrent_workers: usize,
+    pub worker_workspace_root: Option<PathBuf>,
 }
 
 impl Orchestrator {
@@ -645,7 +841,13 @@ impl Orchestrator {
             runtime,
             registry,
             max_concurrent_workers: DEFAULT_MAX_WORKERS_PER_TASK,
+            worker_workspace_root: None,
         }
+    }
+
+    pub fn with_worker_workspace_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.worker_workspace_root = Some(root.into());
+        self
     }
 
     /// Apply the deterministic organization contract to a Lead-produced
@@ -747,8 +949,44 @@ impl Orchestrator {
         &self,
         request: &OrganizationTaskRequest,
         roster: &[AgentProfile],
+        on_event: F,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+    ) -> anyhow::Result<OrganizationExecutionReport>
+    where
+        F: FnMut(crate::event::OrganizationEvent) + Send,
+    {
+        self.execute_organization_task_with_events_inner(request, roster, on_event, cancel, None)
+            .await
+    }
+
+    pub async fn execute_organization_task_with_events_durable<F>(
+        &self,
+        request: &OrganizationTaskRequest,
+        roster: &[AgentProfile],
+        on_event: F,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+        store: OrganizationCheckpointStore,
+    ) -> anyhow::Result<OrganizationExecutionReport>
+    where
+        F: FnMut(crate::event::OrganizationEvent) + Send,
+    {
+        self.execute_organization_task_with_events_inner(
+            request,
+            roster,
+            on_event,
+            cancel,
+            Some(store),
+        )
+        .await
+    }
+
+    async fn execute_organization_task_with_events_inner<F>(
+        &self,
+        request: &OrganizationTaskRequest,
+        roster: &[AgentProfile],
         mut on_event: F,
         cancel: Option<tokio_util::sync::CancellationToken>,
+        durable_store: Option<OrganizationCheckpointStore>,
     ) -> anyhow::Result<OrganizationExecutionReport>
     where
         F: FnMut(crate::event::OrganizationEvent) + Send,
@@ -762,6 +1000,13 @@ impl Orchestrator {
             collaboration: collaboration_label(request.collaboration).into(),
         });
         let mut staffed = self.staff_organization_task(request, roster);
+        let mut graph_plan = request.compile_execution_graph(&staffed.decision)?;
+        let durable_runner = durable_store.map(DurableExecutionRunner::new);
+        let mut graph_store_version = if let Some(runner) = durable_runner.as_ref() {
+            runner.initialize(&graph_plan.graph).await?
+        } else {
+            0
+        };
         for assignment in &staffed.decision.assignments {
             on_event(OrganizationEvent::EmployeeAssigned {
                 task_id: request.task_id.clone(),
@@ -787,9 +1032,23 @@ impl Orchestrator {
                 employee_reports: Vec::new(),
                 execution_error: None,
                 trace_events: Vec::new(),
+                execution_graph: graph_plan.graph.snapshot(),
             });
         }
         if !staffed.decision.can_execute() || staffed.assignments.is_empty() {
+            let decide_node = graph_plan.decide_node.clone();
+            commit_organization_transition(
+                durable_runner.as_ref(),
+                &mut graph_plan.graph,
+                &mut graph_store_version,
+                move |graph| {
+                    graph.start_node(&decide_node)?;
+                    graph.fail_node(&decide_node, "staffing contract blocked execution")?;
+                    graph.settle_unreachable()?;
+                    Ok(())
+                },
+            )
+            .await?;
             on_event(OrganizationEvent::TaskFinished {
                 task_id: request.task_id.clone(),
                 status: "blocked".into(),
@@ -805,6 +1064,7 @@ impl Orchestrator {
                 employee_reports: Vec::new(),
                 execution_error: None,
                 trace_events: Vec::new(),
+                execution_graph: graph_plan.graph.snapshot(),
             });
         }
         if let Some((worker, tool)) = staffed.assignments.iter().find_map(|assignment| {
@@ -815,6 +1075,27 @@ impl Orchestrator {
             staffed.decision.rationale.push(format!(
                 "read-only organization executor blocked worker '{worker}' tool '{tool}'; mutation-capable tasks require the file-claim and patch-review pipeline"
             ));
+            let work_nodes = graph_plan
+                .work_nodes
+                .iter()
+                .map(|(_, node_id)| node_id.clone())
+                .collect::<Vec<_>>();
+            commit_organization_transition(
+                durable_runner.as_ref(),
+                &mut graph_plan.graph,
+                &mut graph_store_version,
+                move |graph| {
+                    for node_id in &work_nodes {
+                        graph.cancel_node(
+                            node_id,
+                            "read-only capability boundary blocked execution",
+                        )?;
+                    }
+                    graph.settle_unreachable()?;
+                    Ok(())
+                },
+            )
+            .await?;
             on_event(OrganizationEvent::TaskFinished {
                 task_id: request.task_id.clone(),
                 status: "blocked".into(),
@@ -830,6 +1111,7 @@ impl Orchestrator {
                 employee_reports: Vec::new(),
                 execution_error: None,
                 trace_events: Vec::new(),
+                execution_graph: graph_plan.graph.snapshot(),
             });
         }
 
@@ -838,47 +1120,394 @@ impl Orchestrator {
         let mut execution_error = None;
         let mut handoff_summaries = Vec::new();
         let mut previous_employee: Option<String> = None;
-        for assignment in &staffed.assignments {
-            // Check for graceful cancellation between workers.
-            if let Some(ref ct) = cancel {
-                if ct.is_cancelled() {
-                    execution_error = Some("cancelled by user".into());
-                    break;
+        if request.collaboration == CollaborationMode::Independent {
+            let mut admitted = Vec::new();
+            if cancel.as_ref().is_some_and(|token| token.is_cancelled()) {
+                execution_error = Some("cancelled by user".into());
+                let work_nodes = graph_plan
+                    .work_nodes
+                    .iter()
+                    .map(|(_, node_id)| node_id.clone())
+                    .collect::<Vec<_>>();
+                commit_organization_transition(
+                    durable_runner.as_ref(),
+                    &mut graph_plan.graph,
+                    &mut graph_store_version,
+                    move |graph| {
+                        for node_id in &work_nodes {
+                            graph.cancel_node(node_id, "cancelled by user")?;
+                        }
+                        graph.settle_unreachable()?;
+                        Ok(())
+                    },
+                )
+                .await?;
+            } else {
+                for assignment in &staffed.assignments {
+                    let node_id = graph_plan
+                        .work_nodes
+                        .iter()
+                        .find_map(|(executor, node_id)| {
+                            (executor == &assignment.worker_name).then_some(node_id.clone())
+                        })
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "execution graph has no work node leased to '{}'",
+                                assignment.worker_name
+                            )
+                        })?;
+                    admitted.push((assignment.clone(), node_id));
                 }
-            }
-            let mut executable = assignment.clone();
-            if request.collaboration == CollaborationMode::SequentialHandoff
-                && !handoff_summaries.is_empty()
-            {
-                executable
-                    .task_description
-                    .push_str("\n\n前序员工的已提交摘要（仅作交接上下文，必须独立核对）：\n");
-                executable
-                    .task_description
-                    .push_str(&handoff_summaries.join("\n"));
-                if let Some(from_employee) = previous_employee.as_ref() {
-                    on_event(OrganizationEvent::Handoff {
+                admit_organization_batch(
+                    durable_runner.as_ref(),
+                    &mut graph_plan.graph,
+                    &mut graph_store_version,
+                    &admitted
+                        .iter()
+                        .map(|(_, node_id)| node_id.clone())
+                        .collect::<Vec<_>>(),
+                )
+                .await?;
+                for (assignment, _) in &admitted {
+                    trace_events.push(worker_started_event(
+                        assignment,
+                        Some(request.task_id.clone()),
+                    ));
+                    on_event(OrganizationEvent::EmployeeWorking {
                         task_id: request.task_id.clone(),
-                        from_employee: from_employee.clone(),
-                        to_employee: executable.worker_name.clone(),
+                        employee: assignment.worker_name.clone(),
+                        role: assignment.profile.specialty.role.as_str().to_string(),
                     });
                 }
+
+                // Every admitted node is already Running before its future is
+                // created. join_all polls them concurrently; the bounded
+                // staffing policy limits this batch to the task worker cap.
+                let results = futures::future::join_all(admitted.iter().map(|(assignment, _)| {
+                    self.execute_assignment_with_cancel(
+                        assignment,
+                        cancel
+                            .clone()
+                            .unwrap_or_else(tokio_util::sync::CancellationToken::new),
+                    )
+                }))
+                .await;
+                for ((assignment, node_id), result) in admitted.iter().zip(results) {
+                    match result {
+                        Ok(report) if report.success => {
+                            record_organization_outcome(
+                                durable_runner.as_ref(),
+                                &mut graph_plan.graph,
+                                &mut graph_store_version,
+                                node_id,
+                                NodeExecutionOutcome::Succeeded(vec![ExecutionArtifact {
+                                    id: format!("artifact-{node_id}"),
+                                    producer_node: node_id.clone(),
+                                    kind: "worker_report".into(),
+                                    summary: report.summary.clone(),
+                                    evidence_refs: vec![format!("report:{}", report.task_id)],
+                                    uncertainties: Vec::new(),
+                                }]),
+                            )
+                            .await?;
+                            trace_events.push(worker_completed_event(
+                                assignment,
+                                Some(request.task_id.clone()),
+                                true,
+                                report_status(&report),
+                                report.trace_events.len(),
+                            ));
+                            let assignment_contract = staffed
+                                .decision
+                                .assignments
+                                .iter()
+                                .find(|selected| selected.employee == report.worker)
+                                .cloned()
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "worker '{}' reported without a staffing assignment",
+                                        report.worker
+                                    )
+                                })?;
+                            on_event(OrganizationEvent::EmployeeReported {
+                                task_id: request.task_id.clone(),
+                                employee: report.worker.clone(),
+                                role: assignment_contract.role.as_str().to_string(),
+                                outcome: report_status(&report).into(),
+                                success: true,
+                            });
+                            employee_reports.push(EmployeeWorkReport {
+                                assignment: assignment_contract,
+                                reports_to: request.assigned_by.clone(),
+                                report,
+                            });
+                        }
+                        Ok(report) => {
+                            let interrupted =
+                                report.outcome == crate::agent::RunOutcome::Interrupted;
+                            let outcome = if interrupted {
+                                NodeExecutionOutcome::Cancelled(
+                                    "worker interrupted by task cancellation".into(),
+                                )
+                            } else {
+                                NodeExecutionOutcome::Failed(format!(
+                                    "worker outcome was {:?}",
+                                    report.outcome
+                                ))
+                            };
+                            record_organization_outcome(
+                                durable_runner.as_ref(),
+                                &mut graph_plan.graph,
+                                &mut graph_store_version,
+                                node_id,
+                                outcome,
+                            )
+                            .await?;
+                            trace_events.push(worker_completed_event(
+                                assignment,
+                                Some(request.task_id.clone()),
+                                false,
+                                "failed",
+                                report.trace_events.len(),
+                            ));
+                            if execution_error.is_none() {
+                                execution_error = Some(if interrupted {
+                                    "cancelled by user".into()
+                                } else {
+                                    format!(
+                                        "worker '{}' failed: {:?}",
+                                        assignment.worker_name, report.outcome
+                                    )
+                                });
+                            }
+                            on_event(OrganizationEvent::EmployeeReported {
+                                task_id: request.task_id.clone(),
+                                employee: assignment.worker_name.clone(),
+                                role: assignment.profile.specialty.role.as_str().to_string(),
+                                outcome: "failed".into(),
+                                success: false,
+                            });
+                        }
+                        Err(error) => {
+                            record_organization_outcome(
+                                durable_runner.as_ref(),
+                                &mut graph_plan.graph,
+                                &mut graph_store_version,
+                                node_id,
+                                NodeExecutionOutcome::Failed(format!(
+                                    "worker execution failed: {error}"
+                                )),
+                            )
+                            .await?;
+                            trace_events.push(worker_completed_event(
+                                assignment,
+                                Some(request.task_id.clone()),
+                                false,
+                                "failed",
+                                0,
+                            ));
+                            if execution_error.is_none() {
+                                execution_error = Some(format!(
+                                    "worker '{}' failed: {error}",
+                                    assignment.worker_name
+                                ));
+                            }
+                            on_event(OrganizationEvent::EmployeeReported {
+                                task_id: request.task_id.clone(),
+                                employee: assignment.worker_name.clone(),
+                                role: assignment.profile.specialty.role.as_str().to_string(),
+                                outcome: "failed".into(),
+                                success: false,
+                            });
+                        }
+                    }
+                }
+                graph_plan.graph.settle_unreachable()?;
             }
-            trace_events.push(worker_started_event(
-                &executable,
-                Some(request.task_id.clone()),
-            ));
-            on_event(OrganizationEvent::EmployeeWorking {
-                task_id: request.task_id.clone(),
-                employee: executable.worker_name.clone(),
-                role: executable.profile.specialty.role.as_str().to_string(),
-            });
-            match self.execute_assignment(&executable).await {
-                Ok(report) => {
-                    // Treat non-success outcomes as worker failures so the
-                    // sequential-handoff loop stops instead of continuing to
-                    // subsequent workers with potentially invalid state.
-                    if !report.success {
+        } else {
+            for assignment in &staffed.assignments {
+                let node_id = graph_plan
+                    .work_nodes
+                    .iter()
+                    .find_map(|(executor, node_id)| {
+                        (executor == &assignment.worker_name).then_some(node_id.clone())
+                    })
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "execution graph has no work node leased to '{}'",
+                            assignment.worker_name
+                        )
+                    })?;
+                // Check for graceful cancellation between workers.
+                if let Some(ref ct) = cancel {
+                    if ct.is_cancelled() {
+                        execution_error = Some("cancelled by user".into());
+                        graph_plan
+                            .graph
+                            .cancel_node(&node_id, "cancelled by user")?;
+                        graph_plan.graph.settle_unreachable()?;
+                        break;
+                    }
+                }
+                let mut executable = assignment.clone();
+                if request.collaboration == CollaborationMode::SequentialHandoff
+                    && !handoff_summaries.is_empty()
+                {
+                    executable
+                        .task_description
+                        .push_str("\n\n前序员工的已提交摘要（仅作交接上下文，必须独立核对）：\n");
+                    executable
+                        .task_description
+                        .push_str(&handoff_summaries.join("\n"));
+                    if let Some(from_employee) = previous_employee.as_ref() {
+                        on_event(OrganizationEvent::Handoff {
+                            task_id: request.task_id.clone(),
+                            from_employee: from_employee.clone(),
+                            to_employee: executable.worker_name.clone(),
+                        });
+                    }
+                }
+                admit_organization_node(
+                    durable_runner.as_ref(),
+                    &mut graph_plan.graph,
+                    &mut graph_store_version,
+                    &node_id,
+                )
+                .await?;
+                trace_events.push(worker_started_event(
+                    &executable,
+                    Some(request.task_id.clone()),
+                ));
+                on_event(OrganizationEvent::EmployeeWorking {
+                    task_id: request.task_id.clone(),
+                    employee: executable.worker_name.clone(),
+                    role: executable.profile.specialty.role.as_str().to_string(),
+                });
+                match self
+                    .execute_assignment_with_cancel(
+                        &executable,
+                        cancel
+                            .clone()
+                            .unwrap_or_else(tokio_util::sync::CancellationToken::new),
+                    )
+                    .await
+                {
+                    Ok(report) => {
+                        // Treat non-success outcomes as worker failures so the
+                        // sequential-handoff loop stops instead of continuing to
+                        // subsequent workers with potentially invalid state.
+                        if !report.success {
+                            let outcome = if report.outcome == crate::agent::RunOutcome::Interrupted
+                            {
+                                NodeExecutionOutcome::Cancelled(
+                                    "worker interrupted by task cancellation".into(),
+                                )
+                            } else {
+                                NodeExecutionOutcome::Failed(format!(
+                                    "worker outcome was {:?}",
+                                    report.outcome
+                                ))
+                            };
+                            record_organization_outcome(
+                                durable_runner.as_ref(),
+                                &mut graph_plan.graph,
+                                &mut graph_store_version,
+                                &node_id,
+                                outcome,
+                            )
+                            .await?;
+                            graph_plan.graph.settle_unreachable()?;
+                            trace_events.push(worker_completed_event(
+                                &executable,
+                                Some(request.task_id.clone()),
+                                false,
+                                "failed",
+                                0,
+                            ));
+                            execution_error = if cancel.as_ref().map_or(false, |c| c.is_cancelled())
+                            {
+                                Some("cancelled by user".into())
+                            } else {
+                                Some(format!(
+                                    "worker '{}' failed: {:?}",
+                                    executable.worker_name, report.outcome,
+                                ))
+                            };
+                            on_event(OrganizationEvent::EmployeeReported {
+                                task_id: request.task_id.clone(),
+                                employee: executable.worker_name.clone(),
+                                role: executable.profile.specialty.role.as_str().to_string(),
+                                outcome: "failed".into(),
+                                success: false,
+                            });
+                            break;
+                        }
+                        record_organization_outcome(
+                            durable_runner.as_ref(),
+                            &mut graph_plan.graph,
+                            &mut graph_store_version,
+                            &node_id,
+                            NodeExecutionOutcome::Succeeded(vec![ExecutionArtifact {
+                                id: format!("artifact-{node_id}"),
+                                producer_node: node_id.clone(),
+                                kind: "worker_report".into(),
+                                summary: report.summary.clone(),
+                                evidence_refs: vec![format!("report:{}", report.task_id)],
+                                uncertainties: Vec::new(),
+                            }]),
+                        )
+                        .await?;
+                        trace_events.push(worker_completed_event(
+                            &executable,
+                            Some(request.task_id.clone()),
+                            report.success,
+                            report_status(&report),
+                            report.trace_events.len(),
+                        ));
+                        let assignment_contract = staffed
+                            .decision
+                            .assignments
+                            .iter()
+                            .find(|selected| selected.employee == report.worker)
+                            .cloned()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "worker '{}' reported without a staffing assignment",
+                                    report.worker
+                                )
+                            })?;
+                        handoff_summaries.push(format!(
+                            "- {}（{}）：{}",
+                            report.worker,
+                            assignment_contract.role.as_str(),
+                            report.summary
+                        ));
+                        previous_employee = Some(report.worker.clone());
+                        on_event(OrganizationEvent::EmployeeReported {
+                            task_id: request.task_id.clone(),
+                            employee: report.worker.clone(),
+                            role: assignment_contract.role.as_str().to_string(),
+                            outcome: report_status(&report).into(),
+                            success: report.success,
+                        });
+                        employee_reports.push(EmployeeWorkReport {
+                            assignment: assignment_contract,
+                            reports_to: request.assigned_by.clone(),
+                            report,
+                        });
+                    }
+                    Err(error) => {
+                        record_organization_outcome(
+                            durable_runner.as_ref(),
+                            &mut graph_plan.graph,
+                            &mut graph_store_version,
+                            &node_id,
+                            NodeExecutionOutcome::Failed(format!(
+                                "worker execution failed: {error}"
+                            )),
+                        )
+                        .await?;
+                        graph_plan.graph.settle_unreachable()?;
                         trace_events.push(worker_completed_event(
                             &executable,
                             Some(request.task_id.clone()),
@@ -890,9 +1519,8 @@ impl Orchestrator {
                             Some("cancelled by user".into())
                         } else {
                             Some(format!(
-                                "worker '{}' failed: {:?}",
-                                executable.worker_name,
-                                report.outcome,
+                                "worker '{}' failed: {error}",
+                                executable.worker_name
                             ))
                         };
                         on_event(OrganizationEvent::EmployeeReported {
@@ -904,74 +1532,12 @@ impl Orchestrator {
                         });
                         break;
                     }
-                    trace_events.push(worker_completed_event(
-                        &executable,
-                        Some(request.task_id.clone()),
-                        report.success,
-                        report_status(&report),
-                        report.trace_events.len(),
-                    ));
-                    let assignment_contract = staffed
-                        .decision
-                        .assignments
-                        .iter()
-                        .find(|selected| selected.employee == report.worker)
-                        .cloned()
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "worker '{}' reported without a staffing assignment",
-                                report.worker
-                            )
-                        })?;
-                    handoff_summaries.push(format!(
-                        "- {}（{}）：{}",
-                        report.worker,
-                        assignment_contract.role.as_str(),
-                        report.summary
-                    ));
-                    previous_employee = Some(report.worker.clone());
-                    on_event(OrganizationEvent::EmployeeReported {
-                        task_id: request.task_id.clone(),
-                        employee: report.worker.clone(),
-                        role: assignment_contract.role.as_str().to_string(),
-                        outcome: report_status(&report).into(),
-                        success: report.success,
-                    });
-                    employee_reports.push(EmployeeWorkReport {
-                        assignment: assignment_contract,
-                        reports_to: request.assigned_by.clone(),
-                        report,
-                    });
-                }
-                Err(error) => {
-                    trace_events.push(worker_completed_event(
-                        &executable,
-                        Some(request.task_id.clone()),
-                        false,
-                        "failed",
-                        0,
-                    ));
-                    execution_error = if cancel.as_ref().map_or(false, |c| c.is_cancelled()) {
-                        Some("cancelled by user".into())
-                    } else {
-                        Some(format!(
-                            "worker '{}' failed: {error}",
-                            executable.worker_name
-                        ))
-                    };
-                    on_event(OrganizationEvent::EmployeeReported {
-                        task_id: request.task_id.clone(),
-                        employee: executable.worker_name.clone(),
-                        role: executable.profile.specialty.role.as_str().to_string(),
-                        outcome: "failed".into(),
-                        success: false,
-                    });
-                    break;
                 }
             }
         }
 
-        if matches!(request.assigned_by, AssignmentAuthority::Manager { .. }) {
+        let cancelled = execution_error.as_deref() == Some("cancelled by user");
+        if !cancelled && matches!(request.assigned_by, AssignmentAuthority::Manager { .. }) {
             on_event(OrganizationEvent::ManagerReviewing {
                 task_id: request.task_id.clone(),
                 manager,
@@ -981,20 +1547,105 @@ impl Orchestrator {
             .iter()
             .map(|employee_report| employee_report.report.clone())
             .collect::<Vec<_>>();
-        let status = match classify_worker_reports(&reports, execution_error.as_deref()) {
-            WorkerExecutionStatus::Completed => OrganizationExecutionStatus::Completed,
-            WorkerExecutionStatus::Submitted => OrganizationExecutionStatus::Submitted,
-            WorkerExecutionStatus::WorkerFailed => OrganizationExecutionStatus::WorkerFailed,
-            WorkerExecutionStatus::BlockedBeforeExecution
-            | WorkerExecutionStatus::CompletedWithReviewFindings => {
-                OrganizationExecutionStatus::Blocked
+        let status = if cancelled {
+            OrganizationExecutionStatus::Cancelled
+        } else {
+            match classify_worker_reports(&reports, execution_error.as_deref()) {
+                WorkerExecutionStatus::Completed => OrganizationExecutionStatus::Completed,
+                WorkerExecutionStatus::Submitted => OrganizationExecutionStatus::Submitted,
+                WorkerExecutionStatus::WorkerFailed => OrganizationExecutionStatus::WorkerFailed,
+                WorkerExecutionStatus::BlockedBeforeExecution
+                | WorkerExecutionStatus::CompletedWithReviewFindings => {
+                    OrganizationExecutionStatus::Blocked
+                }
             }
         };
+        let decision_success = matches!(
+            status,
+            OrganizationExecutionStatus::Completed | OrganizationExecutionStatus::Submitted
+        );
+        let mut outcomes = std::collections::BTreeMap::from([
+            (
+                graph_plan.decide_node.clone(),
+                if decision_success {
+                    NodeExecutionOutcome::Succeeded(vec![ExecutionArtifact {
+                        id: "artifact-decision-000".into(),
+                        producer_node: graph_plan.decide_node.clone(),
+                        kind: "decision".into(),
+                        summary:
+                            "all required work artifacts passed the deterministic completion gate"
+                                .into(),
+                        evidence_refs: graph_plan
+                            .work_nodes
+                            .iter()
+                            .map(|(_, node_id)| format!("artifact-{node_id}"))
+                            .collect(),
+                        uncertainties: Vec::new(),
+                    }])
+                } else {
+                    NodeExecutionOutcome::Failed(
+                        "deterministic completion gate rejected the submitted artifacts".into(),
+                    )
+                },
+            ),
+            (
+                graph_plan.finalize_node.clone(),
+                NodeExecutionOutcome::Succeeded(Vec::new()),
+            ),
+        ]);
+        if let Some(runner) = durable_runner.as_ref() {
+            loop {
+                commit_organization_transition(
+                    Some(runner),
+                    &mut graph_plan.graph,
+                    &mut graph_store_version,
+                    |graph| {
+                        graph.settle_unreachable()?;
+                        Ok(())
+                    },
+                )
+                .await?;
+                let ready = graph_plan.graph.ready_node_ids();
+                if ready.is_empty() {
+                    break;
+                }
+                let mut progressed = false;
+                let mut deferred = Vec::new();
+                for node_id in ready {
+                    let Some(outcome) = outcomes.remove(&node_id) else {
+                        deferred.push(node_id);
+                        continue;
+                    };
+                    runner
+                        .execute_node(
+                            &mut graph_plan.graph,
+                            &mut graph_store_version,
+                            &node_id,
+                            move |_| async move { outcome },
+                        )
+                        .await?;
+                    progressed = true;
+                }
+                if !progressed {
+                    return Err(ExecutionGraphError::SchedulerStalled(deferred).into());
+                }
+            }
+        } else {
+            let schedule = graph_plan.graph.run_ready(|node| {
+                outcomes
+                    .remove(&node.id)
+                    .unwrap_or(NodeExecutionOutcome::Deferred)
+            })?;
+            if schedule.stalled {
+                return Err(ExecutionGraphError::SchedulerStalled(schedule.deferred_nodes).into());
+            }
+        }
         let terminal_status = match status {
             OrganizationExecutionStatus::AwaitingManager => "awaiting_manager",
             OrganizationExecutionStatus::Blocked => "blocked",
             OrganizationExecutionStatus::Completed => "accepted",
             OrganizationExecutionStatus::Submitted => "submitted",
+            OrganizationExecutionStatus::Cancelled => "cancelled",
             OrganizationExecutionStatus::WorkerFailed => "worker_failed",
         };
         on_event(OrganizationEvent::TaskFinished {
@@ -1012,6 +1663,7 @@ impl Orchestrator {
             employee_reports,
             execution_error,
             trace_events,
+            execution_graph: graph_plan.graph.snapshot(),
         })
     }
 
@@ -1035,6 +1687,7 @@ impl Orchestrator {
     ) -> anyhow::Result<OrganizationMutationReport> {
         let manager = manager.into();
         let mut staffed = self.staff_organization_task(request, roster);
+        let mut graph_plan = request.compile_mutation_execution_graph(&staffed.decision)?;
         if staffed.decision.mode == StaffingMode::Direct {
             return Ok(organization_mutation_without_pipeline(
                 request,
@@ -1043,9 +1696,14 @@ impl Orchestrator {
                 ManagerAcceptanceStatus::AwaitingManager,
                 "no specialist mutation was dispatched; manager action is still required",
                 Vec::new(),
+                graph_plan.graph.snapshot(),
             ));
         }
         if !staffed.decision.can_execute() || staffed.assignments.is_empty() {
+            fail_mutation_contract(
+                &mut graph_plan,
+                "staffing contract blocked mutation execution",
+            )?;
             return Ok(organization_mutation_without_pipeline(
                 request,
                 staffed.decision,
@@ -1053,6 +1711,7 @@ impl Orchestrator {
                 ManagerAcceptanceStatus::Blocked,
                 "staffing contract blocked mutation execution",
                 Vec::new(),
+                graph_plan.graph.snapshot(),
             ));
         }
 
@@ -1064,6 +1723,10 @@ impl Orchestrator {
         if !contract_errors.is_empty() {
             staffed.decision.mode = StaffingMode::Blocked;
             staffed.decision.rationale.extend(contract_errors.clone());
+            fail_mutation_contract(
+                &mut graph_plan,
+                "mutation ownership or proposal contract is invalid",
+            )?;
             return Ok(organization_mutation_without_pipeline(
                 request,
                 staffed.decision,
@@ -1071,8 +1734,10 @@ impl Orchestrator {
                 ManagerAcceptanceStatus::Blocked,
                 "mutation ownership or proposal contract is invalid",
                 contract_errors,
+                graph_plan.graph.snapshot(),
             ));
         }
+        complete_mutation_contract(&mut graph_plan)?;
 
         let (concurrent, sequential_handoff) = match request.collaboration {
             CollaborationMode::Independent => (true, false),
@@ -1111,6 +1776,7 @@ impl Orchestrator {
             })
             .collect::<Vec<_>>();
         let (status, summary, reasons) = manager_acceptance_from_pipeline(&pipeline);
+        project_mutation_pipeline(&mut graph_plan, &pipeline)?;
 
         Ok(OrganizationMutationReport {
             task_id: request.task_id.clone(),
@@ -1123,6 +1789,7 @@ impl Orchestrator {
                 summary,
                 reasons,
             },
+            execution_graph: graph_plan.graph.snapshot(),
         })
     }
 
@@ -1143,6 +1810,7 @@ impl Orchestrator {
     ) -> anyhow::Result<OrganizationMutationReport> {
         let manager = manager.into();
         let mut staffed = self.staff_organization_task(request, roster);
+        let mut graph_plan = request.compile_mutation_execution_graph(&staffed.decision)?;
         if staffed.decision.mode == StaffingMode::Direct {
             return Ok(organization_mutation_without_pipeline(
                 request,
@@ -1151,9 +1819,14 @@ impl Orchestrator {
                 ManagerAcceptanceStatus::AwaitingManager,
                 "no specialist mutation was dispatched; manager action is still required",
                 Vec::new(),
+                graph_plan.graph.snapshot(),
             ));
         }
         if !staffed.decision.can_execute() || staffed.assignments.is_empty() {
+            fail_mutation_contract(
+                &mut graph_plan,
+                "staffing contract blocked mutation execution",
+            )?;
             return Ok(organization_mutation_without_pipeline(
                 request,
                 staffed.decision,
@@ -1161,13 +1834,23 @@ impl Orchestrator {
                 ManagerAcceptanceStatus::Blocked,
                 "staffing contract blocked mutation execution",
                 Vec::new(),
+                graph_plan.graph.snapshot(),
             ));
         }
 
-        let scope_errors = apply_organization_file_scopes(&mut staffed.assignments, &file_scopes);
+        let mut scope_errors =
+            apply_organization_file_scopes(&mut staffed.assignments, &file_scopes);
+        scope_errors
+            .extend(self.mutation_worker_blockers(&staffed.assignments, request.workspace_mode));
+        if request.workspace_mode == WorkerWorkspaceMode::IsolatedSandbox
+            && self.worker_workspace_root.is_none()
+        {
+            scope_errors.push("isolated sandbox workspace root is not configured".into());
+        }
         if !scope_errors.is_empty() {
             staffed.decision.mode = StaffingMode::Blocked;
             staffed.decision.rationale.extend(scope_errors.clone());
+            fail_mutation_contract(&mut graph_plan, "mutation ownership contract is invalid")?;
             return Ok(organization_mutation_without_pipeline(
                 request,
                 staffed.decision,
@@ -1175,8 +1858,10 @@ impl Orchestrator {
                 ManagerAcceptanceStatus::Blocked,
                 "mutation ownership contract is invalid",
                 scope_errors,
+                graph_plan.graph.snapshot(),
             ));
         }
+        complete_mutation_contract(&mut graph_plan)?;
 
         self.ensure_worker_limit(staffed.assignments.len())?;
         let claim_report = self
@@ -1197,6 +1882,7 @@ impl Orchestrator {
                     concurrent,
                     sequential_handoff,
                     Some(collector.clone()),
+                    request.workspace_mode,
                     Some(request.task_id.as_str()),
                 )
                 .await
@@ -1281,6 +1967,7 @@ impl Orchestrator {
             })
             .collect::<Vec<_>>();
         let (status, summary, reasons) = manager_acceptance_from_pipeline(&pipeline);
+        project_mutation_pipeline(&mut graph_plan, &pipeline)?;
         Ok(OrganizationMutationReport {
             task_id: request.task_id.clone(),
             staffing: staffed.decision,
@@ -1292,6 +1979,360 @@ impl Orchestrator {
                 summary,
                 reasons,
             },
+            execution_graph: graph_plan.graph.snapshot(),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_organization_mutation_from_workers_durable<C: FileClaimCoordinator>(
+        &self,
+        request: &OrganizationTaskRequest,
+        roster: &[AgentProfile],
+        file_scopes: Vec<OrganizationFileScope>,
+        manager: impl Into<String>,
+        coordinator: &C,
+        conv_id: i64,
+        operation: &str,
+        engine: &mut PatchEngine,
+        store: OrganizationCheckpointStore,
+    ) -> anyhow::Result<OrganizationMutationReport> {
+        let manager = manager.into();
+        let mut staffed = self.staff_organization_task(request, roster);
+        let mut graph_plan = request.compile_mutation_execution_graph(&staffed.decision)?;
+        let runner = DurableExecutionRunner::new(store);
+        let mut store_version = runner.initialize(&graph_plan.graph).await?;
+        if staffed.decision.mode == StaffingMode::Direct {
+            return Ok(organization_mutation_without_pipeline(
+                request,
+                staffed.decision,
+                manager,
+                ManagerAcceptanceStatus::AwaitingManager,
+                "no specialist mutation was dispatched; manager action is still required",
+                Vec::new(),
+                graph_plan.graph.snapshot(),
+            ));
+        }
+        if !staffed.decision.can_execute() || staffed.assignments.is_empty() {
+            let contract_node = graph_plan.contract_node.clone();
+            runner
+                .execute_node(
+                    &mut graph_plan.graph,
+                    &mut store_version,
+                    &contract_node,
+                    |_| async {
+                        NodeExecutionOutcome::Failed(
+                            "staffing contract blocked mutation execution".into(),
+                        )
+                    },
+                )
+                .await?;
+            runner
+                .commit_deterministic(&mut graph_plan.graph, &mut store_version, |graph| {
+                    graph.settle_unreachable()?;
+                    Ok(())
+                })
+                .await?;
+            return Ok(organization_mutation_without_pipeline(
+                request,
+                staffed.decision,
+                manager,
+                ManagerAcceptanceStatus::Blocked,
+                "staffing contract blocked mutation execution",
+                Vec::new(),
+                graph_plan.graph.snapshot(),
+            ));
+        }
+
+        let mut scope_errors =
+            apply_organization_file_scopes(&mut staffed.assignments, &file_scopes);
+        scope_errors
+            .extend(self.mutation_worker_blockers(&staffed.assignments, request.workspace_mode));
+        if request.workspace_mode == WorkerWorkspaceMode::IsolatedSandbox
+            && self.worker_workspace_root.is_none()
+        {
+            scope_errors.push("isolated sandbox workspace root is not configured".into());
+        }
+        if !scope_errors.is_empty() {
+            staffed.decision.mode = StaffingMode::Blocked;
+            staffed.decision.rationale.extend(scope_errors.clone());
+            let contract_node = graph_plan.contract_node.clone();
+            runner
+                .execute_node(
+                    &mut graph_plan.graph,
+                    &mut store_version,
+                    &contract_node,
+                    |_| async {
+                        NodeExecutionOutcome::Failed(
+                            "mutation ownership contract is invalid".into(),
+                        )
+                    },
+                )
+                .await?;
+            runner
+                .commit_deterministic(&mut graph_plan.graph, &mut store_version, |graph| {
+                    graph.settle_unreachable()?;
+                    Ok(())
+                })
+                .await?;
+            return Ok(organization_mutation_without_pipeline(
+                request,
+                staffed.decision,
+                manager,
+                ManagerAcceptanceStatus::Blocked,
+                "mutation ownership contract is invalid",
+                scope_errors,
+                graph_plan.graph.snapshot(),
+            ));
+        }
+
+        let contract_node = graph_plan.contract_node.clone();
+        runner
+            .execute_node(
+                &mut graph_plan.graph,
+                &mut store_version,
+                &contract_node,
+                |node| async move {
+                    NodeExecutionOutcome::Succeeded(vec![ExecutionArtifact {
+                        id: "artifact-contract-000".into(),
+                        producer_node: node.id,
+                        kind: "mutation_contract".into(),
+                        summary: "staffing and ownership contracts passed preflight".into(),
+                        evidence_refs: Vec::new(),
+                        uncertainties: Vec::new(),
+                    }])
+                },
+            )
+            .await?;
+        self.ensure_worker_limit(staffed.assignments.len())?;
+        let claim_node = graph_plan.claim_node.clone();
+        let claim_report = self
+            .claim_worker_files_durable(
+                &runner,
+                &mut graph_plan.graph,
+                &mut store_version,
+                &claim_node,
+                &staffed.assignments,
+                coordinator,
+                conv_id,
+                operation,
+            )
+            .await?;
+        let collector =
+            std::sync::Arc::new(std::sync::Mutex::new(PatchProposalCollector::default()));
+        let (concurrent, sequential_handoff) = match request.collaboration {
+            CollaborationMode::Independent => (true, false),
+            CollaborationMode::SequentialHandoff => (false, true),
+        };
+        let claim_blocked =
+            !claim_report.local_overlaps.is_empty() || !claim_report.conflicts.is_empty();
+        let (reports, execution_error, trace_events) = if claim_blocked {
+            (Vec::new(), None, Vec::new())
+        } else {
+            self.execute_claimed_assignments_durable(
+                &runner,
+                &mut graph_plan.graph,
+                &mut store_version,
+                &graph_plan.work_nodes,
+                &staffed.assignments,
+                concurrent,
+                sequential_handoff,
+                Some(collector.clone()),
+                request.workspace_mode,
+                Some(request.task_id.as_str()),
+            )
+            .await?
+        };
+        let conflicts = self.detect_conflicts(&reports);
+        let ownership_violations = self.detect_ownership_violations(&staffed.assignments, &reports);
+        let mut execution = WorkerExecutionReport {
+            status: if claim_blocked {
+                WorkerExecutionStatus::BlockedBeforeExecution
+            } else {
+                classify_worker_reports(&reports, execution_error.as_deref())
+            },
+            reports,
+            release_failures: claim_report.release_failures.clone(),
+            claim_report,
+            conflicts,
+            ownership_violations,
+            execution_error,
+            trace_events,
+        };
+        if execution.status != WorkerExecutionStatus::BlockedBeforeExecution
+            && execution.status != WorkerExecutionStatus::WorkerFailed
+            && (!execution.conflicts.is_empty()
+                || !execution.ownership_violations.is_empty()
+                || !execution.release_failures.is_empty())
+        {
+            execution.status = WorkerExecutionStatus::CompletedWithReviewFindings;
+        }
+
+        let (proposals, mut proposal_errors) = {
+            let collector = collector.lock().unwrap();
+            (
+                collector.proposals.values().cloned().collect::<Vec<_>>(),
+                collector.errors.clone(),
+            )
+        };
+        if execution.status != WorkerExecutionStatus::BlockedBeforeExecution {
+            proposal_errors.extend(validate_organization_proposals(
+                &staffed.assignments,
+                &proposals,
+            ));
+        }
+        if !proposal_errors.is_empty() {
+            let proposal_error = format!(
+                "structured patch proposal submission failed: {}",
+                proposal_errors.join("; ")
+            );
+            execution.execution_error = Some(match execution.execution_error.take() {
+                Some(existing) => format!("{existing}; {proposal_error}"),
+                None => proposal_error,
+            });
+            execution.status = WorkerExecutionStatus::WorkerFailed;
+        }
+
+        runner
+            .commit_deterministic(&mut graph_plan.graph, &mut store_version, |graph| {
+                graph.settle_unreachable()?;
+                Ok(())
+            })
+            .await?;
+        let reviewed = self.review_worker_patch_pipeline_stage(
+            Some(request.task_id.clone()),
+            staffed.assignments.clone(),
+            proposals,
+            execution,
+        );
+        if graph_plan
+            .graph
+            .ready_node_ids()
+            .iter()
+            .any(|node_id| node_id == &graph_plan.review_node)
+        {
+            let review_node = graph_plan.review_node.clone();
+            let review_outcome = if reviewed.merge_review.status == WorkerMergeStatus::Approved {
+                NodeExecutionOutcome::Succeeded(vec![ExecutionArtifact {
+                    id: "artifact-review-000".into(),
+                    producer_node: review_node.clone(),
+                    kind: "merge_review".into(),
+                    summary: format!(
+                        "approved {} structured proposal(s)",
+                        reviewed.merge_review.decisions.len()
+                    ),
+                    evidence_refs: graph_plan
+                        .work_nodes
+                        .iter()
+                        .map(|(_, node_id)| format!("artifact-{node_id}"))
+                        .collect(),
+                    uncertainties: Vec::new(),
+                }])
+            } else {
+                NodeExecutionOutcome::Failed(
+                    "ownership, verification, conflict, or proposal review did not approve".into(),
+                )
+            };
+            runner
+                .execute_node(
+                    &mut graph_plan.graph,
+                    &mut store_version,
+                    &review_node,
+                    move |_| async move { review_outcome },
+                )
+                .await?;
+        }
+        runner
+            .commit_deterministic(&mut graph_plan.graph, &mut store_version, |graph| {
+                graph.settle_unreachable()?;
+                Ok(())
+            })
+            .await?;
+
+        let applied = if reviewed.merge_review.status == WorkerMergeStatus::Approved {
+            let apply_node = graph_plan.apply_node.clone();
+            self.apply_worker_patch_pipeline_stage_durable(
+                &runner,
+                &mut graph_plan.graph,
+                &mut store_version,
+                &apply_node,
+                reviewed,
+                engine,
+            )
+            .await?
+        } else {
+            self.apply_worker_patch_pipeline_stage(reviewed, engine)
+        };
+        runner
+            .commit_deterministic(&mut graph_plan.graph, &mut store_version, |graph| {
+                graph.settle_unreachable()?;
+                Ok(())
+            })
+            .await?;
+        let release_node = graph_plan.release_node.clone();
+        let pipeline = self
+            .release_worker_patch_pipeline_stage_durable(
+                &runner,
+                &mut graph_plan.graph,
+                &mut store_version,
+                &release_node,
+                applied,
+                coordinator,
+            )
+            .await?;
+        runner
+            .commit_deterministic(&mut graph_plan.graph, &mut store_version, |graph| {
+                graph.settle_unreachable()?;
+                Ok(())
+            })
+            .await?;
+        if graph_plan
+            .graph
+            .ready_node_ids()
+            .iter()
+            .any(|node_id| node_id == &graph_plan.finalize_node)
+        {
+            let finalize_node = graph_plan.finalize_node.clone();
+            runner
+                .execute_node(
+                    &mut graph_plan.graph,
+                    &mut store_version,
+                    &finalize_node,
+                    |_| async { NodeExecutionOutcome::Succeeded(Vec::new()) },
+                )
+                .await?;
+        }
+
+        let employee_reports = pipeline
+            .execution
+            .reports
+            .iter()
+            .filter_map(|report| {
+                staffed
+                    .decision
+                    .assignments
+                    .iter()
+                    .find(|assignment| assignment.employee == report.worker)
+                    .cloned()
+                    .map(|assignment| EmployeeWorkReport {
+                        assignment,
+                        reports_to: request.assigned_by.clone(),
+                        report: report.clone(),
+                    })
+            })
+            .collect::<Vec<_>>();
+        let (status, summary, reasons) = manager_acceptance_from_pipeline(&pipeline);
+        Ok(OrganizationMutationReport {
+            task_id: request.task_id.clone(),
+            staffing: staffed.decision,
+            employee_reports,
+            pipeline: Some(pipeline),
+            manager_acceptance: ManagerAcceptanceReport {
+                manager,
+                status,
+                summary,
+                reasons,
+            },
+            execution_graph: graph_plan.graph.snapshot(),
         })
     }
 
@@ -1315,6 +2356,62 @@ impl Orchestrator {
             .into_iter()
             .find(|spec| !spec.read_only || spec.side_effect != crate::tool::SideEffect::ReadOnly)
             .map(|spec| spec.name)
+    }
+
+    /// Sandbox workers may declare the built-in workspace write/edit tools
+    /// because those implementations are replaced with worker-local versions.
+    /// Process, browser, system and unknown mutation tools remain ineligible.
+    pub fn organization_sandbox_blocker(&self, profile: &AgentProfile) -> Option<String> {
+        let registry = if profile.tool_names.is_empty() {
+            self.runtime.registry.clone()
+        } else {
+            self.runtime.registry.select(
+                &profile
+                    .tool_names
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+            )
+        };
+        registry
+            .as_tool_specs()
+            .into_iter()
+            .find(|spec| {
+                let sandbox_replaced_write = (matches!(spec.name.as_str(), "write_file" | "edit")
+                    && spec.workspace_scope == crate::tool::WorkspaceScope::WorkspaceOnly)
+                    || spec.name == "shell";
+                spec.side_effect != crate::tool::SideEffect::ReadOnly && !sandbox_replaced_write
+            })
+            .map(|spec| spec.name)
+    }
+
+    fn mutation_worker_blockers(
+        &self,
+        assignments: &[WorkerAssignment],
+        mode: WorkerWorkspaceMode,
+    ) -> Vec<String> {
+        assignments
+            .iter()
+            .filter_map(|assignment| {
+                let blocker = match mode {
+                    // Compatibility mode retains its existing approval/path
+                    // policy. New desktop mutation requests use sandbox mode.
+                    WorkerWorkspaceMode::ProposalOnly => None,
+                    WorkerWorkspaceMode::IsolatedSandbox => {
+                        self.organization_sandbox_blocker(&assignment.profile)
+                    }
+                }?;
+                Some(format!(
+                    "employee '{}' tool '{}' is not permitted in {} mode",
+                    assignment.worker_name,
+                    blocker,
+                    match mode {
+                        WorkerWorkspaceMode::ProposalOnly => "proposal-only",
+                        WorkerWorkspaceMode::IsolatedSandbox => "isolated-sandbox",
+                    }
+                ))
+            })
+            .collect()
     }
 
     fn organization_unsafe_tool(&self, assignment: &WorkerAssignment) -> Option<String> {
@@ -1768,6 +2865,7 @@ impl Orchestrator {
                 concurrent,
                 sequential_handoff,
                 None,
+                WorkerWorkspaceMode::ProposalOnly,
                 session_id,
             )
             .await;
@@ -1822,6 +2920,7 @@ impl Orchestrator {
         concurrent: bool,
         sequential_handoff: bool,
         proposal_collector: Option<std::sync::Arc<std::sync::Mutex<PatchProposalCollector>>>,
+        workspace_mode: WorkerWorkspaceMode,
         session_id: Option<&str>,
     ) -> (Vec<Report>, Option<String>, Vec<HarnessEvent>) {
         let session_id = session_id.map(str::to_string);
@@ -1838,8 +2937,12 @@ impl Orchestrator {
                 let proposal_collector = proposal_collector.clone();
                 async move {
                     let _permit = sem.acquire().await.expect("semaphore closed");
-                    self.execute_assignment_with_proposal_collector(assignment, proposal_collector)
-                        .await
+                    self.execute_assignment_with_proposal_collector(
+                        assignment,
+                        proposal_collector,
+                        workspace_mode,
+                    )
+                    .await
                 }
             }))
             .await;
@@ -1866,7 +2969,7 @@ impl Orchestrator {
                             0,
                         ));
                         execution_error = Some(format!(
-                            "worker '{}' failed: {error}",
+                            "worker '{}' failed: {error:#}",
                             assignment.worker_name
                         ));
                     }
@@ -1897,7 +3000,11 @@ impl Orchestrator {
             }
             trace_events.push(worker_started_event(&executable, session_id.clone()));
             match self
-                .execute_assignment_with_proposal_collector(&executable, proposal_collector.clone())
+                .execute_assignment_with_proposal_collector(
+                    &executable,
+                    proposal_collector.clone(),
+                    workspace_mode,
+                )
                 .await
             {
                 Ok(report) => {
@@ -1922,7 +3029,7 @@ impl Orchestrator {
                     return (
                         reports,
                         Some(format!(
-                            "worker '{}' failed: {error}",
+                            "worker '{}' failed: {error:#}",
                             executable.worker_name
                         )),
                         trace_events,
@@ -1933,15 +3040,154 @@ impl Orchestrator {
         (reports, None, trace_events)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_claimed_assignments_durable<S>(
+        &self,
+        runner: &DurableExecutionRunner<S>,
+        graph: &mut crate::agent::ExecutionGraph,
+        store_version: &mut u64,
+        work_nodes: &[(String, String)],
+        assignments: &[WorkerAssignment],
+        concurrent: bool,
+        sequential_handoff: bool,
+        proposal_collector: Option<std::sync::Arc<std::sync::Mutex<PatchProposalCollector>>>,
+        workspace_mode: WorkerWorkspaceMode,
+        session_id: Option<&str>,
+    ) -> anyhow::Result<(Vec<Report>, Option<String>, Vec<HarnessEvent>)>
+    where
+        S: ExecutionGraphStore + Clone + Send + Sync + 'static,
+    {
+        let node_for = |worker: &str| {
+            work_nodes
+                .iter()
+                .find_map(|(executor, node_id)| (executor == worker).then_some(node_id.clone()))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("execution graph has no proposal node for worker '{worker}'")
+                })
+        };
+
+        if concurrent {
+            let node_ids = assignments
+                .iter()
+                .map(|assignment| node_for(&assignment.worker_name))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            runner
+                .admit_ready_batch(graph, store_version, &node_ids)
+                .await?;
+            let (reports, execution_error, trace_events) = self
+                .execute_claimed_assignments(
+                    assignments,
+                    true,
+                    false,
+                    proposal_collector,
+                    workspace_mode,
+                    session_id,
+                )
+                .await;
+            for (assignment, node_id) in assignments.iter().zip(node_ids) {
+                let outcome = worker_proposal_outcome(
+                    reports
+                        .iter()
+                        .find(|report| report.worker == assignment.worker_name),
+                    execution_error.as_deref(),
+                    &node_id,
+                    &assignment.worker_name,
+                );
+                runner
+                    .record_outcome(graph, store_version, &node_id, &outcome)
+                    .await?;
+            }
+            return Ok((reports, execution_error, trace_events));
+        }
+
+        let mut reports = Vec::new();
+        let mut trace_events = Vec::new();
+        let mut handoff_summaries = Vec::new();
+        for assignment in assignments {
+            let node_id = node_for(&assignment.worker_name)?;
+            let mut executable = assignment.clone();
+            if sequential_handoff && !handoff_summaries.is_empty() {
+                executable
+                    .task_description
+                    .push_str("\n\n前序员工的已提交摘要（仅作交接上下文，必须独立核对）：\n");
+                executable
+                    .task_description
+                    .push_str(&handoff_summaries.join("\n"));
+            }
+            runner.admit_node(graph, store_version, &node_id).await?;
+            let (mut current_reports, execution_error, current_trace) = self
+                .execute_claimed_assignments(
+                    std::slice::from_ref(&executable),
+                    false,
+                    false,
+                    proposal_collector.clone(),
+                    workspace_mode,
+                    session_id,
+                )
+                .await;
+            trace_events.extend(current_trace);
+            let report = current_reports.pop();
+            let outcome = worker_proposal_outcome(
+                report.as_ref(),
+                execution_error.as_deref(),
+                &node_id,
+                &assignment.worker_name,
+            );
+            runner
+                .record_outcome(graph, store_version, &node_id, &outcome)
+                .await?;
+            let failed = !matches!(outcome, NodeExecutionOutcome::Succeeded(_));
+            if let Some(report) = report {
+                handoff_summaries.push(format!("- {}：{}", report.worker, report.summary));
+                reports.push(report);
+            }
+            if failed {
+                return Ok((reports, execution_error, trace_events));
+            }
+        }
+        Ok((reports, None, trace_events))
+    }
+
     async fn execute_assignment(&self, assignment: &WorkerAssignment) -> anyhow::Result<Report> {
-        self.execute_assignment_with_proposal_collector(assignment, None)
+        self.execute_assignment_with_cancel(assignment, tokio_util::sync::CancellationToken::new())
             .await
+    }
+
+    async fn execute_assignment_with_cancel(
+        &self,
+        assignment: &WorkerAssignment,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> anyhow::Result<Report> {
+        self.execute_assignment_with_proposal_collector_and_cancel(
+            assignment,
+            None,
+            WorkerWorkspaceMode::ProposalOnly,
+            cancel_token,
+        )
+        .await
     }
 
     async fn execute_assignment_with_proposal_collector(
         &self,
         assignment: &WorkerAssignment,
         proposal_collector: Option<std::sync::Arc<std::sync::Mutex<PatchProposalCollector>>>,
+        workspace_mode: WorkerWorkspaceMode,
+    ) -> anyhow::Result<Report> {
+        self.execute_assignment_with_proposal_collector_and_cancel(
+            assignment,
+            proposal_collector,
+            workspace_mode,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+    }
+
+    async fn execute_assignment_with_proposal_collector_and_cancel(
+        &self,
+        assignment: &WorkerAssignment,
+        proposal_collector: Option<std::sync::Arc<std::sync::Mutex<PatchProposalCollector>>>,
+        workspace_mode: WorkerWorkspaceMode,
+        cancel_token: tokio_util::sync::CancellationToken,
     ) -> anyhow::Result<Report> {
         let task = crate::task::Task {
             id: worker_task_id(assignment),
@@ -1949,39 +3195,107 @@ impl Orchestrator {
             tool: "agent".into(),
             arguments: serde_json::json!({
                 "task": assignment.task_description,
+                "owned_paths": assignment
+                    .owned_files
+                    .iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>(),
             }),
         };
 
         let Some(collector) = proposal_collector else {
-            return Worker::execute(&self.runtime, &assignment.profile, task, None).await;
+            return Worker::execute_with_cancel(
+                &self.runtime,
+                &assignment.profile,
+                task,
+                None,
+                cancel_token,
+            )
+            .await;
         };
 
         let mut runtime = self.runtime.clone();
         runtime.registry = runtime
             .registry
-            .restrict_to_paths(&assignment.owned_files, &[])
-            .register(SubmitPatchProposalTool {
+            .restrict_to_paths(&assignment.owned_files, &[]);
+        let mut profile = assignment.profile.clone();
+        let sandbox = if workspace_mode == WorkerWorkspaceMode::IsolatedSandbox {
+            let workspace_root = self.worker_workspace_root.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("isolated sandbox workspace root is not configured")
+            })?;
+            let sandbox = WorkerSandbox::create(
+                workspace_root,
+                &assignment.worker_name,
+                &assignment.owned_files,
+            )?;
+            runtime.registry =
+                sandbox
+                    .register_tools(runtime.registry)
+                    .register(SubmitSandboxProposalTool {
+                        worker: assignment.worker_name.clone(),
+                        collector,
+                        sandbox: sandbox.clone(),
+                    });
+            for name in [
+                "read_file",
+                "write_file",
+                "edit",
+                "list_dir",
+                "shell",
+                SUBMIT_PATCH_PROPOSAL_TOOL,
+            ] {
+                if !profile.tool_names.is_empty()
+                    && !profile.tool_names.iter().any(|existing| existing == name)
+                {
+                    profile.tool_names.push(name.into());
+                }
+            }
+            let owned_scope = assignment
+                .owned_files
+                .iter()
+                .map(|path| format!("- {}", path.display()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            profile.system_prompt.push_str(&format!(
+                "\n\nYou have an isolated sandbox with a read-only clone of the workspace context. Your exact writable ownership scope is:\n{owned_scope}\nYou may read other workspace files for context, but modify only the paths listed above. Use read_file/list_dir for context and write_file/edit for owned paths. Tool results only expose workspace-relative paths. The tools never write the user's workspace. Shell commands start in /workspace inside the isolated clone: use workspace-relative paths and never cd to a host /tmp/zhongshu-agent-sandboxes path, which is intentionally unavailable. Changing files outside your ownership makes proposal submission fail. When finished, call submit_patch_proposal exactly once with a summary; it seals the sandbox and derives the real patch operations. After submission the sandbox is read-only so you may run final verification but cannot edit."
+            ));
+            Some(sandbox)
+        } else {
+            runtime.registry = runtime.registry.register(SubmitPatchProposalTool {
                 worker: assignment.worker_name.clone(),
                 collector,
             });
-        let mut profile = assignment.profile.clone();
-        if !profile.tool_names.is_empty()
-            && !profile
-                .tool_names
-                .iter()
-                .any(|name| name == SUBMIT_PATCH_PROPOSAL_TOOL)
-        {
-            profile.tool_names.push(SUBMIT_PATCH_PROPOSAL_TOOL.into());
-        }
-        profile.system_prompt.push_str(
-            "\n\nYou must submit exactly one patch proposal through the submit_patch_proposal tool. Do not place a patch only in free-form text. The tool records a proposal for manager review and does not modify files.",
-        );
+            if !profile.tool_names.is_empty()
+                && !profile
+                    .tool_names
+                    .iter()
+                    .any(|name| name == SUBMIT_PATCH_PROPOSAL_TOOL)
+            {
+                profile.tool_names.push(SUBMIT_PATCH_PROPOSAL_TOOL.into());
+            }
+            profile.system_prompt.push_str(
+                "\n\nYou must submit exactly one patch proposal through the submit_patch_proposal tool. Do not place a patch only in free-form text. The tool records a proposal for manager review and does not modify files.",
+            );
+            None
+        };
         // Do not spend the worker's full step budget repeatedly asking for
         // verification when it refuses the required submission tool. Parent
         // merge review still requires a CompletedVerified report, so this
         // short-circuit does not weaken acceptance.
         profile.verification_policy = crate::agent::profile::VerificationPolicy::NotRequired;
-        Worker::execute(&runtime, &profile, task, None).await
+        let result =
+            Worker::execute_with_cancel(&runtime, &profile, task, None, cancel_token).await;
+        if let Some(sandbox) = sandbox {
+            if let Err(cleanup_error) = sandbox.cleanup() {
+                return match result {
+                    Ok(_) => Err(cleanup_error.context("failed to clean worker sandbox")),
+                    Err(worker_error) => Err(anyhow::anyhow!(
+                        "{worker_error}; failed to clean worker sandbox: {cleanup_error}"
+                    )),
+                };
+            }
+        }
+        result
     }
 
     /// Detect file edit conflicts across worker reports.
@@ -2194,7 +3508,12 @@ impl Orchestrator {
         for decision in &review.decisions {
             for operation in &decision.proposal.operations {
                 if operation.kind() != PatchOperationKind::CreateFile {
-                    if let Err(error) = engine.read(operation.path()) {
+                    let read_result = match engine.has_read(operation.path()) {
+                        Ok(true) => Ok(()),
+                        Ok(false) => engine.read(operation.path()).map(|_| ()),
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = read_result {
                         failures.push(WorkerPatchApplyFailure {
                             worker: decision.proposal.worker.clone(),
                             operation: PatchOperationKind::Read,
@@ -2334,15 +3653,41 @@ impl Orchestrator {
         coordinator: &C,
         proposals: Vec<WorkerPatchProposal>,
         engine: &mut PatchEngine,
-        mut execution: WorkerExecutionReport,
+        execution: WorkerExecutionReport,
     ) -> WorkerPatchPipelineReport {
+        let reviewed =
+            self.review_worker_patch_pipeline_stage(session_id, assignments, proposals, execution);
+        let applied = self.apply_worker_patch_pipeline_stage(reviewed, engine);
+        self.release_worker_patch_pipeline_stage(applied, coordinator)
+            .await
+    }
+
+    pub fn review_worker_patch_pipeline_stage(
+        &self,
+        session_id: Option<String>,
+        assignments: Vec<WorkerAssignment>,
+        proposals: Vec<WorkerPatchProposal>,
+        execution: WorkerExecutionReport,
+    ) -> ReviewedWorkerPatchPipeline {
         let merge_review = self.review_worker_patch_proposals(&assignments, &execution, proposals);
-        let apply_report = if merge_review.status == WorkerMergeStatus::Approved {
+        ReviewedWorkerPatchPipeline {
+            session_id,
+            execution,
+            merge_review,
+        }
+    }
+
+    pub fn apply_worker_patch_pipeline_stage(
+        &self,
+        mut reviewed: ReviewedWorkerPatchPipeline,
+        engine: &mut PatchEngine,
+    ) -> AppliedWorkerPatchPipeline {
+        let apply_report = if reviewed.merge_review.status == WorkerMergeStatus::Approved {
             self.apply_worker_patch_review(
                 engine,
-                &merge_review,
-                session_id.clone(),
-                &mut execution.trace_events,
+                &reviewed.merge_review,
+                reviewed.session_id,
+                &mut reviewed.execution.trace_events,
             )
         } else {
             WorkerPatchApplyReport {
@@ -2350,15 +3695,93 @@ impl Orchestrator {
                 failures: Vec::new(),
             }
         };
+        AppliedWorkerPatchPipeline {
+            execution: reviewed.execution,
+            merge_review: reviewed.merge_review,
+            apply_report,
+        }
+    }
+
+    pub async fn apply_worker_patch_pipeline_stage_durable<S>(
+        &self,
+        runner: &DurableExecutionRunner<S>,
+        graph: &mut crate::agent::ExecutionGraph,
+        store_version: &mut u64,
+        apply_node: &str,
+        reviewed: ReviewedWorkerPatchPipeline,
+        engine: &mut PatchEngine,
+    ) -> anyhow::Result<AppliedWorkerPatchPipeline>
+    where
+        S: ExecutionGraphStore + Clone + Send + Sync + 'static,
+    {
+        if reviewed.merge_review.status != WorkerMergeStatus::Approved {
+            anyhow::bail!("durable Apply admission requires an approved merge review");
+        }
+        let operations = reviewed
+            .merge_review
+            .decisions
+            .iter()
+            .filter(|decision| decision.approved)
+            .flat_map(|decision| decision.proposal.operations.iter().cloned())
+            .collect::<Vec<_>>();
+        let plans = engine.plan_operations(&operations).map_err(|failure| {
+            anyhow::anyhow!("failed to plan durable Apply effects: {failure:?}")
+        })?;
+        let intents = workspace_effect_intents(apply_node, &plans);
+        runner
+            .commit_deterministic(graph, store_version, move |candidate| {
+                candidate.record_effect_intents(apply_node, intents)?;
+                Ok(())
+            })
+            .await?;
+        runner.admit_node(graph, store_version, apply_node).await?;
+        let applied = self.apply_worker_patch_pipeline_stage(reviewed, engine);
+        let outcome = if applied.apply_report.passed() {
+            NodeExecutionOutcome::Succeeded(vec![ExecutionArtifact {
+                id: format!("artifact-{apply_node}"),
+                producer_node: apply_node.into(),
+                kind: "patch_apply".into(),
+                summary: format!(
+                    "parent PatchEngine applied {} operation(s)",
+                    applied.apply_report.applied.len()
+                ),
+                evidence_refs: applied
+                    .apply_report
+                    .applied
+                    .iter()
+                    .map(|result| format!("file:{}", result.path.display()))
+                    .collect(),
+                uncertainties: Vec::new(),
+            }])
+        } else {
+            NodeExecutionOutcome::Failed(format!(
+                "parent PatchEngine reported {} apply failure(s)",
+                applied.apply_report.failures.len()
+            ))
+        };
+        runner
+            .record_outcome(graph, store_version, apply_node, &outcome)
+            .await?;
+        Ok(applied)
+    }
+
+    pub async fn release_worker_patch_pipeline_stage<C: FileClaimCoordinator>(
+        &self,
+        mut applied: AppliedWorkerPatchPipeline,
+        coordinator: &C,
+    ) -> WorkerPatchPipelineReport {
         let deferred_release_failures = self
-            .release_worker_file_claims(&execution.claim_report.active_claims, coordinator)
+            .release_worker_file_claims(&applied.execution.claim_report.active_claims, coordinator)
             .await;
-        execution.release_failures.extend(deferred_release_failures);
-        let status = if merge_review.status != WorkerMergeStatus::Approved {
+        applied
+            .execution
+            .release_failures
+            .extend(deferred_release_failures);
+        let status = if applied.merge_review.status != WorkerMergeStatus::Approved {
             WorkerPatchPipelineStatus::Blocked
-        } else if !apply_report.passed() {
+        } else if !applied.apply_report.passed() {
             WorkerPatchPipelineStatus::ApplyFailed
-        } else if execution.release_failures.is_empty() {
+        } else if applied.execution.release_failures.is_empty() {
             WorkerPatchPipelineStatus::Applied
         } else {
             WorkerPatchPipelineStatus::AppliedWithReviewFindings
@@ -2366,10 +3789,82 @@ impl Orchestrator {
 
         WorkerPatchPipelineReport {
             status,
-            execution,
-            merge_review,
-            apply_report,
+            execution: applied.execution,
+            merge_review: applied.merge_review,
+            apply_report: applied.apply_report,
         }
+    }
+
+    pub async fn release_worker_patch_pipeline_stage_durable<C, S>(
+        &self,
+        runner: &DurableExecutionRunner<S>,
+        graph: &mut crate::agent::ExecutionGraph,
+        store_version: &mut u64,
+        release_node: &str,
+        applied: AppliedWorkerPatchPipeline,
+        coordinator: &C,
+    ) -> anyhow::Result<WorkerPatchPipelineReport>
+    where
+        C: FileClaimCoordinator,
+        S: ExecutionGraphStore + Clone + Send + Sync + 'static,
+    {
+        let intents = file_claim_effect_intents(
+            release_node,
+            applied
+                .execution
+                .claim_report
+                .active_claims
+                .iter()
+                .map(|claim| {
+                    (
+                        claim.worker.clone(),
+                        claim.file.to_string_lossy().to_string(),
+                        claim.operation.clone(),
+                        claim.conv_id,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            false,
+        );
+        if !intents.is_empty() {
+            runner
+                .commit_deterministic(graph, store_version, move |candidate| {
+                    candidate.record_effect_intents(release_node, intents)?;
+                    Ok(())
+                })
+                .await?;
+        }
+        runner
+            .admit_node(graph, store_version, release_node)
+            .await?;
+        let pipeline = self
+            .release_worker_patch_pipeline_stage(applied, coordinator)
+            .await;
+        let outcome = if pipeline.execution.release_failures.is_empty() {
+            NodeExecutionOutcome::Succeeded(vec![ExecutionArtifact {
+                id: format!("artifact-{release_node}"),
+                producer_node: release_node.into(),
+                kind: "claim_release".into(),
+                summary: "all acquired file claims were released".into(),
+                evidence_refs: pipeline
+                    .execution
+                    .claim_report
+                    .active_claims
+                    .iter()
+                    .map(|claim| format!("claim:{}:{}", claim.worker, claim.file.display()))
+                    .collect(),
+                uncertainties: Vec::new(),
+            }])
+        } else {
+            NodeExecutionOutcome::Failed(format!(
+                "{} file claim release(s) failed",
+                pipeline.execution.release_failures.len()
+            ))
+        };
+        runner
+            .record_outcome(graph, store_version, release_node, &outcome)
+            .await?;
+        Ok(pipeline)
     }
 
     /// Detect duplicate or nested file ownership before workers start.
@@ -2515,6 +4010,92 @@ impl Orchestrator {
             conflicts,
             release_failures,
         })
+    }
+
+    pub async fn claim_worker_files_durable<C, S>(
+        &self,
+        runner: &DurableExecutionRunner<S>,
+        graph: &mut crate::agent::ExecutionGraph,
+        store_version: &mut u64,
+        claim_node: &str,
+        assignments: &[WorkerAssignment],
+        coordinator: &C,
+        conv_id: i64,
+        operation: &str,
+    ) -> anyhow::Result<WorkerFileClaimReport>
+    where
+        C: FileClaimCoordinator,
+        S: ExecutionGraphStore + Clone + Send + Sync + 'static,
+    {
+        let intents = file_claim_effect_intents(
+            claim_node,
+            assignments
+                .iter()
+                .flat_map(|assignment| {
+                    normalize_owned_files(&assignment.owned_files)
+                        .into_iter()
+                        .map(|file| {
+                            (
+                                assignment.worker_name.clone(),
+                                file.to_string_lossy().to_string(),
+                                operation.to_string(),
+                                conv_id,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>(),
+            true,
+        );
+        runner
+            .commit_deterministic(graph, store_version, move |candidate| {
+                candidate.record_effect_intents(claim_node, intents)?;
+                Ok(())
+            })
+            .await?;
+        runner.admit_node(graph, store_version, claim_node).await?;
+        let report = match self
+            .claim_worker_files(assignments, coordinator, conv_id, operation)
+            .await
+        {
+            Ok(report) => report,
+            Err(error) => {
+                let outcome =
+                    NodeExecutionOutcome::Failed(format!("file claim coordinator failed: {error}"));
+                if let Err(persistence_error) = runner
+                    .record_outcome(graph, store_version, claim_node, &outcome)
+                    .await
+                {
+                    return Err(anyhow::anyhow!(
+                        "file claim coordinator failed: {error}; failed to persist claim failure: {persistence_error}"
+                    ));
+                }
+                return Err(error);
+            }
+        };
+        let blocked = !report.local_overlaps.is_empty() || !report.conflicts.is_empty();
+        let outcome = if blocked {
+            NodeExecutionOutcome::Failed(
+                "file ownership overlap or remote claim conflict blocked execution".into(),
+            )
+        } else {
+            NodeExecutionOutcome::Succeeded(vec![ExecutionArtifact {
+                id: format!("artifact-{claim_node}"),
+                producer_node: claim_node.into(),
+                kind: "file_claims".into(),
+                summary: format!("acquired {} file claim(s)", report.active_claims.len()),
+                evidence_refs: report
+                    .active_claims
+                    .iter()
+                    .map(|claim| format!("claim:{}:{}", claim.worker, claim.file.display()))
+                    .collect(),
+                uncertainties: Vec::new(),
+            }])
+        };
+        runner
+            .record_outcome(graph, store_version, claim_node, &outcome)
+            .await?;
+        Ok(report)
     }
 
     pub async fn release_worker_file_claims<C: FileClaimCoordinator>(
@@ -2719,6 +4300,34 @@ fn classify_worker_reports(
     }
 }
 
+fn worker_proposal_outcome(
+    report: Option<&Report>,
+    execution_error: Option<&str>,
+    node_id: &str,
+    worker: &str,
+) -> NodeExecutionOutcome {
+    match report {
+        Some(report) if report.success => {
+            NodeExecutionOutcome::Succeeded(vec![ExecutionArtifact {
+                id: format!("artifact-{node_id}"),
+                producer_node: node_id.into(),
+                kind: "patch_proposal".into(),
+                summary: report.summary.clone(),
+                evidence_refs: vec![format!("report:{}", report.task_id)],
+                uncertainties: Vec::new(),
+            }])
+        }
+        Some(report) => {
+            NodeExecutionOutcome::Failed(format!("worker outcome was {:?}", report.outcome))
+        }
+        None => NodeExecutionOutcome::Failed(
+            execution_error
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("worker '{worker}' submitted no successful report")),
+        ),
+    }
+}
+
 fn apply_organization_mutation_contract(
     assignments: &mut [WorkerAssignment],
     file_scopes: &[OrganizationFileScope],
@@ -2761,13 +4370,16 @@ fn apply_organization_file_scopes(
             ));
         }
         if scope.owned_files.is_empty()
-            || scope
-                .owned_files
-                .iter()
-                .any(|path| normalize_path(path).as_os_str().is_empty())
+            || scope.owned_files.iter().any(|path| {
+                normalize_path(path).as_os_str().is_empty()
+                    || path.is_absolute()
+                    || path
+                        .components()
+                        .any(|component| matches!(component, std::path::Component::ParentDir))
+            })
         {
             errors.push(format!(
-                "mutation employee '{}' must have at least one non-empty owned file",
+                "mutation employee '{}' must have at least one relative owned file without parent traversal",
                 scope.employee
             ));
         }
@@ -2937,6 +4549,193 @@ fn manager_acceptance_from_pipeline(
     }
 }
 
+fn fail_mutation_contract(
+    plan: &mut MutationExecutionGraphPlan,
+    reason: &str,
+) -> Result<(), ExecutionGraphError> {
+    plan.graph.start_node(&plan.contract_node)?;
+    plan.graph.fail_node(&plan.contract_node, reason)?;
+    plan.graph.settle_unreachable()?;
+    Ok(())
+}
+
+fn complete_mutation_contract(
+    plan: &mut MutationExecutionGraphPlan,
+) -> Result<(), ExecutionGraphError> {
+    plan.graph.start_node(&plan.contract_node)?;
+    plan.graph.complete_node(
+        &plan.contract_node,
+        vec![ExecutionArtifact {
+            id: "artifact-contract-000".into(),
+            producer_node: plan.contract_node.clone(),
+            kind: "mutation_contract".into(),
+            summary: "staffing, ownership, and proposal shape passed preflight".into(),
+            evidence_refs: Vec::new(),
+            uncertainties: Vec::new(),
+        }],
+    )
+}
+
+/// Project the actual pipeline gates into the append-only graph. The existing
+/// claim/review/PatchEngine functions remain the enforcing boundaries; this
+/// function records their observed outcomes without inventing progress.
+fn project_mutation_pipeline(
+    plan: &mut MutationExecutionGraphPlan,
+    pipeline: &WorkerPatchPipelineReport,
+) -> Result<(), ExecutionGraphError> {
+    let mut outcomes = std::collections::BTreeMap::new();
+    let claim_blocked = !pipeline.execution.claim_report.local_overlaps.is_empty()
+        || !pipeline.execution.claim_report.conflicts.is_empty();
+    if claim_blocked {
+        outcomes.insert(
+            plan.claim_node.clone(),
+            NodeExecutionOutcome::Failed(
+                "file ownership overlap or remote claim conflict blocked execution".into(),
+            ),
+        );
+    } else {
+        outcomes.insert(
+            plan.claim_node.clone(),
+            NodeExecutionOutcome::Succeeded(vec![ExecutionArtifact {
+                id: "artifact-claim-000".into(),
+                producer_node: plan.claim_node.clone(),
+                kind: "file_claims".into(),
+                summary: format!(
+                    "acquired {} file claim(s)",
+                    pipeline.execution.claim_report.active_claims.len()
+                ),
+                evidence_refs: pipeline
+                    .execution
+                    .claim_report
+                    .active_claims
+                    .iter()
+                    .map(|claim| format!("claim:{}:{}", claim.worker, claim.file.display()))
+                    .collect(),
+                uncertainties: Vec::new(),
+            }]),
+        );
+    }
+
+    for (executor, node_id) in &plan.work_nodes {
+        let outcome = match pipeline
+            .execution
+            .reports
+            .iter()
+            .find(|report| report.worker == *executor)
+        {
+            Some(report) if report.success => {
+                NodeExecutionOutcome::Succeeded(vec![ExecutionArtifact {
+                    id: format!("artifact-{node_id}"),
+                    producer_node: node_id.clone(),
+                    kind: "patch_proposal".into(),
+                    summary: report.summary.clone(),
+                    evidence_refs: vec![format!("report:{}", report.task_id)],
+                    uncertainties: Vec::new(),
+                }])
+            }
+            Some(report) => {
+                NodeExecutionOutcome::Failed(format!("worker outcome was {:?}", report.outcome))
+            }
+            None => NodeExecutionOutcome::Failed(
+                pipeline
+                    .execution
+                    .execution_error
+                    .clone()
+                    .unwrap_or_else(|| {
+                        format!("executor '{executor}' submitted no successful report")
+                    }),
+            ),
+        };
+        outcomes.insert(node_id.clone(), outcome);
+    }
+
+    outcomes.insert(
+        plan.review_node.clone(),
+        if pipeline.merge_review.status == WorkerMergeStatus::Approved {
+            NodeExecutionOutcome::Succeeded(vec![ExecutionArtifact {
+                id: "artifact-review-000".into(),
+                producer_node: plan.review_node.clone(),
+                kind: "merge_review".into(),
+                summary: format!(
+                    "approved {} structured proposal(s)",
+                    pipeline.merge_review.decisions.len()
+                ),
+                evidence_refs: plan
+                    .work_nodes
+                    .iter()
+                    .map(|(_, node_id)| format!("artifact-{node_id}"))
+                    .collect(),
+                uncertainties: Vec::new(),
+            }])
+        } else {
+            NodeExecutionOutcome::Failed(
+                "ownership, verification, conflict, or proposal review did not approve".into(),
+            )
+        },
+    );
+
+    outcomes.insert(
+        plan.apply_node.clone(),
+        if matches!(
+            pipeline.status,
+            WorkerPatchPipelineStatus::Applied
+                | WorkerPatchPipelineStatus::AppliedWithReviewFindings
+        ) && pipeline.apply_report.passed()
+        {
+            NodeExecutionOutcome::Succeeded(vec![ExecutionArtifact {
+                id: "artifact-apply-000".into(),
+                producer_node: plan.apply_node.clone(),
+                kind: "patch_apply".into(),
+                summary: format!(
+                    "parent PatchEngine applied {} operation(s)",
+                    pipeline.apply_report.applied.len()
+                ),
+                evidence_refs: Vec::new(),
+                uncertainties: Vec::new(),
+            }])
+        } else {
+            NodeExecutionOutcome::Failed(
+                "parent PatchEngine did not apply the complete approved proposal set".into(),
+            )
+        },
+    );
+
+    outcomes.insert(
+        plan.release_node.clone(),
+        if pipeline.execution.release_failures.is_empty() {
+            NodeExecutionOutcome::Succeeded(vec![ExecutionArtifact {
+                id: "artifact-release-000".into(),
+                producer_node: plan.release_node.clone(),
+                kind: "claim_release".into(),
+                summary: "all acquired file claims were released".into(),
+                evidence_refs: Vec::new(),
+                uncertainties: Vec::new(),
+            }])
+        } else {
+            NodeExecutionOutcome::Failed(format!(
+                "{} file claim release(s) failed",
+                pipeline.execution.release_failures.len()
+            ))
+        },
+    );
+    outcomes.insert(
+        plan.finalize_node.clone(),
+        NodeExecutionOutcome::Succeeded(Vec::new()),
+    );
+
+    let schedule = plan.graph.run_ready(|node| {
+        outcomes
+            .remove(&node.id)
+            .unwrap_or(NodeExecutionOutcome::Deferred)
+    })?;
+    if schedule.stalled {
+        return Err(ExecutionGraphError::SchedulerStalled(
+            schedule.deferred_nodes,
+        ));
+    }
+    Ok(())
+}
+
 fn organization_mutation_without_pipeline(
     request: &OrganizationTaskRequest,
     staffing: StaffingDecision,
@@ -2944,6 +4743,7 @@ fn organization_mutation_without_pipeline(
     status: ManagerAcceptanceStatus,
     summary: impl Into<String>,
     reasons: Vec<String>,
+    execution_graph: ExecutionGraphSnapshot,
 ) -> OrganizationMutationReport {
     OrganizationMutationReport {
         task_id: request.task_id.clone(),
@@ -2956,6 +4756,7 @@ fn organization_mutation_without_pipeline(
             summary: summary.into(),
             reasons,
         },
+        execution_graph,
     }
 }
 
@@ -3343,12 +5144,61 @@ pub mod tests {
                 .flatten()
                 .map(|call| call.function.name.as_str())
                 .collect::<Vec<_>>();
+            if system.contains("ROLE=sandbox")
+                && (!system.contains("Your exact writable ownership scope is:")
+                    || !system.contains("\n- work/copy.txt\n"))
+            {
+                anyhow::bail!("sandbox worker did not receive its exact ownership scope");
+            }
             if system.contains("ROLE=mutation_receiver")
                 && !user_context.contains("mutation proposal independently verified")
             {
                 anyhow::bail!("mutation receiver did not receive the previous employee handoff");
             }
-            let message = if system.contains("ROLE=generated_missing") {
+            let message = if system.contains("ROLE=sandbox")
+                && !called_tools.contains(&"write_file")
+            {
+                Message::assistant_with_tools(
+                    "",
+                    vec![ToolCall {
+                        id: "sandbox-write".into(),
+                        call_type: "function".into(),
+                        function: FunctionCall {
+                            name: "write_file".into(),
+                            arguments: r#"{"path":"work/copy.txt","content":"new\n"}"#.into(),
+                        },
+                    }],
+                )
+            } else if system.contains("ROLE=sandbox") && !called_tools.contains(&"shell") {
+                Message::assistant_with_tools(
+                    "",
+                    vec![ToolCall {
+                        id: "sandbox-verify".into(),
+                        call_type: "function".into(),
+                        function: FunctionCall {
+                            name: "shell".into(),
+                            arguments: r#"{"command":"python3 -m unittest discover -s work"}"#
+                                .into(),
+                        },
+                    }],
+                )
+            } else if system.contains("ROLE=sandbox")
+                && !called_tools.contains(&SUBMIT_PATCH_PROPOSAL_TOOL)
+            {
+                Message::assistant_with_tools(
+                    "",
+                    vec![ToolCall {
+                        id: "sandbox-submit".into(),
+                        call_type: "function".into(),
+                        function: FunctionCall {
+                            name: SUBMIT_PATCH_PROPOSAL_TOOL.into(),
+                            arguments: r#"{"summary":"sandbox copy update","verification_commands":["python3 -m unittest discover -s work"]}"#.into(),
+                        },
+                    }],
+                )
+            } else if system.contains("ROLE=sandbox") {
+                Message::assistant("sandbox change submitted with fresh local verification")
+            } else if system.contains("ROLE=generated_missing") {
                 Message::assistant("free-form patch text is intentionally not accepted")
             } else if system.contains("ROLE=generated")
                 && !called_tools.contains(&SUBMIT_PATCH_PROPOSAL_TOOL)
@@ -4129,6 +5979,171 @@ pub mod tests {
     }
 
     #[tokio::test]
+    async fn patch_pipeline_stages_separate_review_apply_and_release_effects() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let src = temp.path().join("src");
+        std::fs::create_dir(&src).expect("create src");
+        std::fs::write(src.join("a.rs"), "old\n").expect("write file");
+        let mut engine = PatchEngine::new(temp.path()).expect("patch engine");
+        let assignment = WorkerAssignment {
+            worker_name: "w1".into(),
+            task_description: "edit owned".into(),
+            owned_files: vec![PathBuf::from("src/a.rs")],
+            profile: dummy_profile("w1"),
+        };
+        let proposal =
+            WorkerPatchProposal::new("w1", vec![PathBuf::from("src/a.rs")], "update owned file")
+                .with_operations(vec![PatchOperation::Replace(
+                    crate::patch::ReplaceRequest::once("src/a.rs", "old", "new"),
+                )]);
+        let mut execution = completed_execution();
+        execution.claim_report.active_claims = vec![WorkerFileClaim {
+            worker: "w1".into(),
+            file: PathBuf::from("src/a.rs"),
+            operation: "edit".into(),
+            conv_id: 1,
+        }];
+        let coordinator = MockFileClaimCoordinator::new();
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+
+        let reviewed = orch.review_worker_patch_pipeline_stage(
+            Some("stage-test".into()),
+            vec![assignment],
+            vec![proposal],
+            execution,
+        );
+        assert_eq!(reviewed.merge_review.status, WorkerMergeStatus::Approved);
+        assert_eq!(
+            std::fs::read_to_string(src.join("a.rs")).expect("read after review"),
+            "old\n"
+        );
+        assert!(coordinator.released().is_empty());
+
+        let applied = orch.apply_worker_patch_pipeline_stage(reviewed, &mut engine);
+        assert!(applied.apply_report.passed());
+        assert_eq!(
+            std::fs::read_to_string(src.join("a.rs")).expect("read after apply"),
+            "new\n"
+        );
+        assert!(coordinator.released().is_empty());
+
+        let report = orch
+            .release_worker_patch_pipeline_stage(applied, &coordinator)
+            .await;
+        assert_eq!(report.status, WorkerPatchPipelineStatus::Applied);
+        assert_eq!(coordinator.released().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn durable_apply_and_release_stages_persist_real_effect_boundaries() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let src = temp.path().join("src");
+        std::fs::create_dir(&src).expect("create src");
+        std::fs::write(src.join("a.rs"), "old\n").expect("write file");
+        let mut engine = PatchEngine::new(temp.path()).expect("patch engine");
+        let assignment = WorkerAssignment {
+            worker_name: "w1".into(),
+            task_description: "edit owned".into(),
+            owned_files: vec![PathBuf::from("src/a.rs")],
+            profile: dummy_profile("w1"),
+        };
+        let proposal =
+            WorkerPatchProposal::new("w1", vec![PathBuf::from("src/a.rs")], "update owned file")
+                .with_operations(vec![PatchOperation::Replace(
+                    crate::patch::ReplaceRequest::once("src/a.rs", "old", "new"),
+                )]);
+        let mut execution = completed_execution();
+        execution.claim_report.active_claims = vec![WorkerFileClaim {
+            worker: "w1".into(),
+            file: PathBuf::from("src/a.rs"),
+            operation: "edit".into(),
+            conv_id: 1,
+        }];
+        let coordinator = MockFileClaimCoordinator::new();
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+        let reviewed = orch.review_worker_patch_pipeline_stage(
+            Some("durable-stage-test".into()),
+            vec![assignment],
+            vec![proposal],
+            execution,
+        );
+        let database = crate::core::Database::new(temp.path().join("durable-stage.db"));
+        database.migrate().unwrap();
+        let store = crate::core::OrganizationCheckpointStore::new(database);
+        let runner = DurableExecutionRunner::new(store.clone());
+        let mut graph = crate::agent::ExecutionGraph::new("durable-stage-test").unwrap();
+        graph
+            .add_node(crate::agent::ExecutionNode::pending(
+                "apply",
+                crate::agent::ExecutionNodeKind::Apply,
+                "apply patch",
+            ))
+            .unwrap();
+        graph
+            .add_node(crate::agent::ExecutionNode::pending(
+                "release",
+                crate::agent::ExecutionNodeKind::Release,
+                "release claim",
+            ))
+            .unwrap();
+        graph
+            .add_edge(crate::agent::ExecutionEdge {
+                from: "apply".into(),
+                to: "release".into(),
+                kind: crate::agent::ExecutionEdgeKind::Finally,
+            })
+            .unwrap();
+        let mut version = runner.initialize(&graph).await.unwrap();
+
+        let applied = orch
+            .apply_worker_patch_pipeline_stage_durable(
+                &runner,
+                &mut graph,
+                &mut version,
+                "apply",
+                reviewed,
+                &mut engine,
+            )
+            .await
+            .unwrap();
+        assert_eq!(version, 4);
+        assert_eq!(graph.effect_intents_for("apply").len(), 1);
+        assert_eq!(
+            graph.node("apply").unwrap().state,
+            ExecutionNodeState::Succeeded
+        );
+        assert_eq!(
+            std::fs::read_to_string(src.join("a.rs")).expect("read after durable apply"),
+            "new\n"
+        );
+        assert!(coordinator.released().is_empty());
+
+        let pipeline = orch
+            .release_worker_patch_pipeline_stage_durable(
+                &runner,
+                &mut graph,
+                &mut version,
+                "release",
+                applied,
+                &coordinator,
+            )
+            .await
+            .unwrap();
+        assert_eq!(pipeline.status, WorkerPatchPipelineStatus::Applied);
+        assert_eq!(version, 7);
+        assert_eq!(graph.effect_intents_for("release").len(), 1);
+        assert_eq!(
+            graph.node("release").unwrap().state,
+            ExecutionNodeState::Succeeded
+        );
+        assert_eq!(coordinator.released().len(), 1);
+        let stored = crate::core::ExecutionGraphStore::load_graph(&store, "durable-stage-test")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.checkpoint.graph, graph.snapshot());
+    }
+
+    #[tokio::test]
     async fn worker_patch_pipeline_blocks_unverified_worker_patch() {
         let temp = tempfile::tempdir().expect("tempdir");
         let src = temp.path().join("src");
@@ -4287,6 +6302,164 @@ pub mod tests {
                 ("w2".into(), "src\\b.rs".into())
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn durable_claim_stage_persists_outcome_before_workers_can_run() {
+        let assignments = vec![WorkerAssignment {
+            worker_name: "w1".into(),
+            task_description: "edit".into(),
+            owned_files: vec![PathBuf::from("src/a.rs")],
+            profile: dummy_profile("w1"),
+        }];
+        let coordinator = MockFileClaimCoordinator::new();
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+        let directory = tempfile::tempdir().unwrap();
+        let database = crate::core::Database::new(directory.path().join("durable-claim.db"));
+        database.migrate().unwrap();
+        let store = crate::core::OrganizationCheckpointStore::new(database);
+        let runner = DurableExecutionRunner::new(store.clone());
+        let mut graph = crate::agent::ExecutionGraph::new("durable-claim").unwrap();
+        graph
+            .add_node(crate::agent::ExecutionNode::pending(
+                "claim",
+                crate::agent::ExecutionNodeKind::Claim,
+                "claim files",
+            ))
+            .unwrap();
+        graph
+            .add_node(crate::agent::ExecutionNode::pending(
+                "worker",
+                crate::agent::ExecutionNodeKind::Propose,
+                "worker proposal",
+            ))
+            .unwrap();
+        graph
+            .add_edge(crate::agent::ExecutionEdge {
+                from: "claim".into(),
+                to: "worker".into(),
+                kind: crate::agent::ExecutionEdgeKind::Requires,
+            })
+            .unwrap();
+        let mut version = runner.initialize(&graph).await.unwrap();
+
+        let report = orch
+            .claim_worker_files_durable(
+                &runner,
+                &mut graph,
+                &mut version,
+                "claim",
+                &assignments,
+                &coordinator,
+                7,
+                "edit",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(report.active_claims.len(), 1);
+        assert_eq!(version, 4);
+        assert_eq!(graph.effect_intents_for("claim").len(), 1);
+        assert_eq!(
+            graph.node("claim").unwrap().state,
+            ExecutionNodeState::Succeeded
+        );
+        assert_eq!(graph.ready_node_ids(), vec!["worker"]);
+        let stored = crate::core::ExecutionGraphStore::load_graph(&store, "durable-claim")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.checkpoint.graph, graph.snapshot());
+    }
+
+    #[tokio::test]
+    async fn durable_sequential_worker_stage_records_each_proposal_node() {
+        let assignments = vec![
+            WorkerAssignment {
+                worker_name: "w1".into(),
+                task_description: "first analysis".into(),
+                owned_files: vec![PathBuf::from("src/a.rs")],
+                profile: dummy_profile("w1"),
+            },
+            WorkerAssignment {
+                worker_name: "w2".into(),
+                task_description: "second analysis".into(),
+                owned_files: vec![PathBuf::from("src/b.rs")],
+                profile: dummy_profile("w2"),
+            },
+        ];
+        let orch = Orchestrator::new(dummy_runtime(), LlmRegistry::new());
+        let directory = tempfile::tempdir().unwrap();
+        let database = crate::core::Database::new(directory.path().join("durable-workers.db"));
+        database.migrate().unwrap();
+        let store = crate::core::OrganizationCheckpointStore::new(database);
+        let runner = DurableExecutionRunner::new(store.clone());
+        let mut graph = crate::agent::ExecutionGraph::new("durable-workers").unwrap();
+        for (node_id, kind) in [
+            ("claim", crate::agent::ExecutionNodeKind::Claim),
+            ("propose-a", crate::agent::ExecutionNodeKind::Propose),
+            ("propose-b", crate::agent::ExecutionNodeKind::Propose),
+        ] {
+            graph
+                .add_node(crate::agent::ExecutionNode::pending(node_id, kind, node_id))
+                .unwrap();
+        }
+        graph
+            .add_edge(crate::agent::ExecutionEdge {
+                from: "claim".into(),
+                to: "propose-a".into(),
+                kind: crate::agent::ExecutionEdgeKind::Consumes,
+            })
+            .unwrap();
+        graph
+            .add_edge(crate::agent::ExecutionEdge {
+                from: "propose-a".into(),
+                to: "propose-b".into(),
+                kind: crate::agent::ExecutionEdgeKind::Consumes,
+            })
+            .unwrap();
+        let mut version = runner.initialize(&graph).await.unwrap();
+        runner
+            .execute_node(&mut graph, &mut version, "claim", |_| async {
+                NodeExecutionOutcome::Succeeded(Vec::new())
+            })
+            .await
+            .unwrap();
+        let work_nodes = vec![
+            ("w1".to_string(), "propose-a".to_string()),
+            ("w2".to_string(), "propose-b".to_string()),
+        ];
+
+        let (reports, execution_error, trace_events) = orch
+            .execute_claimed_assignments_durable(
+                &runner,
+                &mut graph,
+                &mut version,
+                &work_nodes,
+                &assignments,
+                false,
+                true,
+                None,
+                WorkerWorkspaceMode::ProposalOnly,
+                Some("durable-workers"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(reports.len(), 2);
+        assert!(execution_error.is_none());
+        assert_eq!(trace_events.len(), 4);
+        assert_eq!(
+            graph.node("propose-a").unwrap().state,
+            ExecutionNodeState::Succeeded
+        );
+        assert_eq!(
+            graph.node("propose-b").unwrap().state,
+            ExecutionNodeState::Succeeded
+        );
+        let stored = crate::core::ExecutionGraphStore::load_graph(&store, "durable-workers")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.checkpoint.graph, graph.snapshot());
     }
 
     #[tokio::test]
@@ -4596,10 +6769,20 @@ pub mod tests {
         .with_collaboration(CollaborationMode::SequentialHandoff);
 
         let mut organization_events = Vec::new();
+        let directory = tempfile::tempdir().unwrap();
+        let database = crate::core::Database::new(directory.path().join("durable-handoff.db"));
+        database.migrate().unwrap();
+        let store = crate::core::OrganizationCheckpointStore::new(database);
         let report = orchestrator
-            .execute_organization_task_with_events(&request, &roster, |event| {
-                organization_events.push(event);
-            }, None)
+            .execute_organization_task_with_events_durable(
+                &request,
+                &roster,
+                |event| {
+                    organization_events.push(event);
+                },
+                None,
+                store.clone(),
+            )
             .await
             .expect("scripted organization execution");
 
@@ -4631,6 +6814,230 @@ pub mod tests {
             crate::event::OrganizationEvent::TaskFinished { status, .. }
                 if status == "submitted"
         ));
+        assert_eq!(report.execution_graph.nodes.len(), 4);
+        assert!(report
+            .execution_graph
+            .nodes
+            .iter()
+            .all(|node| node.state == ExecutionNodeState::Succeeded));
+        assert_eq!(report.execution_graph.artifacts.len(), 3);
+        assert_eq!(report.execution_graph.transitions.len(), 8);
+        let stored = crate::core::ExecutionGraphStore::load_graph(&store, "finance-quarter")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.checkpoint.graph, report.execution_graph);
+        assert!(
+            crate::core::ExecutionGraphStore::list_unfinished_graphs(&store)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn independent_organization_task_runs_ready_workers_concurrently() {
+        use crate::agent::{
+            CollaborationMode, EmployeeCapability, EmployeeRole, OrganizationTaskRequest,
+            RoleRequirement, StaffingRequest, VerificationPolicy,
+        };
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let runtime = AgentRuntime::new(
+            ConcurrentMockProvider {
+                in_flight: in_flight.clone(),
+                max_in_flight: max_in_flight.clone(),
+            },
+            ToolRegistry::new(),
+            "concurrent-organization",
+            AgentBudget::default(),
+        );
+        let orchestrator = Orchestrator::new(runtime, LlmRegistry::new());
+        let roster = vec![
+            AgentProfile::new("research-a", "research", vec![], AgentBudget::default())
+                .with_specialty(
+                    EmployeeRole::new("market_research"),
+                    vec![EmployeeCapability::new("market_evidence")],
+                    "market evidence",
+                )
+                .with_verification_policy(VerificationPolicy::NotRequired),
+            AgentProfile::new("research-b", "research", vec![], AgentBudget::default())
+                .with_specialty(
+                    EmployeeRole::new("customer_research"),
+                    vec![EmployeeCapability::new("customer_evidence")],
+                    "customer evidence",
+                )
+                .with_verification_policy(VerificationPolicy::NotRequired),
+        ];
+        let request = OrganizationTaskRequest::manager_selected(
+            "parallel-research",
+            "zhongshu",
+            StaffingRequest {
+                objective: "compare independent market and customer evidence".into(),
+                requirements: vec![
+                    RoleRequirement::required(
+                        EmployeeRole::new("market_research"),
+                        "collect market evidence",
+                    )
+                    .with_capabilities(vec![EmployeeCapability::new("market_evidence")]),
+                    RoleRequirement::required(
+                        EmployeeRole::new("customer_research"),
+                        "collect customer evidence",
+                    )
+                    .with_capabilities(vec![EmployeeCapability::new("customer_evidence")]),
+                ],
+                max_workers: Some(2),
+            },
+        )
+        .with_collaboration(CollaborationMode::Independent);
+        let mut events = Vec::new();
+        let directory = tempfile::tempdir().unwrap();
+        let database = crate::core::Database::new(directory.path().join("durable-organization.db"));
+        database.migrate().unwrap();
+        let store = crate::core::OrganizationCheckpointStore::new(database);
+
+        let report = orchestrator
+            .execute_organization_task_with_events_durable(
+                &request,
+                &roster,
+                |event| events.push(event),
+                None,
+                store.clone(),
+            )
+            .await
+            .expect("independent organization execution");
+
+        assert_eq!(report.status, OrganizationExecutionStatus::Submitted);
+        assert_eq!(report.employee_reports.len(), 2);
+        assert!(
+            max_in_flight.load(Ordering::SeqCst) >= 2,
+            "independent ready workers must overlap in provider execution"
+        );
+        let working_positions = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| {
+                matches!(
+                    event,
+                    crate::event::OrganizationEvent::EmployeeWorking { .. }
+                )
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let first_report = events.iter().position(|event| {
+            matches!(
+                event,
+                crate::event::OrganizationEvent::EmployeeReported { .. }
+            )
+        });
+        assert_eq!(working_positions.len(), 2);
+        assert!(working_positions[1] < first_report.expect("employee report event"));
+        assert!(report
+            .execution_graph
+            .nodes
+            .iter()
+            .all(|node| node.state == ExecutionNodeState::Succeeded));
+        let stored = crate::core::ExecutionGraphStore::load_graph(&store, "parallel-research")
+            .unwrap()
+            .unwrap();
+        assert!(stored
+            .checkpoint
+            .graph
+            .nodes
+            .iter()
+            .all(|node| node.state == ExecutionNodeState::Succeeded));
+        assert!(
+            crate::core::ExecutionGraphStore::list_unfinished_graphs(&store)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_running_independent_workers_marks_nodes_cancelled() {
+        use crate::agent::{
+            CollaborationMode, EmployeeRole, OrganizationTaskRequest, RoleRequirement,
+            StaffingRequest, VerificationPolicy,
+        };
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let runtime = AgentRuntime::new(
+            ConcurrentMockProvider {
+                in_flight,
+                max_in_flight: max_in_flight.clone(),
+            },
+            ToolRegistry::new(),
+            "cancelled-organization",
+            AgentBudget::default(),
+        );
+        let orchestrator = Orchestrator::new(runtime, LlmRegistry::new());
+        let roster = ["a", "b"]
+            .into_iter()
+            .map(|name| {
+                AgentProfile::new(name, "slow research", vec![], AgentBudget::default())
+                    .with_specialty(EmployeeRole::new(name), vec![], name)
+                    .with_verification_policy(VerificationPolicy::NotRequired)
+            })
+            .collect::<Vec<_>>();
+        let request = OrganizationTaskRequest::manager_selected(
+            "cancel-running-workers",
+            "zhongshu",
+            StaffingRequest {
+                objective: "run two cancellable independent workers".into(),
+                requirements: vec![
+                    RoleRequirement::required(EmployeeRole::new("a"), "research a"),
+                    RoleRequirement::required(EmployeeRole::new("b"), "research b"),
+                ],
+                max_workers: Some(2),
+            },
+        )
+        .with_collaboration(CollaborationMode::Independent);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let trigger = cancel.clone();
+        let cancellation = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            trigger.cancel();
+        });
+
+        let mut events = Vec::new();
+        let report = orchestrator
+            .execute_organization_task_with_events(
+                &request,
+                &roster,
+                |event| events.push(event),
+                Some(cancel),
+            )
+            .await
+            .expect("cancelled organization execution");
+        cancellation.await.expect("cancellation task");
+
+        assert_eq!(report.status, OrganizationExecutionStatus::Cancelled);
+        assert_eq!(report.execution_error.as_deref(), Some("cancelled by user"));
+        assert!(max_in_flight.load(Ordering::SeqCst) >= 2);
+        assert_eq!(
+            report
+                .execution_graph
+                .nodes
+                .iter()
+                .filter(|node| node.kind == crate::agent::ExecutionNodeKind::Work)
+                .filter(|node| node.state == ExecutionNodeState::Cancelled)
+                .count(),
+            2
+        );
+        assert!(report.execution_graph.nodes.iter().any(|node| {
+            node.kind == crate::agent::ExecutionNodeKind::Finalize
+                && node.state == ExecutionNodeState::Skipped
+        }));
+        assert!(report.employee_reports.is_empty());
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            crate::event::OrganizationEvent::ManagerReviewing { .. }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            crate::event::OrganizationEvent::TaskFinished { status, .. }
+                if status == "cancelled"
+        )));
     }
 
     #[tokio::test]
@@ -4797,6 +7204,41 @@ pub mod tests {
         assert!(report.staffing.rationale.last().unwrap().contains("shell"));
     }
 
+    #[test]
+    fn sandbox_eligibility_allows_replaced_local_tools_and_blocks_other_side_effects() {
+        let runtime = AgentRuntime::new(
+            MockProvider,
+            ToolRegistry::new()
+                .register(crate::tool::fs::WriteFileTool)
+                .register(PassingShellTool)
+                .register(SystemChangingScreenshotTool),
+            "sandbox-eligibility",
+            AgentBudget::default(),
+        );
+        let orchestrator = Orchestrator::new(runtime, LlmRegistry::new());
+        let profile = |tool: &str| {
+            AgentProfile::new(
+                "worker",
+                "worker",
+                vec![tool.into()],
+                AgentBudget::default(),
+            )
+        };
+
+        assert_eq!(
+            orchestrator.organization_sandbox_blocker(&profile("write_file")),
+            None
+        );
+        assert_eq!(
+            orchestrator.organization_sandbox_blocker(&profile("shell")),
+            None
+        );
+        assert_eq!(
+            orchestrator.organization_sandbox_blocker(&profile("screenshot")),
+            Some("screenshot".into())
+        );
+    }
+
     #[tokio::test]
     async fn read_only_organization_executor_checks_side_effect_not_only_read_only_flag() {
         use crate::agent::{
@@ -4934,7 +7376,13 @@ pub mod tests {
         };
 
         let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(temp.path().join("copy.txt"), "old\n").unwrap();
+        std::fs::create_dir_all(temp.path().join("work")).unwrap();
+        std::fs::write(temp.path().join("work/copy.txt"), "old\n").unwrap();
+        std::fs::write(
+            temp.path().join("work/test_copy.py"),
+            "import pathlib, unittest\nclass CopyTest(unittest.TestCase):\n    def test_copy(self):\n        self.assertEqual(pathlib.Path(__file__).with_name('copy.txt').read_text(), 'new\\n')\n",
+        )
+        .unwrap();
         let mut engine = PatchEngine::new(temp.path()).unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let runtime = AgentRuntime::new(
@@ -4965,12 +7413,15 @@ pub mod tests {
         );
         let scopes = vec![OrganizationFileScope {
             employee: "writer".into(),
-            owned_files: vec![PathBuf::from("copy.txt")],
+            owned_files: vec![PathBuf::from("work")],
         }];
         let coordinator = MockFileClaimCoordinator::new();
+        let database = crate::core::Database::new(temp.path().join("durable-mutation.db"));
+        database.migrate().unwrap();
+        let store = crate::core::OrganizationCheckpointStore::new(database);
 
         let report = orchestrator
-            .execute_organization_mutation_from_workers(
+            .execute_organization_mutation_from_workers_durable(
                 &request,
                 &roster,
                 scopes,
@@ -4979,6 +7430,7 @@ pub mod tests {
                 46,
                 "edit",
                 &mut engine,
+                store.clone(),
             )
             .await
             .expect("worker-generated proposal pipeline");
@@ -4990,12 +7442,135 @@ pub mod tests {
         );
         assert_eq!(calls.load(Ordering::SeqCst), 3);
         assert_eq!(
-            std::fs::read_to_string(temp.path().join("copy.txt")).unwrap(),
+            std::fs::read_to_string(temp.path().join("work/copy.txt")).unwrap(),
             "new\n"
+        );
+        assert!(report
+            .execution_graph
+            .nodes
+            .iter()
+            .all(|node| node.state == ExecutionNodeState::Succeeded));
+        let stored =
+            crate::core::ExecutionGraphStore::load_graph(&store, "worker-generated-proposal")
+                .unwrap()
+                .unwrap();
+        assert_eq!(stored.checkpoint.graph, report.execution_graph);
+        assert!(
+            crate::core::ExecutionGraphStore::list_unfinished_graphs(&store)
+                .unwrap()
+                .is_empty()
         );
         let pipeline = report.pipeline.unwrap();
         assert_eq!(pipeline.merge_review.decisions.len(), 1);
         assert_eq!(pipeline.merge_review.decisions[0].proposal.worker, "writer");
+    }
+
+    #[tokio::test]
+    async fn isolated_sandbox_worker_edits_and_verifies_before_parent_apply() {
+        use crate::agent::{
+            EmployeeRole, OrganizationFileScope, OrganizationTaskRequest, RoleRequirement,
+            StaffingRequest, VerificationPolicy, WorkerWorkspaceMode,
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(temp.path().join("work")).unwrap();
+        std::fs::write(temp.path().join("work/copy.txt"), "old\n").unwrap();
+        std::fs::write(
+            temp.path().join("work/test_copy.py"),
+            "import pathlib, unittest\nclass CopyTest(unittest.TestCase):\n    def test_copy(self):\n        self.assertEqual(pathlib.Path(__file__).with_name('copy.txt').read_text(), 'new\\n')\n",
+        )
+        .unwrap();
+        let mut engine = PatchEngine::new(temp.path()).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runtime = AgentRuntime::new(
+            OrganizationScriptedProvider {
+                calls: calls.clone(),
+            },
+            ToolRegistry::new().register(crate::tool::fs::ReadFileTool),
+            "organization-scripted",
+            AgentBudget::default(),
+        );
+        let orchestrator =
+            Orchestrator::new(runtime, LlmRegistry::new()).with_worker_workspace_root(temp.path());
+        let roster = vec![AgentProfile::new(
+            "writer",
+            "ROLE=sandbox",
+            vec!["read_file".into()],
+            AgentBudget {
+                max_steps: 8,
+                ..AgentBudget::default()
+            },
+        )
+        .with_specialty(EmployeeRole::writer(), vec![], "copy")
+        .with_verification_policy(VerificationPolicy::Required)];
+        let mut request = OrganizationTaskRequest::manager_selected(
+            "sandbox-generated-proposal",
+            "zhongshu",
+            StaffingRequest {
+                objective: "update copy".into(),
+                requirements: vec![RoleRequirement::required(EmployeeRole::writer(), "copy")],
+                max_workers: Some(1),
+            },
+        );
+        request.workspace_mode = WorkerWorkspaceMode::IsolatedSandbox;
+        let scopes = vec![OrganizationFileScope {
+            employee: "writer".into(),
+            owned_files: vec![PathBuf::from("work/copy.txt")],
+        }];
+        let coordinator = MockFileClaimCoordinator::new();
+        let database = crate::core::Database::new(temp.path().join("sandbox-mutation.db"));
+        database.migrate().unwrap();
+        let store = crate::core::OrganizationCheckpointStore::new(database);
+
+        let report = orchestrator
+            .execute_organization_mutation_from_workers_durable(
+                &request,
+                &roster,
+                scopes,
+                "zhongshu",
+                &coordinator,
+                47,
+                "edit",
+                &mut engine,
+                store,
+            )
+            .await
+            .expect("sandbox mutation pipeline");
+
+        assert!(
+            report.can_finalize(),
+            "status={:?} reasons={:?} pipeline={:?}",
+            report.manager_acceptance.status,
+            report.manager_acceptance.reasons,
+            report.pipeline.as_ref().map(|pipeline| (
+                pipeline.status,
+                pipeline.execution.status,
+                pipeline.execution.execution_error.clone(),
+                pipeline.merge_review.decisions.len(),
+                pipeline
+                    .execution
+                    .reports
+                    .iter()
+                    .map(|report| (
+                        report.outcome,
+                        report.findings.clone(),
+                        report.trace_events.clone(),
+                    ))
+                    .collect::<Vec<_>>(),
+                pipeline.execution.trace_events.clone(),
+            ))
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("work/copy.txt")).unwrap(),
+            "new\n"
+        );
+        let pipeline = report.pipeline.unwrap();
+        assert_eq!(pipeline.merge_review.decisions.len(), 1);
+        assert_eq!(
+            pipeline.merge_review.decisions[0].proposal.operations[0].path(),
+            std::path::Path::new("work/copy.txt")
+        );
     }
 
     #[tokio::test]
@@ -5040,9 +7615,12 @@ pub mod tests {
             owned_files: vec![PathBuf::from("copy.txt")],
         }];
         let coordinator = MockFileClaimCoordinator::new();
+        let database = crate::core::Database::new(temp.path().join("durable-blocked.db"));
+        database.migrate().unwrap();
+        let store = crate::core::OrganizationCheckpointStore::new(database);
 
         let report = orchestrator
-            .execute_organization_mutation_from_workers(
+            .execute_organization_mutation_from_workers_durable(
                 &request,
                 &roster,
                 scopes,
@@ -5051,6 +7629,7 @@ pub mod tests {
                 47,
                 "edit",
                 &mut engine,
+                store.clone(),
             )
             .await
             .expect("missing proposal must be visible as blocked");
@@ -5065,6 +7644,31 @@ pub mod tests {
             std::fs::read_to_string(temp.path().join("copy.txt")).unwrap(),
             "old\n"
         );
+        assert_eq!(
+            report
+                .execution_graph
+                .nodes
+                .iter()
+                .find(|node| node.kind == crate::agent::ExecutionNodeKind::Apply)
+                .unwrap()
+                .state,
+            ExecutionNodeState::Skipped
+        );
+        assert_eq!(
+            report
+                .execution_graph
+                .nodes
+                .iter()
+                .find(|node| node.kind == crate::agent::ExecutionNodeKind::Release)
+                .unwrap()
+                .state,
+            ExecutionNodeState::Succeeded
+        );
+        let stored =
+            crate::core::ExecutionGraphStore::load_graph(&store, "missing-generated-proposal")
+                .unwrap()
+                .unwrap();
+        assert_eq!(stored.checkpoint.graph, report.execution_graph);
         assert!(report
             .pipeline
             .unwrap()
@@ -5190,6 +7794,20 @@ pub mod tests {
             coordinator.released_contents(),
             vec!["front-new\n".to_string(), "back-new\n".to_string()]
         );
+        assert_eq!(
+            report
+                .execution_graph
+                .nodes
+                .iter()
+                .filter(|node| node.kind == crate::agent::ExecutionNodeKind::Apply)
+                .count(),
+            1
+        );
+        assert!(report
+            .execution_graph
+            .nodes
+            .iter()
+            .all(|node| node.state == crate::agent::ExecutionNodeState::Succeeded));
     }
 
     #[tokio::test]
@@ -5265,6 +7883,14 @@ pub mod tests {
             std::fs::read_to_string(temp.path().join("copy.txt")).unwrap(),
             "old\n"
         );
+        assert!(report.execution_graph.nodes.iter().any(|node| {
+            node.kind == crate::agent::ExecutionNodeKind::Contract
+                && node.state == crate::agent::ExecutionNodeState::Failed
+        }));
+        assert!(report.execution_graph.nodes.iter().all(|node| {
+            node.kind == crate::agent::ExecutionNodeKind::Contract
+                || node.state == crate::agent::ExecutionNodeState::Skipped
+        }));
     }
 
     #[test]
@@ -5294,6 +7920,25 @@ pub mod tests {
         assert_eq!(assignments[0].owned_files, vec![PathBuf::from("copy.txt")]);
     }
 
+    #[test]
+    fn organization_mutation_scope_rejects_absolute_and_parent_paths() {
+        let mut assignments = vec![WorkerAssignment {
+            worker_name: "writer".into(),
+            task_description: "update copy".into(),
+            owned_files: Vec::new(),
+            profile: dummy_profile("writer"),
+        }];
+        let scopes = vec![OrganizationFileScope {
+            employee: "writer".into(),
+            owned_files: vec![PathBuf::from("../outside"), PathBuf::from("/absolute")],
+        }];
+
+        let errors = apply_organization_file_scopes(&mut assignments, &scopes);
+
+        assert!(errors.iter().any(|error| error.contains("relative")));
+        assert!(assignments[0].owned_files.is_empty());
+    }
+
     #[tokio::test]
     async fn organization_mutation_claim_conflict_blocks_before_model_and_write() {
         use crate::agent::{
@@ -5313,7 +7958,7 @@ pub mod tests {
         let orchestrator = Orchestrator::new(runtime, LlmRegistry::new());
         let roster = vec![AgentProfile::new(
             "writer",
-            "ROLE=mutation_sender",
+            "ROLE=generated",
             vec!["shell".into()],
             AgentBudget::default(),
         )
@@ -5332,30 +7977,25 @@ pub mod tests {
             employee: "writer".into(),
             owned_files: vec![PathBuf::from("copy.txt")],
         }];
-        let proposals = vec![WorkerPatchProposal::new(
-            "writer",
-            vec![PathBuf::from("copy.txt")],
-            "update copy",
-        )
-        .with_operations(vec![PatchOperation::Replace(
-            crate::patch::ReplaceRequest::once("copy.txt", "old", "new"),
-        )])];
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(temp.path().join("copy.txt"), "old\n").unwrap();
         let mut engine = PatchEngine::new(temp.path()).unwrap();
         let coordinator = MockFileClaimCoordinator::new().with_conflict("copy.txt");
+        let database = crate::core::Database::new(temp.path().join("durable-conflict.db"));
+        database.migrate().unwrap();
+        let store = crate::core::OrganizationCheckpointStore::new(database);
 
         let report = orchestrator
-            .execute_organization_mutation_task(
+            .execute_organization_mutation_from_workers_durable(
                 &request,
                 &roster,
                 scopes,
-                proposals,
                 "zhongshu",
                 &coordinator,
                 44,
                 "edit",
                 &mut engine,
+                store.clone(),
             )
             .await
             .expect("claim conflict is a visible blocked report");
@@ -5369,6 +8009,27 @@ pub mod tests {
             std::fs::read_to_string(temp.path().join("copy.txt")).unwrap(),
             "old\n"
         );
+        assert!(report.execution_graph.nodes.iter().any(|node| {
+            node.kind == crate::agent::ExecutionNodeKind::Claim
+                && node.state == crate::agent::ExecutionNodeState::Failed
+        }));
+        assert!(report.execution_graph.nodes.iter().any(|node| {
+            node.kind == crate::agent::ExecutionNodeKind::Release
+                && node.state == crate::agent::ExecutionNodeState::Succeeded
+        }));
+        assert!(report.execution_graph.nodes.iter().any(|node| {
+            node.kind == crate::agent::ExecutionNodeKind::Apply
+                && node.state == crate::agent::ExecutionNodeState::Skipped
+        }));
+        assert!(report.execution_graph.nodes.iter().any(|node| {
+            node.kind == crate::agent::ExecutionNodeKind::Finalize
+                && node.state == crate::agent::ExecutionNodeState::Skipped
+        }));
+        let stored =
+            crate::core::ExecutionGraphStore::load_graph(&store, "organization-mutation-conflict")
+                .unwrap()
+                .unwrap();
+        assert_eq!(stored.checkpoint.graph, report.execution_graph);
     }
 
     #[tokio::test]
@@ -5390,7 +8051,7 @@ pub mod tests {
         let orchestrator = Orchestrator::new(runtime, LlmRegistry::new());
         let roster = vec![AgentProfile::new(
             "writer",
-            "ROLE=mutation_sender",
+            "ROLE=generated",
             vec!["shell".into()],
             AgentBudget::default(),
         )
@@ -5409,30 +8070,25 @@ pub mod tests {
             employee: "writer".into(),
             owned_files: vec![PathBuf::from("copy.txt")],
         }];
-        let proposals = vec![WorkerPatchProposal::new(
-            "writer",
-            vec![PathBuf::from("copy.txt")],
-            "update copy",
-        )
-        .with_operations(vec![PatchOperation::Replace(
-            crate::patch::ReplaceRequest::once("copy.txt", "old", "new"),
-        )])];
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(temp.path().join("copy.txt"), "old\n").unwrap();
         let mut engine = PatchEngine::new(temp.path()).unwrap();
         let coordinator = MockFileClaimCoordinator::new().with_missing_release("copy.txt");
+        let database = crate::core::Database::new(temp.path().join("durable-release-failure.db"));
+        database.migrate().unwrap();
+        let store = crate::core::OrganizationCheckpointStore::new(database);
 
         let report = orchestrator
-            .execute_organization_mutation_task(
+            .execute_organization_mutation_from_workers_durable(
                 &request,
                 &roster,
                 scopes,
-                proposals,
                 "zhongshu",
                 &coordinator,
                 45,
                 "edit",
                 &mut engine,
+                store.clone(),
             )
             .await
             .expect("release failure remains visible after apply");
@@ -5442,11 +8098,30 @@ pub mod tests {
             report.manager_acceptance.status,
             ManagerAcceptanceStatus::AppliedWithReleaseFailures
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
         assert_eq!(
             std::fs::read_to_string(temp.path().join("copy.txt")).unwrap(),
             "new\n"
         );
+        assert!(report.execution_graph.nodes.iter().any(|node| {
+            node.kind == crate::agent::ExecutionNodeKind::Apply
+                && node.state == crate::agent::ExecutionNodeState::Succeeded
+        }));
+        assert!(report.execution_graph.nodes.iter().any(|node| {
+            node.kind == crate::agent::ExecutionNodeKind::Release
+                && node.state == crate::agent::ExecutionNodeState::Failed
+        }));
+        assert!(report.execution_graph.nodes.iter().any(|node| {
+            node.kind == crate::agent::ExecutionNodeKind::Finalize
+                && node.state == crate::agent::ExecutionNodeState::Skipped
+        }));
+        let stored = crate::core::ExecutionGraphStore::load_graph(
+            &store,
+            "organization-mutation-release-failure",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(stored.checkpoint.graph, report.execution_graph);
     }
 
     #[tokio::test]
@@ -5800,10 +8475,10 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn organization_task_cancelled_before_execution_returns_worker_failed() {
+    async fn organization_task_cancelled_before_execution_returns_cancelled() {
         use crate::agent::{
-            AssignmentAuthority, CollaborationMode, EmployeeCapability, EmployeeRole,
-            OrganizationTaskRequest, RoleRequirement, StaffingRequest, VerificationPolicy,
+            EmployeeRole, OrganizationTaskRequest, RoleRequirement, StaffingRequest,
+            VerificationPolicy,
         };
         let calls = Arc::new(AtomicUsize::new(0));
         let runtime = AgentRuntime::new(
@@ -5815,23 +8490,21 @@ pub mod tests {
             AgentBudget::default(),
         );
         let orchestrator = Orchestrator::new(runtime, LlmRegistry::new());
-        let roster = vec![
-            AgentProfile::new("analyst", "ROLE=analyst", vec![], AgentBudget::default())
-                .with_specialty(
-                    EmployeeRole::new("analyst"),
-                    vec![],
-                    "analysis",
-                )
-                .with_verification_policy(VerificationPolicy::NotRequired),
-        ];
+        let roster =
+            vec![
+                AgentProfile::new("analyst", "ROLE=analyst", vec![], AgentBudget::default())
+                    .with_specialty(EmployeeRole::new("analyst"), vec![], "analysis")
+                    .with_verification_policy(VerificationPolicy::NotRequired),
+            ];
         let request = OrganizationTaskRequest::manager_selected(
             "test-cancel",
             "zhongshu",
             StaffingRequest {
                 objective: "analyze".into(),
-                requirements: vec![
-                    RoleRequirement::required(EmployeeRole::new("analyst"), "analysis"),
-                ],
+                requirements: vec![RoleRequirement::required(
+                    EmployeeRole::new("analyst"),
+                    "analysis",
+                )],
                 max_workers: Some(1),
             },
         );
@@ -5844,20 +8517,30 @@ pub mod tests {
             .await
             .expect("cancelled execution should return Ok");
 
-        assert_eq!(report.status, OrganizationExecutionStatus::WorkerFailed);
+        assert_eq!(report.status, OrganizationExecutionStatus::Cancelled);
         assert!(report.execution_error.as_deref() == Some("cancelled by user"));
         assert_eq!(calls.load(Ordering::SeqCst), 0, "no worker should have run");
+        assert!(report.execution_graph.nodes.iter().any(|node| {
+            node.kind == crate::agent::ExecutionNodeKind::Work
+                && node.state == ExecutionNodeState::Cancelled
+        }));
+        assert!(report.execution_graph.nodes.iter().any(|node| {
+            node.kind == crate::agent::ExecutionNodeKind::Finalize
+                && node.state == ExecutionNodeState::Skipped
+        }));
     }
 
     #[tokio::test]
     async fn organization_task_sequential_handoff_stops_on_worker_failure() {
         use crate::agent::{
-            AssignmentAuthority, CollaborationMode, EmployeeCapability, EmployeeRole,
-            OrganizationTaskRequest, RoleRequirement, StaffingRequest, VerificationPolicy,
+            CollaborationMode, EmployeeRole, OrganizationTaskRequest, RoleRequirement,
+            StaffingRequest, VerificationPolicy,
         };
 
         let runtime = AgentRuntime::new(
-            ReviewScriptedProvider { analyst_fails: true },
+            ReviewScriptedProvider {
+                analyst_fails: true,
+            },
             ToolRegistry::new(),
             "review-scripted",
             AgentBudget::default(),
@@ -5865,18 +8548,10 @@ pub mod tests {
         let orchestrator = Orchestrator::new(runtime, LlmRegistry::new());
         let roster = vec![
             AgentProfile::new("analyst", "ROLE=analyst", vec![], AgentBudget::default())
-                .with_specialty(
-                    EmployeeRole::new("analyst"),
-                    vec![],
-                    "analysis",
-                )
+                .with_specialty(EmployeeRole::new("analyst"), vec![], "analysis")
                 .with_verification_policy(VerificationPolicy::NotRequired),
             AgentProfile::new("verifier", "ROLE=verifier", vec![], AgentBudget::default())
-                .with_specialty(
-                    EmployeeRole::new("reviewer"),
-                    vec![],
-                    "review",
-                )
+                .with_specialty(EmployeeRole::new("reviewer"), vec![], "review")
                 .with_verification_policy(VerificationPolicy::NotRequired),
         ];
         let request = OrganizationTaskRequest::manager_selected(
@@ -5908,9 +8583,18 @@ pub mod tests {
             "should report which worker failed"
         );
         assert!(
-            report.employee_reports.is_empty() ||
-            report.employee_reports.len() < 2,
+            report.employee_reports.is_empty() || report.employee_reports.len() < 2,
             "only the first worker may have run; the second should have been skipped"
         );
+        assert!(report
+            .execution_graph
+            .nodes
+            .iter()
+            .any(|node| { node.id == "work-000" && node.state == ExecutionNodeState::Failed }));
+        assert!(report
+            .execution_graph
+            .nodes
+            .iter()
+            .any(|node| { node.id == "work-001" && node.state == ExecutionNodeState::Skipped }));
     }
 }

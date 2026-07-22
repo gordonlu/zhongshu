@@ -18,6 +18,7 @@ use zhongshu_core::integration::DeeplosslessProxy;
 use zhongshu_message_core::streaming::ControlTokenFilter;
 
 use crate::app::{AgentController, AgentInbox};
+use crate::auto_delegation_service::AutoDelegationController;
 use crate::config::AppConfig;
 use crate::delegation_service::DelegationController;
 use crate::hotkey::HotkeyManager;
@@ -32,6 +33,12 @@ use crate::overlay_contract::{
 use crate::overlay_host::OverlayHandleExt;
 use zhongshu_core::equipment::{EquipmentObserver, EquipmentRegistry};
 use zhongshu_core::tool::ToolRegistry;
+
+const MIN_STREAMING_TIMEOUT_SECS: u64 = 120;
+
+fn effective_streaming_timeout_secs(configured: u64) -> u64 {
+    configured.max(MIN_STREAMING_TIMEOUT_SECS)
+}
 
 fn send_coding_event(overlay: &OverlayHandle, event: CodingUiEvent) {
     overlay.send(&serde_json::to_value(OverlayToUiEvent::Coding { event }).unwrap_or_default());
@@ -53,6 +60,7 @@ pub struct ZhongshuApp {
     pub inbox: Arc<AgentInbox>,
     pub delegation: Arc<DelegationController>,
     pub organization: Arc<OrganizationController>,
+    pub auto_delegation: Arc<AutoDelegationController>,
     pub indicator: Option<Indicator>,
     pub indicator_state: AgentState,
     pub overlay: Option<OverlayHandle>,
@@ -86,6 +94,8 @@ pub struct ZhongshuApp {
     pub auth_watch: watch::Receiver<Option<zhongshu_core::authority::PendingRequest>>,
     pub run_controller: Arc<RunController>,
     pub active_run_id: Option<Uuid>,
+    pub organization_graph_versions: Vec<(String, u64)>,
+    pub last_organization_graph_poll: Instant,
 }
 
 impl ZhongshuApp {
@@ -95,6 +105,7 @@ impl ZhongshuApp {
         inbox: Arc<AgentInbox>,
         delegation: Arc<DelegationController>,
         organization: Arc<OrganizationController>,
+        auto_delegation: Arc<AutoDelegationController>,
         event_bus: Arc<EventBus>,
         event_rx: EventRx,
         response_tx: ResponseTx,
@@ -120,6 +131,7 @@ impl ZhongshuApp {
             inbox,
             delegation,
             organization,
+            auto_delegation,
             indicator: None,
             indicator_state: AgentState::Idle,
             proxy,
@@ -151,6 +163,8 @@ impl ZhongshuApp {
             auth_watch,
             run_controller,
             active_run_id: None,
+            organization_graph_versions: Vec::new(),
+            last_organization_graph_poll: Instant::now(),
         })
     }
 
@@ -160,8 +174,41 @@ impl ZhongshuApp {
         let activity = self.reduce_events() | self.reduce_responses();
         self.poll_pending_auth();
         self.poll_overlay_actions();
+        self.poll_organization_graphs();
         if activity {
             self.last_activity = Instant::now();
+        }
+    }
+
+    fn poll_organization_graphs(&mut self) {
+        let Some(overlay) = self.overlay.as_ref() else {
+            return;
+        };
+        let force = overlay.take_list_organization_graphs();
+        if !force && self.last_organization_graph_poll.elapsed() < Duration::from_millis(750) {
+            return;
+        }
+        self.last_organization_graph_poll = Instant::now();
+        match self.runtime.block_on(self.organization.recovery_graphs()) {
+            Ok(graphs) => {
+                let versions = graphs
+                    .iter()
+                    .map(|view| (view.graph.task_id.clone(), view.store_version))
+                    .collect::<Vec<_>>();
+                if force || versions != self.organization_graph_versions {
+                    self.organization_graph_versions = versions;
+                    overlay.send(
+                        &serde_json::to_value(OverlayToUiEvent::OrganizationGraphs { graphs })
+                            .unwrap_or_default(),
+                    );
+                }
+            }
+            Err(error) if force => {
+                overlay.toast(&format!("无法读取 DAG 控制面：{error}"));
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to poll organization DAG control plane");
+            }
         }
     }
 
@@ -190,10 +237,31 @@ impl ZhongshuApp {
                 .unwrap_or_default(),
             );
         }
+        if let Some(command) = ov.take_organization_recovery() {
+            if !self.controller.is_idle()
+                || self.delegation.is_busy()
+                || self.organization.is_busy()
+                || self.auto_delegation.is_busy()
+            {
+                ov.toast("当前已有任务运行，恢复操作未执行。");
+            } else {
+                match self
+                    .runtime
+                    .block_on(self.organization.recover_graph(command))
+                {
+                    Ok(result) => ov.send(
+                        &serde_json::to_value(OverlayToUiEvent::OrganizationRecovery { result })
+                            .unwrap_or_default(),
+                    ),
+                    Err(error) => ov.toast(&format!("DAG 恢复操作失败：{error}")),
+                }
+            }
+        }
         if let Some(task) = ov.take_delegate_organization() {
             if !self.controller.is_idle()
                 || self.delegation.is_busy()
                 || self.organization.is_busy()
+                || self.auto_delegation.is_busy()
             {
                 ov.toast("当前已有任务运行，请结束后再组建团队。");
             } else {
@@ -219,6 +287,7 @@ impl ZhongshuApp {
             if !self.controller.is_idle()
                 || self.delegation.is_busy()
                 || self.organization.is_busy()
+                || self.auto_delegation.is_busy()
             {
                 ov.toast("当前已有任务运行，请结束后再委派。");
             } else {
@@ -238,8 +307,17 @@ impl ZhongshuApp {
             }
             ov.send(&serde_json::json!({"type": "user_message", "content": text}));
             self.observer.lock().unwrap().record_user_message(&text);
-            if self.delegation.is_busy() || self.organization.is_busy() {
+            if self.delegation.is_busy()
+                || self.organization.is_busy()
+                || self.auto_delegation.is_busy()
+            {
                 ov.toast("员工协作正在运行，请先停止或等待汇报。");
+            } else if self.config.agent.auto_multi_agent && !self.controller.is_idle() {
+                ov.toast("主 AI 正在运行，自动多 Agent 路由未启动。");
+            } else if self.config.agent.auto_multi_agent {
+                if !self.auto_delegation.submit(text) {
+                    ov.toast("自动多 Agent 路由已经在运行。");
+                }
             } else {
                 self.inbox.submit(text);
             }
@@ -394,6 +472,9 @@ impl ZhongshuApp {
                 cfg.agent.auto_evolve = evolve;
                 self.controller.set_auto_evolve(evolve);
             }
+            if let Some(enabled) = settings.auto_multi_agent {
+                cfg.agent.auto_multi_agent = enabled;
+            }
             if let Some(ctx) = settings.max_context_tokens {
                 if ctx >= 100_000 && ctx <= 1_000_000 {
                     cfg.llm.max_context_tokens = ctx;
@@ -425,6 +506,27 @@ impl ZhongshuApp {
                 .runtime
                 .block_on(async { self.proxy.lock().await.base_url().to_string() });
             let provider = cfg.llm.build_provider(&base_url);
+            self.runtime.block_on(async {
+                let mut worker_runtime = self.worker_runtime.write().await;
+                worker_runtime.provider = provider.clone();
+                worker_runtime.model = cfg.llm.model.clone();
+            });
+            let planner_model = if cfg.llm.model_routing.enabled {
+                cfg.llm.model_routing.pro_model.clone()
+            } else {
+                cfg.llm.model.clone()
+            };
+            let planner_reasoning = cfg
+                .llm
+                .model_routing
+                .enabled
+                .then(|| cfg.llm.model_routing.reasoning_agent.clone());
+            self.runtime
+                .block_on(self.organization.update_planner_runtime(
+                    provider.change_model(&planner_model),
+                    planner_model,
+                    planner_reasoning,
+                ));
             self.controller.update_llm_runtime(
                 provider,
                 cfg.llm.model.clone(),
@@ -440,7 +542,10 @@ impl ZhongshuApp {
             self.delete_all_history();
         }
         if ov.take_stop() {
-            if self.delegation.cancel() || self.organization.cancel() {
+            if self.auto_delegation.cancel()
+                || self.delegation.cancel()
+                || self.organization.cancel()
+            {
                 ov.send(&serde_json::json!({"type": "stop"}));
                 return;
             }
@@ -496,6 +601,7 @@ impl ZhongshuApp {
                 bg_interval: Some(cfg.agent.background.interval_secs.to_string()),
                 bg_prompt: Some(cfg.agent.background.prompt.clone()),
                 auto_evolve: Some(cfg.agent.auto_evolve),
+                auto_multi_agent: Some(cfg.agent.auto_multi_agent),
                 mode: Some(cfg.agent.mode.clone()),
             });
         }
@@ -1586,7 +1692,7 @@ impl ApplicationHandler for ZhongshuApp {
 
         // Streaming timeout — warn only, don't kill the message
         let elapsed = self.last_activity.elapsed().as_secs();
-        let timeout = self.config.agent.streaming_timeout_secs;
+        let timeout = effective_streaming_timeout_secs(self.config.agent.streaming_timeout_secs);
         if !matches!(self.indicator_state, AgentState::Idle) && elapsed > timeout {
             tracing::warn!(
                 "streaming timeout after {elapsed}s (limit {timeout}s), agent still running"
@@ -1603,5 +1709,17 @@ impl ApplicationHandler for ZhongshuApp {
         } else {
             ControlFlow::Wait
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::effective_streaming_timeout_secs;
+
+    #[test]
+    fn streaming_timeout_has_a_two_minute_floor() {
+        assert_eq!(effective_streaming_timeout_secs(60), 120);
+        assert_eq!(effective_streaming_timeout_secs(120), 120);
+        assert_eq!(effective_streaming_timeout_secs(300), 300);
     }
 }

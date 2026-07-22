@@ -2,6 +2,10 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::agent::execution_graph::{
+    ExecutionEdge, ExecutionEdgeKind, ExecutionGraph, ExecutionGraphError, ExecutionNode,
+    ExecutionNodeKind, NodeRequirements,
+};
 use crate::agent::profile::{AgentProfile, EmployeeCapability, EmployeeRole};
 
 pub const DEFAULT_MAX_WORKERS_PER_TASK: usize = 3;
@@ -40,10 +44,25 @@ pub enum CollaborationMode {
     SequentialHandoff,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerWorkspaceMode {
+    /// Worker may only submit structured operations; it cannot edit a draft.
+    #[default]
+    ProposalOnly,
+    /// Worker edits an owned, temporary clone. Only the sealed diff is offered
+    /// to the parent Review/Apply pipeline.
+    IsolatedSandbox,
+}
+
 /// One role/capability requirement produced by the Lead's planning step.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoleRequirement {
     pub role: EmployeeRole,
+    /// Optional stable employee identity selected by the caller. The router
+    /// still enforces the role and capability contract for that employee.
+    #[serde(default)]
+    pub employee: Option<String>,
     #[serde(default)]
     pub capabilities: Vec<EmployeeCapability>,
     pub responsibility: String,
@@ -59,6 +78,7 @@ impl RoleRequirement {
     pub fn required(role: EmployeeRole, responsibility: impl Into<String>) -> Self {
         Self {
             role,
+            employee: None,
             capabilities: Vec::new(),
             responsibility: responsibility.into(),
             required: true,
@@ -68,6 +88,7 @@ impl RoleRequirement {
     pub fn optional(role: EmployeeRole, responsibility: impl Into<String>) -> Self {
         Self {
             role,
+            employee: None,
             capabilities: Vec::new(),
             responsibility: responsibility.into(),
             required: false,
@@ -76,6 +97,11 @@ impl RoleRequirement {
 
     pub fn with_capabilities(mut self, capabilities: Vec<EmployeeCapability>) -> Self {
         self.capabilities = capabilities;
+        self
+    }
+
+    pub fn for_employee(mut self, employee: impl Into<String>) -> Self {
+        self.employee = Some(employee.into());
         self
     }
 }
@@ -110,6 +136,8 @@ pub struct OrganizationTaskRequest {
     pub target: DispatchTarget,
     #[serde(default)]
     pub collaboration: CollaborationMode,
+    #[serde(default)]
+    pub workspace_mode: WorkerWorkspaceMode,
     pub staffing: StaffingRequest,
 }
 
@@ -124,6 +152,7 @@ impl OrganizationTaskRequest {
             assigned_by: AssignmentAuthority::manager(manager),
             target: DispatchTarget::ManagerSelected,
             collaboration: CollaborationMode::Independent,
+            workspace_mode: WorkerWorkspaceMode::ProposalOnly,
             staffing,
         }
     }
@@ -140,6 +169,7 @@ impl OrganizationTaskRequest {
                 employee: employee.into(),
             },
             collaboration: CollaborationMode::Independent,
+            workspace_mode: WorkerWorkspaceMode::ProposalOnly,
             staffing,
         }
     }
@@ -148,6 +178,242 @@ impl OrganizationTaskRequest {
         self.collaboration = collaboration;
         self
     }
+
+    /// Compile the legacy organization request into the runtime's neutral DAG
+    /// representation. The compatibility request still selects profiles, but
+    /// the resulting graph contains work units and dependencies rather than an
+    /// employee hierarchy.
+    pub fn compile_execution_graph(
+        &self,
+        decision: &StaffingDecision,
+    ) -> Result<OrganizationExecutionGraphPlan, ExecutionGraphError> {
+        let mut graph = ExecutionGraph::new(self.task_id.clone())?;
+        let mut work_nodes = Vec::new();
+        let mut previous: Option<String> = None;
+
+        for (index, assignment) in decision.assignments.iter().enumerate() {
+            let node_id = format!("work-{index:03}");
+            graph.add_node(
+                ExecutionNode::pending(
+                    &node_id,
+                    ExecutionNodeKind::Work,
+                    assignment.responsibility.clone(),
+                )
+                .with_executor(assignment.employee.clone())
+                .with_requirements(NodeRequirements {
+                    capabilities: assignment
+                        .matched_capabilities
+                        .iter()
+                        .map(|capability| capability.as_str().to_string())
+                        .collect(),
+                    read_only: true,
+                }),
+            )?;
+            if self.collaboration == CollaborationMode::SequentialHandoff {
+                if let Some(from) = previous.as_ref() {
+                    graph.add_edge(ExecutionEdge {
+                        from: from.clone(),
+                        to: node_id.clone(),
+                        kind: ExecutionEdgeKind::Consumes,
+                    })?;
+                }
+            }
+            previous = Some(node_id.clone());
+            work_nodes.push((assignment.employee.clone(), node_id));
+        }
+
+        let decide_node = "decide-000".to_string();
+        let mut decide = ExecutionNode::pending(
+            &decide_node,
+            ExecutionNodeKind::Decide,
+            "resolve the submitted evidence against the original objective",
+        );
+        decide.executor = Some(match &self.assigned_by {
+            AssignmentAuthority::Manager { manager } => manager.clone(),
+            AssignmentAuthority::User => "user".into(),
+        });
+        graph.add_node(decide)?;
+        for (_, work_node) in &work_nodes {
+            graph.add_edge(ExecutionEdge {
+                from: work_node.clone(),
+                to: decide_node.clone(),
+                kind: ExecutionEdgeKind::Consumes,
+            })?;
+        }
+
+        let finalize_node = "finalize-000".to_string();
+        graph.add_node(ExecutionNode::pending(
+            &finalize_node,
+            ExecutionNodeKind::Finalize,
+            "publish the terminal result",
+        ))?;
+        graph.add_edge(ExecutionEdge {
+            from: decide_node.clone(),
+            to: finalize_node.clone(),
+            kind: ExecutionEdgeKind::Requires,
+        })?;
+
+        Ok(OrganizationExecutionGraphPlan {
+            graph,
+            work_nodes,
+            decide_node,
+            finalize_node,
+        })
+    }
+
+    /// Compile the mutation compatibility request into a single-writer DAG.
+    /// Proposal nodes may execute independently, but every path converges on
+    /// one deterministic review and exactly one Apply node. Release uses
+    /// finally-edges so claims are cleaned up after both success and failure.
+    pub fn compile_mutation_execution_graph(
+        &self,
+        decision: &StaffingDecision,
+    ) -> Result<MutationExecutionGraphPlan, ExecutionGraphError> {
+        let mut graph = ExecutionGraph::new(self.task_id.clone())?;
+        let contract_node = "contract-000".to_string();
+        let claim_node = "claim-000".to_string();
+        let review_node = "review-000".to_string();
+        let apply_node = "apply-000".to_string();
+        let release_node = "release-000".to_string();
+        let finalize_node = "finalize-000".to_string();
+
+        graph.add_node(ExecutionNode::pending(
+            &contract_node,
+            ExecutionNodeKind::Contract,
+            "validate staffing, ownership, and proposal contracts",
+        ))?;
+        graph.add_node(ExecutionNode::pending(
+            &claim_node,
+            ExecutionNodeKind::Claim,
+            "acquire all file claims before worker execution",
+        ))?;
+        graph.add_edge(ExecutionEdge {
+            from: contract_node.clone(),
+            to: claim_node.clone(),
+            kind: ExecutionEdgeKind::Requires,
+        })?;
+
+        let mut work_nodes = Vec::new();
+        let mut previous: Option<String> = None;
+        for (index, assignment) in decision.assignments.iter().enumerate() {
+            let node_id = format!("propose-{index:03}");
+            graph.add_node(
+                ExecutionNode::pending(
+                    &node_id,
+                    ExecutionNodeKind::Propose,
+                    assignment.responsibility.clone(),
+                )
+                .with_executor(assignment.employee.clone())
+                .with_requirements(NodeRequirements {
+                    capabilities: assignment
+                        .matched_capabilities
+                        .iter()
+                        .map(|capability| capability.as_str().to_string())
+                        .collect(),
+                    read_only: false,
+                }),
+            )?;
+            let prerequisite = if self.collaboration == CollaborationMode::SequentialHandoff {
+                previous.as_ref().unwrap_or(&claim_node)
+            } else {
+                &claim_node
+            };
+            graph.add_edge(ExecutionEdge {
+                from: prerequisite.clone(),
+                to: node_id.clone(),
+                kind: ExecutionEdgeKind::Consumes,
+            })?;
+            previous = Some(node_id.clone());
+            work_nodes.push((assignment.employee.clone(), node_id));
+        }
+
+        graph.add_node(ExecutionNode::pending(
+            &review_node,
+            ExecutionNodeKind::Review,
+            "verify worker evidence, ownership, conflicts, and structured proposals",
+        ))?;
+        for (_, work_node) in &work_nodes {
+            graph.add_edge(ExecutionEdge {
+                from: work_node.clone(),
+                to: review_node.clone(),
+                kind: ExecutionEdgeKind::Validates,
+            })?;
+        }
+
+        graph.add_node(ExecutionNode::pending(
+            &apply_node,
+            ExecutionNodeKind::Apply,
+            "apply the approved patch through the parent PatchEngine",
+        ))?;
+        graph.add_edge(ExecutionEdge {
+            from: review_node.clone(),
+            to: apply_node.clone(),
+            kind: ExecutionEdgeKind::Requires,
+        })?;
+
+        graph.add_node(ExecutionNode::pending(
+            &release_node,
+            ExecutionNodeKind::Release,
+            "release all acquired file claims",
+        ))?;
+        graph.add_edge(ExecutionEdge {
+            from: contract_node.clone(),
+            to: release_node.clone(),
+            kind: ExecutionEdgeKind::Requires,
+        })?;
+        for source in [&review_node, &apply_node] {
+            graph.add_edge(ExecutionEdge {
+                from: source.clone(),
+                to: release_node.clone(),
+                kind: ExecutionEdgeKind::Finally,
+            })?;
+        }
+
+        graph.add_node(ExecutionNode::pending(
+            &finalize_node,
+            ExecutionNodeKind::Finalize,
+            "publish only after apply and claim release both succeed",
+        ))?;
+        for source in [&apply_node, &release_node] {
+            graph.add_edge(ExecutionEdge {
+                from: source.clone(),
+                to: finalize_node.clone(),
+                kind: ExecutionEdgeKind::Requires,
+            })?;
+        }
+
+        Ok(MutationExecutionGraphPlan {
+            graph,
+            work_nodes,
+            contract_node,
+            claim_node,
+            review_node,
+            apply_node,
+            release_node,
+            finalize_node,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OrganizationExecutionGraphPlan {
+    pub graph: ExecutionGraph,
+    /// Compatibility mapping from a selected profile to its leased work node.
+    pub work_nodes: Vec<(String, String)>,
+    pub decide_node: String,
+    pub finalize_node: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct MutationExecutionGraphPlan {
+    pub graph: ExecutionGraph,
+    pub work_nodes: Vec<(String, String)>,
+    pub contract_node: String,
+    pub claim_node: String,
+    pub review_node: String,
+    pub apply_node: String,
+    pub release_node: String,
+    pub finalize_node: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,6 +553,10 @@ impl OrganizationRouter {
         if let Some(requirement) = request.requirements.iter().find(|requirement| {
             !requirement.role.is_valid()
                 || requirement
+                    .employee
+                    .as_deref()
+                    .is_some_and(|employee| employee.trim().is_empty())
+                || requirement
                     .capabilities
                     .iter()
                     .any(|capability| !capability.is_valid())
@@ -343,6 +613,10 @@ impl OrganizationRouter {
 
             let employee = roster.iter().find(|profile| {
                 !assigned_employees.contains(profile.name.as_str())
+                    && requirement
+                        .employee
+                        .as_deref()
+                        .is_none_or(|employee| profile.name == employee)
                     && profile.specialty.role == requirement.role
                     && requirement
                         .capabilities
@@ -363,7 +637,14 @@ impl OrganizationRouter {
                     role: requirement.role.clone(),
                     responsibility: requirement.responsibility.clone(),
                     required: requirement.required,
-                    reason: "no employee matches the required role and capabilities".into(),
+                    reason: requirement.employee.as_ref().map_or_else(
+                        || "no employee matches the required role and capabilities".into(),
+                        |employee| {
+                            format!(
+                                "selected employee '{employee}' does not match the required role and capabilities"
+                            )
+                        },
+                    ),
                 }),
             }
         }
@@ -727,5 +1008,117 @@ mod tests {
             decision.assignments[0].role,
             EmployeeRole::new("management_accountant")
         );
+    }
+
+    #[test]
+    fn routes_to_named_employee_without_weakening_role_contract() {
+        let employees = vec![
+            employee("writer-a", EmployeeRole::writer(), vec![]),
+            employee("writer-b", EmployeeRole::writer(), vec![]),
+        ];
+        let request = StaffingRequest {
+            objective: "update copy".into(),
+            requirements: vec![
+                RoleRequirement::required(EmployeeRole::writer(), "copy").for_employee("writer-b")
+            ],
+            max_workers: Some(1),
+        };
+
+        let decision = OrganizationRouter::default().route(&request, &employees);
+
+        assert_eq!(decision.mode, StaffingMode::SingleSpecialist);
+        assert_eq!(decision.assignments[0].employee, "writer-b");
+
+        let mismatched = StaffingRequest {
+            objective: "update backend".into(),
+            requirements: vec![
+                RoleRequirement::required(EmployeeRole::backend(), "API").for_employee("writer-b")
+            ],
+            max_workers: Some(1),
+        };
+        let blocked = OrganizationRouter::default().route(&mismatched, &employees);
+        assert_eq!(blocked.mode, StaffingMode::Blocked);
+        assert!(blocked.unfilled[0].reason.contains("writer-b"));
+    }
+
+    #[test]
+    fn independent_compatibility_request_compiles_to_parallel_ready_work_nodes() {
+        let staffing = StaffingRequest {
+            objective: "compare two independent evidence sources".into(),
+            requirements: vec![
+                RoleRequirement::required(EmployeeRole::frontend(), "inspect UI evidence"),
+                RoleRequirement::required(EmployeeRole::backend(), "inspect API evidence"),
+            ],
+            max_workers: Some(2),
+        };
+        let decision = OrganizationRouter::default().route(&staffing, &roster());
+        let request = OrganizationTaskRequest::manager_selected("task", "lead", staffing);
+
+        let plan = request.compile_execution_graph(&decision).unwrap();
+
+        assert_eq!(plan.work_nodes.len(), 2);
+        assert_eq!(plan.graph.ready_node_ids(), vec!["work-000", "work-001"]);
+        assert_eq!(plan.graph.snapshot().edges.len(), 3);
+    }
+
+    #[test]
+    fn sequential_handoff_compiles_to_explicit_dependency_edges() {
+        let staffing = StaffingRequest {
+            objective: "inspect then verify".into(),
+            requirements: vec![
+                RoleRequirement::required(EmployeeRole::frontend(), "inspect UI evidence"),
+                RoleRequirement::required(EmployeeRole::backend(), "verify API evidence"),
+            ],
+            max_workers: Some(2),
+        };
+        let decision = OrganizationRouter::default().route(&staffing, &roster());
+        let request = OrganizationTaskRequest::manager_selected("task", "lead", staffing)
+            .with_collaboration(CollaborationMode::SequentialHandoff);
+
+        let plan = request.compile_execution_graph(&decision).unwrap();
+
+        assert_eq!(plan.graph.ready_node_ids(), vec!["work-000"]);
+        assert!(plan
+            .graph
+            .snapshot()
+            .edges
+            .iter()
+            .any(|edge| edge.from == "work-000" && edge.to == "work-001"));
+    }
+
+    #[test]
+    fn mutation_graph_has_one_apply_and_failure_safe_release_edges() {
+        let staffing = StaffingRequest {
+            objective: "update UI and API".into(),
+            requirements: vec![
+                RoleRequirement::required(EmployeeRole::frontend(), "propose UI patch"),
+                RoleRequirement::required(EmployeeRole::backend(), "propose API patch"),
+            ],
+            max_workers: Some(2),
+        };
+        let decision = OrganizationRouter::default().route(&staffing, &roster());
+        let request = OrganizationTaskRequest::manager_selected("task", "lead", staffing);
+
+        let plan = request.compile_mutation_execution_graph(&decision).unwrap();
+        let snapshot = plan.graph.snapshot();
+
+        assert_eq!(
+            snapshot
+                .nodes
+                .iter()
+                .filter(|node| node.kind == ExecutionNodeKind::Apply)
+                .count(),
+            1
+        );
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.from == plan.apply_node
+                && edge.to == plan.release_node
+                && edge.kind == ExecutionEdgeKind::Finally
+        }));
+        assert!(snapshot.edges.iter().any(|edge| {
+            edge.from == plan.release_node
+                && edge.to == plan.finalize_node
+                && edge.kind == ExecutionEdgeKind::Requires
+        }));
     }
 }

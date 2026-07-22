@@ -39,6 +39,20 @@ impl Worker {
         task: Task,
         callbacks: Option<std::sync::Arc<AgentCallbacks>>,
     ) -> anyhow::Result<Report> {
+        Self::execute_with_cancel(runtime, profile, task, callbacks, CancellationToken::new()).await
+    }
+
+    /// Execute a worker with a caller-owned cancellation scope. The token is
+    /// passed through to the ReAct loop and tool executor; cancellation returns
+    /// an observable `RunOutcome::Interrupted` report rather than detaching the
+    /// in-flight worker future.
+    pub async fn execute_with_cancel(
+        runtime: &AgentRuntime,
+        profile: &AgentProfile,
+        task: Task,
+        callbacks: Option<std::sync::Arc<AgentCallbacks>>,
+        cancel_token: CancellationToken,
+    ) -> anyhow::Result<Report> {
         let mut scoped_runtime = Worker::build_scoped_runtime(runtime, profile);
         let run_id = callbacks
             .as_ref()
@@ -115,7 +129,7 @@ impl Worker {
             messages,
             callbacks,
             &task.source,
-            CancellationToken::new(),
+            cancel_token,
             profile.verification_policy.explicit_requirement(),
         )
         .await?;

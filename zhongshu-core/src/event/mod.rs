@@ -95,6 +95,7 @@ impl Event {
                 HarnessUiEvent::ReplayAvailable { .. } => "replay_available",
             },
             Event::Organization(e) => match e {
+                OrganizationEvent::RoutingDecided { .. } => "organization_routing_decided",
                 OrganizationEvent::TaskStarted { .. } => "organization_task_started",
                 OrganizationEvent::EmployeeAssigned { .. } => "organization_employee_assigned",
                 OrganizationEvent::EmployeeWorking { .. } => "organization_employee_working",
@@ -152,6 +153,14 @@ impl Event {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OrganizationEvent {
+    /// Observable result of the optional automatic routing gate. This is a
+    /// proposal/admission outcome, not evidence that worker execution began.
+    RoutingDecided {
+        routing_id: String,
+        strategy: String,
+        reason: String,
+        worker_count: usize,
+    },
     TaskStarted {
         task_id: String,
         manager: String,

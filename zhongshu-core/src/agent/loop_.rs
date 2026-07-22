@@ -28,8 +28,8 @@ impl AgentBudget {
     pub fn assistant_default() -> Self {
         Self {
             max_steps: 80,
-            max_tool_calls: 160,
-            per_tool_limit: 40,
+            max_tool_calls: 256,
+            per_tool_limit: 128,
             token_limit: 500_000,
             llm_timeout: Duration::from_secs(240),
             tool_timeout: Duration::from_secs(120),
@@ -39,8 +39,8 @@ impl AgentBudget {
     pub fn coding_default() -> Self {
         Self {
             max_steps: 200,
-            max_tool_calls: 400,
-            per_tool_limit: 200,
+            max_tool_calls: 1024,
+            per_tool_limit: 512,
             token_limit: 1_000_000,
             llm_timeout: Duration::from_secs(600),
             tool_timeout: Duration::from_secs(300),
@@ -380,6 +380,22 @@ pub async fn run_agent_with_verification_policy(
             result?
         };
 
+        // The cancellation branch of the select above intentionally drops the
+        // in-flight provider future and yields an empty step result. Re-check
+        // before finalization so that empty content cannot be misclassified as
+        // a successful model answer.
+        if cancel_token.is_cancelled() {
+            let tokens = estimate_total_tokens(&messages);
+            return Ok(finish_loop_result(
+                runtime,
+                &mut messages,
+                StopReason::Interrupted,
+                tool_calls_made,
+                tokens,
+                &run_id,
+            ));
+        }
+
         if tool_calls.is_empty() {
             // Harness: pre-finalize checks
             let mut needs_finalize = true;
@@ -454,8 +470,9 @@ pub async fn run_agent_with_verification_policy(
             tool_calls_made += 1;
             let args_hash = simple_hash(&tc.function.arguments);
 
-            // Per-tool retry guard: if any single tool is called 5+ times
-            // across the entire run, assume it's stuck and stop.
+            // Per-tool guard. This is intentionally separate from duplicate
+            // argument detection: several distinct read_file calls in one
+            // parallel inspection step are legitimate and count separately.
             let count = tool_call_counts
                 .entry(tc.function.name.clone())
                 .or_insert(0);
@@ -795,8 +812,15 @@ pub async fn run_agent_with_verification_policy(
                 } else {
                     false
                 };
-                let is_mutation = matches!(tc.function.name.as_str(), "edit" | "write_file")
-                    || shell_has_new_mutations;
+                // A rejected direct write is not an edit. Recording it as one
+                // creates false ownership violations and cross-worker
+                // conflicts even though the sandbox preserved the workspace.
+                // A shell command is different: a non-zero command can still
+                // leave real filesystem changes, so trust the before/after
+                // snapshot for that path.
+                let direct_mutation_succeeded =
+                    tool_success && matches!(tc.function.name.as_str(), "edit" | "write_file");
+                let is_mutation = direct_mutation_succeeded || shell_has_new_mutations;
                 if is_mutation {
                     runtime.harness_state.verification.last_edit_step = harness_step;
 
@@ -1406,6 +1430,82 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct RejectedEditProvider {
+        calls: Arc<Mutex<usize>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for RejectedEditProvider {
+        async fn chat(
+            &self,
+            _request: ChatCompletionRequest,
+        ) -> anyhow::Result<ChatCompletionResponse> {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            let message = if *calls == 1 {
+                Message::assistant_with_tools(
+                    "",
+                    vec![ToolCall {
+                        id: "rejected-edit".into(),
+                        call_type: "function".into(),
+                        function: FunctionCall {
+                            name: "edit".into(),
+                            arguments: r#"{"path":"outside.txt","old_text":"a","new_text":"b"}"#
+                                .into(),
+                        },
+                    }],
+                )
+            } else {
+                Message::assistant("edit was rejected")
+            };
+            Ok(ChatCompletionResponse {
+                choices: vec![FinalChoice {
+                    message,
+                    finish_reason: None,
+                }],
+                usage: None,
+            })
+        }
+
+        async fn stream_chat(
+            &self,
+            _request: ChatCompletionRequest,
+            _on_event: Box<dyn FnMut(StreamEvent) + Send>,
+        ) -> anyhow::Result<()> {
+            anyhow::bail!("streaming is not used in this test")
+        }
+
+        fn model_name(&self) -> &str {
+            "rejected-edit"
+        }
+
+        fn change_model(&self, _model: &str) -> Arc<dyn LlmProvider> {
+            Arc::new(self.clone())
+        }
+    }
+
+    struct RejectedEditTool;
+
+    #[async_trait]
+    impl Tool for RejectedEditTool {
+        fn name(&self) -> &str {
+            "edit"
+        }
+
+        fn description(&self) -> &str {
+            "always rejects an edit"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type":"object","properties":{"path":{"type":"string"}}})
+        }
+
+        async fn execute(&self, _arguments: &serde_json::Value) -> ToolOutput {
+            ToolOutput::error("path is outside the sandbox scope")
+        }
+    }
+
     #[test]
     fn detects_user_verification_request() {
         let messages = vec![Message::user("please run tests before finalizing")];
@@ -1507,6 +1607,50 @@ mod tests {
             Some(HarnessEvent::RunCompleted { .. })
         ));
         assert_eq!(runtime.harness_state.trace.events, result.trace_events);
+    }
+
+    #[tokio::test]
+    async fn rejected_edit_is_not_recorded_as_a_file_mutation() {
+        let provider = RejectedEditProvider {
+            calls: Arc::new(Mutex::new(0)),
+        };
+        let mut runtime = AgentRuntime::new(
+            provider,
+            ToolRegistry::new().register(RejectedEditTool),
+            "rejected-edit",
+            AgentBudget {
+                max_steps: 3,
+                max_tool_calls: 3,
+                per_tool_limit: 3,
+                token_limit: 10_000,
+                llm_timeout: Duration::from_secs(5),
+                tool_timeout: Duration::from_secs(5),
+            },
+        );
+
+        let result = run_agent(
+            &mut runtime,
+            vec![Message::user("attempt an out-of-scope edit")],
+            None,
+            "test",
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.trace_events.iter().any(|event| matches!(
+            event,
+            HarnessEvent::ToolCall {
+                tool_name,
+                success: false,
+                ..
+            } if tool_name == "edit"
+        )));
+        assert!(!result
+            .trace_events
+            .iter()
+            .any(|event| matches!(event, HarnessEvent::FileEdit { .. })));
+        assert_eq!(runtime.harness_state.verification.last_edit_step, 0);
     }
 
     // ── Recovery loop tests ──

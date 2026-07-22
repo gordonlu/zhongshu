@@ -35,12 +35,14 @@ describe('App IPC interactions', () => {
     fireEvent.change(screen.getByLabelText('Model'), {
       target: { value: 'deepseek-v4-flash-next' },
     })
+    fireEvent.click(screen.getByRole('checkbox', { name: /Intelligent multi-agent orchestration/ }))
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
     expect(JSON.parse(postMessage.mock.calls.at(-1)?.[0] ?? '{}')).toMatchObject({
       type: 'save_settings',
       config: {
         model: 'deepseek-v4-flash-next',
+        auto_multi_agent: true,
       },
     })
   })
@@ -79,6 +81,28 @@ describe('App IPC interactions', () => {
       type: 'complete_task',
       task_id: 'task-1',
     })
+  })
+
+  it('shows an automatic routing decision in normal assistant mode', async () => {
+    installWebViewHost()
+    const { App } = await import('./App')
+
+    render(<App />)
+    act(() => {
+      window.handleIpc?.({
+        type: 'organization',
+        event: {
+          kind: 'routing_decided',
+          routing_id: 'auto-route-1',
+          strategy: 'single_agent',
+          reason: 'multi-agent benefit is too low',
+          worker_count: 0,
+        },
+      })
+    })
+
+    expect(screen.getByRole('region', { name: 'Latest automatic routing decision' })).toHaveTextContent('single agent')
+    expect(screen.getByText('multi-agent benefit is too low')).toBeInTheDocument()
   })
 
   it('starts native window drag from the titlebar but not action buttons', async () => {
@@ -129,6 +153,7 @@ describe('App IPC interactions', () => {
     const { App } = await import('./App')
 
     render(<App />)
+    postMessage.mockClear()
 
     const composer = screen.getByPlaceholderText('Ask Zhongshu what to do next.')
     expect(composer).toHaveFocus()
@@ -145,6 +170,26 @@ describe('App IPC interactions', () => {
       text: '中文输入',
     })
     expect(composer).toHaveFocus()
+  })
+
+  it('keeps the team entry beside the coding composer and grows for multiline input', async () => {
+    installWebViewHost()
+    const { App } = await import('./App')
+
+    render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: 'Coding' }))
+    const composer = screen.getByPlaceholderText('Describe the task or review request...')
+    Object.defineProperty(composer, 'scrollHeight', {
+      configurable: true,
+      get: () => 96,
+    })
+
+    const team = screen.getByRole('button', { name: 'Build an organization team' })
+    expect(team).toBeDisabled()
+    fireEvent.change(composer, { target: { value: 'line one\nline two\nline three' } })
+
+    expect(team).toBeEnabled()
+    expect(composer).toHaveStyle({ height: '96px', overflowY: 'hidden' })
   })
 
   it('shows submitted user text immediately and ignores the native echo', async () => {
@@ -243,6 +288,7 @@ describe('App IPC interactions', () => {
         objective: 'review quarterly cash flow',
         requirements: [{
           role: 'management_accountant',
+          employee: 'accountant',
           capabilities: ['cash_flow_forecasting'],
           responsibility: '负责目标中与 management_accountant 相关的工作',
           required: true,
@@ -253,11 +299,78 @@ describe('App IPC interactions', () => {
     })
   })
 
+  it('requires explicit per-employee file scope for mutation delegation', async () => {
+    const postMessage = installWebViewHost()
+    const { App } = await import('./App')
+
+    render(<App />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Coding' }))
+    const composer = screen.getByPlaceholderText('Describe the task or review request...')
+    fireEvent.change(composer, { target: { value: 'update the copy' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Build an organization team' }))
+    act(() => {
+      window.handleIpc?.({
+        type: 'organization_roster',
+        max_workers: 3,
+        employees: [{
+          name: 'writer-a',
+          role: 'writer',
+          capabilities: ['copy_editing'],
+          focus: 'copy',
+          read_only_eligible: false,
+          blocked_by: 'write_file',
+          sandbox_eligible: true,
+        }],
+      })
+    })
+
+    expect(screen.getByRole('button', { name: /writer-a/ })).toBeDisabled()
+    fireEvent.click(screen.getByRole('checkbox', { name: /Mutation mode/ }))
+    expect(screen.getByRole('button', { name: /writer-a/ })).toBeEnabled()
+    fireEvent.click(screen.getByRole('button', { name: /writer-a/ }))
+    const assign = screen.getByRole('button', { name: 'Assign task' })
+    expect(assign).toBeDisabled()
+
+    const fileScope = screen.getByRole('textbox', { name: 'File scope for writer-a' })
+    fireEvent.change(fileScope, { target: { value: '../outside' } })
+    expect(assign).toBeDisabled()
+
+    fireEvent.change(fileScope, {
+      target: { value: 'src/copy.ts, tests/copy.test.ts' },
+    })
+    expect(assign).toBeEnabled()
+    fireEvent.click(assign)
+
+    expect(JSON.parse(postMessage.mock.calls.at(-1)?.[0] ?? '{}')).toEqual({
+      type: 'delegate_organization',
+      task: {
+        objective: 'update the copy',
+        requirements: [{
+          role: 'writer',
+          employee: 'writer-a',
+          capabilities: ['copy_editing'],
+          responsibility: '负责目标中与 writer 相关的工作',
+          required: true,
+        }],
+        sequential_handoff: false,
+        max_workers: 1,
+        mutation: true,
+        workspace_mode: 'isolated_sandbox',
+        file_scopes: [{
+          employee: 'writer-a',
+          owned_files: ['src/copy.ts', 'tests/copy.test.ts'],
+        }],
+      },
+    })
+  })
+
   it('closes modal surfaces before hiding the overlay on Escape', async () => {
     const postMessage = installWebViewHost()
     const { App } = await import('./App')
 
     render(<App />)
+    postMessage.mockClear()
 
     act(() => {
       window.handleIpc?.({ type: 'settings', config: settingsConfig })

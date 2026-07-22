@@ -1,10 +1,17 @@
 import type { CodingState } from '../../state/codingReducer'
 import { ChangeSetPanel } from './ChangeSetPanel'
+import { DagControlPanel } from './DagControlPanel'
 import { RunSummary } from './RunSummary'
 
 export const WORKBENCH_RENDER_LIMIT = 80
 
-export function CodingWorkbench({ state }: { state: CodingState }) {
+type CodingWorkbenchProps = {
+  state: CodingState
+  onReconcileDag?: (taskId: string, nodeId: string) => void
+  onAbandonDag?: (taskId: string, nodeId: string, reason: string) => void
+}
+
+export function CodingWorkbench({ state, onReconcileDag, onAbandonDag }: CodingWorkbenchProps) {
   const failedChecks = state.verifications.filter((verification) => !verification.success).length
   const activeWorkers = state.workers.filter((worker) => worker.status === 'running').length
   const visibleSteps = latestItems(state.steps)
@@ -40,6 +47,16 @@ export function CodingWorkbench({ state }: { state: CodingState }) {
           <h2>Organization</h2>
           <span>{state.organization?.status ?? 'standby'}</span>
         </div>
+        {state.autoDelegation ? (
+          <div className="organization-routing-card">
+            <div>
+              <span>Automatic routing</span>
+              <strong>{state.autoDelegation.strategy.replaceAll('_', ' ')}</strong>
+            </div>
+            <p>{state.autoDelegation.reason}</p>
+            <small>{state.autoDelegation.workerCount} delegated employees</small>
+          </div>
+        ) : null}
         {state.organization ? (
           <div className="organization-card">
             <div><span>Manager</span><strong>{state.organization.manager}</strong></div>
@@ -50,6 +67,19 @@ export function CodingWorkbench({ state }: { state: CodingState }) {
             {state.organization.reason ? <p className="organization-reason">{state.organization.reason}</p> : null}
           </div>
         ) : <p className="muted">No organization task.</p>}
+      </section>
+
+      <section className="workbench-section dag-section">
+        <div className="section-heading">
+          <h2>Durable DAG</h2>
+          <span>{state.organizationGraphs.length}</span>
+        </div>
+        <DagControlPanel
+          graphs={state.organizationGraphs}
+          recoveryResults={state.organizationRecoveryResults}
+          onReconcile={onReconcileDag ?? (() => undefined)}
+          onAbandon={onAbandonDag ?? (() => undefined)}
+        />
       </section>
 
       <section className="workbench-section">

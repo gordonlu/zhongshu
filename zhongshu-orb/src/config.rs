@@ -474,6 +474,9 @@ pub struct AgentConfig {
     /// 自我进化：Observer 观察使用模式，LLM 自动提议装备升级/新建。
     #[serde(default)]
     pub auto_evolve: bool,
+    /// 用户明确允许后，主任务入口才可评估并自动组建多 Agent DAG。
+    #[serde(default)]
+    pub auto_multi_agent: bool,
 }
 
 fn default_personality() -> String {
@@ -633,6 +636,7 @@ impl Default for AgentConfig {
             authority: AuthorityConfig::default(),
             mode: "assistant".into(),
             auto_evolve: false,
+            auto_multi_agent: false,
         }
     }
 }
@@ -1043,6 +1047,7 @@ mod tests {
     #[test]
     fn default_config_roundtrips() {
         let cfg = AppConfig::default();
+        assert!(!cfg.agent.auto_multi_agent);
         let json = serde_json::to_string(&cfg).unwrap();
         let parsed: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.llm.model, cfg.llm.model);
@@ -1057,6 +1062,7 @@ mod tests {
         assert_eq!(cfg.llm.model, "gpt-4");
         assert_eq!(cfg.hotkey.key, "Semicolon");
         assert_eq!(cfg.ui.orb_size, 64);
+        assert!(!cfg.agent.auto_multi_agent);
     }
 
     #[test]

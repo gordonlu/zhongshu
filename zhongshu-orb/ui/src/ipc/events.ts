@@ -44,6 +44,7 @@ export type SettingsConfig = {
   bg_interval?: string
   bg_prompt?: string
   auto_evolve?: boolean
+  auto_multi_agent?: boolean
   max_context_tokens?: number
   mode?: string
 }
@@ -64,6 +65,7 @@ export type CodingUiEvent =
   | { kind: 'replay_available'; conversation_id?: number; replay_execution_id?: string }
 
 export type OrganizationUiEvent =
+  | { kind: 'routing_decided'; routing_id: string; strategy: string; reason: string; worker_count: number }
   | { kind: 'task_started'; task_id: string; manager: string; collaboration: string }
   | { kind: 'employee_assigned'; task_id: string; employee: string; role: string; responsibility: string; reports_to: string }
   | { kind: 'employee_working'; task_id: string; employee: string; role: string }
@@ -79,6 +81,72 @@ export type OrganizationEmployeeInfo = {
   focus: string
   read_only_eligible: boolean
   blocked_by?: string
+  sandbox_eligible?: boolean
+  sandbox_blocked_by?: string
+}
+
+export type ExecutionNodeState = 'pending' | 'running' | 'succeeded' | 'failed' | 'skipped' | 'cancelled' | 'recovery_required'
+
+export type ExecutionGraphNode = {
+  id: string
+  kind: string
+  objective: string
+  executor?: string
+  requirements: { capabilities: string[]; read_only: boolean }
+  state: ExecutionNodeState
+}
+
+export type ExecutionGraphEdge = {
+  from: string
+  to: string
+  kind: string
+}
+
+export type ExecutionGraphArtifact = {
+  id: string
+  producer_node: string
+  kind: string
+  summary: string
+  evidence_refs: string[]
+  uncertainties: string[]
+}
+
+export type ExecutionGraphReconciliation = {
+  node_id: string
+  decision: 'confirmed_succeeded' | 'confirmed_failed'
+  reason: string
+  evidence_refs: string[]
+  transition_sequence: number
+}
+
+export type ExecutionEffectIntent = {
+  id: string
+  node_id: string
+  expectation: { kind: string; [key: string]: string | number | boolean }
+}
+
+export type OrganizationGraphView = {
+  store_version: number
+  graph: {
+    task_id: string
+    nodes: ExecutionGraphNode[]
+    edges: ExecutionGraphEdge[]
+    artifacts: ExecutionGraphArtifact[]
+    transitions: unknown[]
+    reconciliations: ExecutionGraphReconciliation[]
+    effect_intents: ExecutionEffectIntent[]
+  }
+}
+
+export type OrganizationRecoveryResult = {
+  task_id: string
+  node_id: string
+  action: 'reconcile' | 'abandon'
+  assessment: 'confirmed_succeeded' | 'confirmed_failed' | 'inconclusive'
+  reason: string
+  evidence_refs: string[]
+  executed_cleanup_nodes: string[]
+  graph: OrganizationGraphView
 }
 
 export type OverlayToUiEvent =
@@ -102,6 +170,8 @@ export type OverlayToUiEvent =
   | { type: 'coding'; event: CodingUiEvent }
   | { type: 'organization'; event: OrganizationUiEvent }
   | { type: 'organization_roster'; employees: OrganizationEmployeeInfo[]; max_workers: number }
+  | { type: 'organization_graphs'; graphs: OrganizationGraphView[] }
+  | { type: 'organization_recovery'; result: OrganizationRecoveryResult }
   | { type: 'verification'; command: string; success: boolean; exit_code?: number; step?: string }
   | { type: 'recovery_feedback'; rule_id: string; message: string }
   | { type: 'phase_transition'; from: string; to: string }

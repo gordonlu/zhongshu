@@ -332,6 +332,7 @@ mod tests {
             bg_interval: None,
             bg_prompt: None,
             auto_evolve: None,
+            auto_multi_agent: None,
             max_context_tokens: None,
             mode: None,
         };

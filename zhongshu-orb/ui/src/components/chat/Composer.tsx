@@ -1,4 +1,4 @@
-import { forwardRef, useRef } from 'react'
+import { forwardRef, useImperativeHandle, useLayoutEffect, useRef } from 'react'
 
 type ComposerProps = {
   value: string
@@ -14,10 +14,22 @@ export const Composer = forwardRef<HTMLTextAreaElement, ComposerProps>(function 
   onSubmit,
 }, ref) {
   const composingRef = useRef(false)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  useImperativeHandle(ref, () => textareaRef.current as HTMLTextAreaElement)
+
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current
+    if (!textarea) return
+    textarea.style.height = '0px'
+    const height = Math.min(Math.max(textarea.scrollHeight, 38), 132)
+    textarea.style.height = `${height}px`
+    textarea.style.overflowY = textarea.scrollHeight > 132 ? 'auto' : 'hidden'
+  }, [value])
 
   return (
     <textarea
-      ref={ref}
+      ref={textareaRef}
       data-composer-input
       className="composer-input"
       value={value}

@@ -152,6 +152,7 @@ export function App() {
         setToast(null)
       }
     })
+    bridge.send({ type: 'list_organization_graphs' })
 
     return () => {
       cancelPendingDeltaFrame()
@@ -243,7 +244,7 @@ export function App() {
     if (codingState.organization?.status === 'manager_reviewing') return 'Manager reviewing'
     if (codingState.organization?.status === 'accepted') return 'Organization task accepted'
     if (codingState.organization?.status === 'submitted') return 'Organization task submitted'
-    if (['blocked', 'worker_failed', 'review_findings', 'cancelled'].includes(codingState.organization?.status ?? '')) {
+    if (['blocked', 'worker_failed', 'review_findings', 'cancelled', 'recovery_required'].includes(codingState.organization?.status ?? '')) {
       return `Organization task ${codingState.organization?.status.replaceAll('_', ' ')}`
     }
     if (codingState.active) return 'Coding task running'
@@ -294,22 +295,6 @@ export function App() {
           <span>{statusText}</span>
         </div>
         <div className="titlebar-actions">
-          {isCodingMode ? (
-            <button
-              type="button"
-              className="icon-button optional-title-action"
-              aria-label="Build an organization team"
-              data-tooltip-dir="below"
-              data-tooltip="Build a team"
-              disabled={!composerText.trim()}
-              onClick={() => {
-                pendingOrganizationObjective.current = composerText.trim()
-                bridge.send({ type: 'list_organization_employees' })
-              }}
-            >
-              <Building2 size={iconSize} />
-            </button>
-          ) : null}
           {isCodingMode ? (
             <button
               type="button"
@@ -444,6 +429,14 @@ export function App() {
         </section>
       ) : null}
 
+      {codingState.autoDelegation ? (
+        <section className="routing-strip" aria-label="Latest automatic routing decision">
+          <strong>{codingState.autoDelegation.strategy.replaceAll('_', ' ')}</strong>
+          <span>{codingState.autoDelegation.reason}</span>
+          <small>{codingState.autoDelegation.workerCount} delegated employees</small>
+        </section>
+      ) : null}
+
       <main className={isCodingMode && workbenchOpen ? 'main-grid has-workbench' : 'main-grid'}>
         <section className="chat-pane" aria-label="Conversation">
           <ChatStream
@@ -457,7 +450,20 @@ export function App() {
           />
         </section>
         {isCodingMode && workbenchOpen ? (
-          <CodingWorkbench state={codingState} />
+          <CodingWorkbench
+            state={codingState}
+            onReconcileDag={(taskId, nodeId) => bridge.send({
+              type: 'reconcile_organization',
+              task_id: taskId,
+              node_id: nodeId,
+            })}
+            onAbandonDag={(taskId, nodeId, reason) => bridge.send({
+              type: 'abandon_organization_recovery',
+              task_id: taskId,
+              node_id: nodeId,
+              reason,
+            })}
+          />
         ) : null}
       </main>
 
@@ -492,6 +498,22 @@ export function App() {
           onChange={setComposerText}
           onSubmit={() => submitComposer()}
         />
+        {isCodingMode ? (
+          <button
+            type="button"
+            className="composer-team-button"
+            aria-label="Build an organization team"
+            data-tooltip="Build a team"
+            disabled={!composerText.trim()}
+            onClick={() => {
+              pendingOrganizationObjective.current = composerText.trim()
+              bridge.send({ type: 'list_organization_employees' })
+            }}
+          >
+            <Building2 size={16} />
+            <span>Team</span>
+          </button>
+        ) : null}
         <button
           type="button"
           className="send-button"
@@ -539,7 +561,7 @@ export function App() {
             pendingOrganizationObjective.current = null
             focusComposer()
           }}
-          onSubmit={(employees, sequentialHandoff, mutation) => {
+          onSubmit={(employees, sequentialHandoff, mutation, fileScopes) => {
             const objective = organizationDialog.objective
             optimisticUserMessages.current.push(objective)
             dispatchChat({ type: 'user_message', content: objective })
@@ -549,13 +571,16 @@ export function App() {
                 objective,
                 requirements: employees.map((employee) => ({
                   role: employee.role,
+                  employee: employee.name,
                   capabilities: employee.capabilities,
                   responsibility: `负责目标中与 ${employee.role} 相关的工作`,
                   required: true,
                 })),
                 sequential_handoff: sequentialHandoff,
                 max_workers: employees.length,
-                mutation,
+                mutation: mutation || undefined,
+                workspace_mode: mutation ? 'isolated_sandbox' : undefined,
+                file_scopes: mutation ? fileScopes : undefined,
               },
             })
             setComposerText('')

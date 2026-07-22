@@ -360,19 +360,17 @@ async fn cancel_during_run_returns_interrupted() {
     assert_eq!(result.outcome, RunOutcome::Interrupted);
 }
 
-
-
 /// Simulate a crash DURING tool execution: save a dirty checkpoint while
 /// the tool is marked as "started" but before completion.
 #[tokio::test]
 async fn crash_during_tool_detects_inflight_and_reports_unknown_effect() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
     use zhongshu_core::agent::run_agent;
     use zhongshu_core::agent::AgentCallbacks;
     use zhongshu_core::core::checkpoint::{AgentCheckpoint, CheckpointStore};
     use zhongshu_core::core::ledger::RunLedger;
     use zhongshu_core::core::Database;
-    use std::collections::HashMap;
-    use std::sync::Arc;
 
     let dir = tempfile::tempdir().unwrap();
     let db = Database::new(dir.path().join("crash.db"));
@@ -383,7 +381,9 @@ async fn crash_during_tool_detects_inflight_and_reports_unknown_effect() {
     let run_id = uuid::Uuid::new_v4();
 
     // Record the tool start (simulating state at crash time)
-    ledger.record_run_started(&run_id.to_string(), "crash test").unwrap();
+    ledger
+        .record_run_started(&run_id.to_string(), "crash test")
+        .unwrap();
     ledger
         .record_tool_call(
             &run_id.to_string(),
@@ -407,11 +407,17 @@ async fn crash_during_tool_detects_inflight_and_reports_unknown_effect() {
         messages: vec![
             Message::system("测试助手。"),
             Message::user("run crashtest"),
-            Message::assistant_with_tools("", vec![ToolCall {
-                id: "call-crash-1".into(),
-                call_type: "function".into(),
-                function: FunctionCall { name: "noop".into(), arguments: "{}".into() },
-            }]),
+            Message::assistant_with_tools(
+                "",
+                vec![ToolCall {
+                    id: "call-crash-1".into(),
+                    call_type: "function".into(),
+                    function: FunctionCall {
+                        name: "noop".into(),
+                        arguments: "{}".into(),
+                    },
+                }],
+            ),
         ],
         created_at: 0,
     };
@@ -436,7 +442,9 @@ async fn crash_during_tool_detects_inflight_and_reports_unknown_effect() {
     let callbacks = Arc::new(AgentCallbacks {
         on_text: Box::new(|_| {}),
         on_tool_start: Box::new(|_: &str, _: &str| {}),
-        on_tool_done: Box::new(|_: &str, _: &str, _: zhongshu_core::agent::loop_::ToolCompletionStatus| {}),
+        on_tool_done: Box::new(
+            |_: &str, _: &str, _: zhongshu_core::agent::loop_::ToolCompletionStatus| {},
+        ),
         run_id,
     });
 
@@ -462,7 +470,10 @@ async fn crash_during_tool_detects_inflight_and_reports_unknown_effect() {
         .messages
         .iter()
         .any(|m| m.content.contains("unknown_effect") || m.content.contains("状态未知"));
-    assert!(has_unknown, "recovery should report unknown effect for in-flight tool");
+    assert!(
+        has_unknown,
+        "recovery should report unknown effect for in-flight tool"
+    );
 
     // After recovery, the agent received the unknown-effect observation.
     // The ledger still preserves the original 'started' record — it is

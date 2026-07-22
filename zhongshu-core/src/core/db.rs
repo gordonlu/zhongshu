@@ -232,6 +232,18 @@ impl Database {
             );",
         )?;
 
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS organization_graph_checkpoints (
+                task_id         TEXT PRIMARY KEY,
+                version         INTEGER NOT NULL,
+                checkpoint      TEXT NOT NULL,
+                clean_terminal  INTEGER NOT NULL DEFAULT 0,
+                updated_at      INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_organization_graph_unfinished
+                ON organization_graph_checkpoints(clean_terminal, updated_at);",
+        )?;
+
         tracing::info!("core database migrated at {}", self.path.display());
         Ok(())
     }

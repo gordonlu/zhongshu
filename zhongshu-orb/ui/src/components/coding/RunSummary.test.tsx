@@ -1,6 +1,6 @@
 import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
-import type { CodingState } from '../../state/codingReducer'
+import { initialCodingState, type CodingState } from '../../state/codingReducer'
 import { buildRunSummary, RunSummary } from './RunSummary'
 
 describe('RunSummary', () => {
@@ -8,6 +8,7 @@ describe('RunSummary', () => {
 
   it('marks a fully applied and verified run as review ready', () => {
     const state: CodingState = {
+      ...initialCodingState,
       active: true,
       sessionId: 's1',
       risk: 'medium',
@@ -43,6 +44,7 @@ describe('RunSummary', () => {
 
   it('raises attention when checks fail or context was dropped', () => {
     const state: CodingState = {
+      ...initialCodingState,
       active: true,
       planStepCount: 0,
       steps: [],
@@ -67,6 +69,7 @@ describe('RunSummary', () => {
 
   it('shows submitted workers as awaiting verification', () => {
     const state: CodingState = {
+      ...initialCodingState,
       active: true,
       planStepCount: 0,
       steps: [],

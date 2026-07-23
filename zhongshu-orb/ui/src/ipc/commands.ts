@@ -49,6 +49,23 @@ export type UiToOverlayCommand =
   | { type: 'close_window' }
   | { type: 'cancel_task'; task_id: string }
   | { type: 'complete_task'; task_id: string }
+  | { type: 'edit_plan'; session_id: string; steps: { step_id: string; title: string }[] }
+  | { type: 'delete_step'; session_id: string; step_id: string }
+  | { type: 'reorder_steps'; session_id: string; step_ids: string[] }
+  | { type: 'execute_step'; session_id: string; step_id: string }
+  | { type: 'list_memories' }
+  | { type: 'delete_memory'; id: string }
+  | { type: 'toggle_memory'; id: string; enabled: boolean }
+  | { type: 'clear_browser_data' }
+  | { type: 'open_browser_profile' }
+  | { type: 'cancel_browser_action' }
+  | { type: 'retry_step'; session_id: string; step_id: string }
+  | { type: 'rerun_from_step'; session_id: string; step_id: string }
+  | { type: 'flag_sensitive'; enabled: boolean }
+  | { type: 'session_opt_out'; enabled: boolean }
+  | { type: 'exclusion_rules'; patterns: string[] }
+  | { type: 'jump_to_ide'; path: string; line?: number }
+  | { type: 'resolve_conflict'; path: string; resolution: 'keep_a' | 'keep_b' | 'merge'; merged_content?: string }
 
 export function validateCommand(command: UiToOverlayCommand): boolean {
   switch (command.type) {
@@ -97,6 +114,24 @@ export function validateCommand(command: UiToOverlayCommand): boolean {
         && command.reason.trim().length > 0
     case 'save_settings':
       return typeof command.config === 'object' && command.config !== null
+    case 'edit_plan':
+      return command.session_id.trim().length > 0 && command.steps.length > 0
+        && command.steps.every(s => s.step_id.trim().length > 0 && s.title.trim().length > 0)
+    case 'delete_step':
+    case 'execute_step':
+      return command.session_id.trim().length > 0 && command.step_id.trim().length > 0
+    case 'reorder_steps':
+      return command.session_id.trim().length > 0 && command.step_ids.length > 0
+    case 'delete_memory':
+    case 'toggle_memory':
+      return command.id.trim().length > 0
+    case 'retry_step':
+    case 'rerun_from_step':
+      return command.session_id.trim().length > 0 && command.step_id.trim().length > 0
+    case 'jump_to_ide':
+      return command.path.trim().length > 0
+    case 'resolve_conflict':
+      return command.path.trim().length > 0
     default:
       return true
   }

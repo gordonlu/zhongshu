@@ -108,6 +108,12 @@ pub struct IpcClones {
     pub host_commands: OverlayHostCommandQueue,
     pub pct: Arc<Mutex<Option<String>>>,
     pub pcmt: Arc<Mutex<Option<String>>>,
+    pub plmems: Arc<Mutex<bool>>,
+    pub pdmem: Arc<Mutex<Option<String>>>,
+    pub ptmem: Arc<Mutex<Option<(String, bool)>>>,
+    pub pcbd: Arc<Mutex<bool>>,
+    pub pobp: Arc<Mutex<bool>>,
+    pub pcba: Arc<Mutex<bool>>,
 }
 
 pub struct OverlayState {
@@ -137,6 +143,12 @@ pub struct OverlayState {
     pub host_commands: OverlayHostCommandQueue,
     pub pending_cancel_task: Arc<Mutex<Option<String>>>,
     pub pending_complete_task: Arc<Mutex<Option<String>>>,
+    pub pending_list_memories: Arc<Mutex<bool>>,
+    pub pending_delete_memory: Arc<Mutex<Option<String>>>,
+    pub pending_toggle_memory: Arc<Mutex<Option<(String, bool)>>>,
+    pub pending_clear_browser_data: Arc<Mutex<bool>>,
+    pub pending_open_browser_profile: Arc<Mutex<bool>>,
+    pub pending_cancel_browser_action: Arc<Mutex<bool>>,
 }
 
 impl OverlayState {
@@ -166,6 +178,12 @@ impl OverlayState {
             host_commands: Default::default(),
             pending_cancel_task: Default::default(),
             pending_complete_task: Default::default(),
+            pending_list_memories: Default::default(),
+            pending_delete_memory: Default::default(),
+            pending_toggle_memory: Default::default(),
+            pending_clear_browser_data: Default::default(),
+            pending_open_browser_profile: Default::default(),
+            pending_cancel_browser_action: Default::default(),
         }
     }
 
@@ -193,6 +211,12 @@ impl OverlayState {
             host_commands: self.host_commands.clone(),
             pct: self.pending_cancel_task.clone(),
             pcmt: self.pending_complete_task.clone(),
+            plmems: self.pending_list_memories.clone(),
+            pdmem: self.pending_delete_memory.clone(),
+            ptmem: self.pending_toggle_memory.clone(),
+            pcbd: self.pending_clear_browser_data.clone(),
+            pobp: self.pending_open_browser_profile.clone(),
+            pcba: self.pending_cancel_browser_action.clone(),
         }
     }
 
@@ -264,6 +288,24 @@ impl OverlayState {
     }
     pub fn take_complete_task(&self) -> Option<String> {
         std::mem::take(&mut *self.pending_complete_task.lock().unwrap())
+    }
+    pub fn take_list_memories(&self) -> bool {
+        std::mem::take(&mut *self.pending_list_memories.lock().unwrap())
+    }
+    pub fn take_delete_memory(&self) -> Option<String> {
+        std::mem::take(&mut *self.pending_delete_memory.lock().unwrap())
+    }
+    pub fn take_toggle_memory(&self) -> Option<(String, bool)> {
+        std::mem::take(&mut *self.pending_toggle_memory.lock().unwrap())
+    }
+    pub fn take_clear_browser_data(&self) -> bool {
+        std::mem::take(&mut *self.pending_clear_browser_data.lock().unwrap())
+    }
+    pub fn take_open_browser_profile(&self) -> bool {
+        std::mem::take(&mut *self.pending_open_browser_profile.lock().unwrap())
+    }
+    pub fn take_cancel_browser_action(&self) -> bool {
+        std::mem::take(&mut *self.pending_cancel_browser_action.lock().unwrap())
     }
 }
 
@@ -346,6 +388,35 @@ pub fn make_ipc_handler(clones: IpcClones) -> impl Fn(http::Request<String>) + '
         UiToOverlayCommand::CompleteTask(id) => {
             *clones.pcmt.lock().unwrap() = Some(id);
         }
+        UiToOverlayCommand::EditPlan { .. }
+        | UiToOverlayCommand::DeleteStep { .. }
+        | UiToOverlayCommand::ReorderSteps { .. }
+        | UiToOverlayCommand::ExecuteStep { .. } => {}
+        UiToOverlayCommand::ListMemories => {
+            *clones.plmems.lock().unwrap() = true;
+        }
+        UiToOverlayCommand::DeleteMemory(id) => {
+            *clones.pdmem.lock().unwrap() = Some(id);
+        }
+        UiToOverlayCommand::ToggleMemory { id, enabled } => {
+            *clones.ptmem.lock().unwrap() = Some((id, enabled));
+        }
+        UiToOverlayCommand::ClearBrowserData => {
+            *clones.pcbd.lock().unwrap() = true;
+        }
+        UiToOverlayCommand::OpenBrowserProfile => {
+            *clones.pobp.lock().unwrap() = true;
+        }
+        UiToOverlayCommand::CancelBrowserAction => {
+            *clones.pcba.lock().unwrap() = true;
+        }
+        UiToOverlayCommand::RetryStep { .. }
+        | UiToOverlayCommand::RerunFromStep { .. }
+        | UiToOverlayCommand::JumpToIde { .. }
+        | UiToOverlayCommand::ResolveConflict { .. } => {}
+        UiToOverlayCommand::FlagSensitive(_)
+        | UiToOverlayCommand::SessionOptOut(_)
+        | UiToOverlayCommand::ExclusionRules(_) => {}
         UiToOverlayCommand::Unknown => {}
     }
 }
@@ -366,8 +437,25 @@ pub trait OverlayHandleExt {
         self.send(&json!({ "type": "delta", "content": content }));
     }
 
+    fn push_delta_with_meta(&self, content: &str, model: Option<&str>, duration_ms: Option<u64>) {
+        let mut payload = serde_json::Map::new();
+        payload.insert("type".into(), "delta".into());
+        payload.insert("content".into(), content.into());
+        if let Some(m) = model {
+            payload.insert("model".into(), m.into());
+        }
+        if let Some(d) = duration_ms {
+            payload.insert("duration_ms".into(), d.into());
+        }
+        self.send(&serde_json::Value::Object(payload));
+    }
+
     fn complete_message(&self) {
         self.send(&json!({ "type": "complete" }));
+    }
+
+    fn complete_message_with_duration(&self, duration_ms: u64) {
+        self.send(&json!({ "type": "complete", "duration_ms": duration_ms }));
     }
 
     fn set_history(&self, entries: &[ChatEntry], has_more: bool) {

@@ -7,7 +7,9 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use zhongshu_core::agent::llm::{Message, OpenAiProvider};
-use zhongshu_core::agent::{run_agent, AgentBudget, AgentCallbacks, AgentRuntime, StopReason};
+use zhongshu_core::agent::{
+    execute_agent_loop_with_messages, AgentBudget, AgentCallbacks, AgentRuntime, StopReason,
+};
 use zhongshu_core::tool::default_registry;
 
 const SYSTEM_PROMPT: &str = "\
@@ -138,12 +140,13 @@ async fn main() -> anyhow::Result<()> {
             run_id: Uuid::new_v4(),
         };
 
-        let result = run_agent(
+        let result = execute_agent_loop_with_messages(
             &mut runtime,
             messages,
             Some(Arc::new(callbacks)),
             "",
             CancellationToken::new(),
+            zhongshu_core::runtime::ExecutionProfile::Interactive,
         )
         .await;
 

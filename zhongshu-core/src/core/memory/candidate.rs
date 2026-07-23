@@ -1,7 +1,7 @@
 use rusqlite::params;
 
 use crate::core::db::Database;
-use crate::core::models::*;
+use crate::core::models::{CandidateStatus, MemoryCandidate, id, now};
 
 #[derive(Clone)]
 pub struct MemoryCandidateStore {
@@ -20,6 +20,9 @@ impl MemoryCandidateStore {
         confidence: f64,
         source_type: Option<&str>,
         source_id: Option<&str>,
+        run_id: Option<&str>,
+        runbook_id: Option<&str>,
+        source_task_id: Option<&str>,
     ) -> rusqlite::Result<MemoryCandidate> {
         let conn = self.db.conn()?;
         let mc = MemoryCandidate {
@@ -29,12 +32,15 @@ impl MemoryCandidateStore {
             confidence,
             source_type: source_type.map(|s| s.to_string()),
             source_id: source_id.map(|s| s.to_string()),
-            status: "pending".into(),
+            run_id: run_id.map(|s| s.to_string()),
+            runbook_id: runbook_id.map(|s| s.to_string()),
+            source_task_id: source_task_id.map(|s| s.to_string()),
+            status: CandidateStatus::Proposed.as_str().into(),
             created_at: now(),
         };
         conn.execute(
-            "INSERT INTO memory_candidates (id, content, memory_type, confidence, source_type, source_id, status, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![mc.id, mc.content, mc.memory_type, mc.confidence, mc.source_type, mc.source_id, mc.status, mc.created_at],
+            "INSERT INTO memory_candidates (id, content, memory_type, confidence, source_type, source_id, run_id, runbook_id, source_task_id, status, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            params![mc.id, mc.content, mc.memory_type, mc.confidence, mc.source_type, mc.source_id, mc.run_id, mc.runbook_id, mc.source_task_id, mc.status, mc.created_at],
         )?;
         Ok(mc)
     }
@@ -42,7 +48,7 @@ impl MemoryCandidateStore {
     pub fn list_pending(&self) -> rusqlite::Result<Vec<MemoryCandidate>> {
         let conn = self.db.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, content, memory_type, confidence, source_type, source_id, status, created_at FROM memory_candidates WHERE status = 'pending' ORDER BY confidence DESC",
+            "SELECT id, content, memory_type, confidence, source_type, source_id, run_id, runbook_id, source_task_id, status, created_at FROM memory_candidates WHERE status IN ('proposed', 'under_review') ORDER BY confidence DESC",
         )?;
         let rows = stmt.query_map([], Self::row)?;
         rows.collect()
@@ -57,6 +63,15 @@ impl MemoryCandidateStore {
         Ok(n > 0)
     }
 
+    pub fn delete(&self, id: &str) -> rusqlite::Result<bool> {
+        let conn = self.db.conn()?;
+        let n = conn.execute(
+            "DELETE FROM memory_candidates WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(n > 0)
+    }
+
     fn row(row: &rusqlite::Row) -> rusqlite::Result<MemoryCandidate> {
         Ok(MemoryCandidate {
             id: row.get(0)?,
@@ -65,8 +80,11 @@ impl MemoryCandidateStore {
             confidence: row.get(3)?,
             source_type: row.get(4)?,
             source_id: row.get(5)?,
-            status: row.get(6)?,
-            created_at: row.get(7)?,
+            run_id: row.get(6)?,
+            runbook_id: row.get(7)?,
+            source_task_id: row.get(8)?,
+            status: row.get(9)?,
+            created_at: row.get(10)?,
         })
     }
 }

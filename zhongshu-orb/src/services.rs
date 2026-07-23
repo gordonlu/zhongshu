@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
 use zhongshu_core::agent::llm::ChatCompletionRequest;
 use zhongshu_core::agent::llm_registry::LlmRegistry;
 use zhongshu_core::agent::{AgentProfile, AgentRuntime, Worker};
@@ -12,9 +13,9 @@ use zhongshu_core::equipment::{
 use crate::app::AgentController;
 use zhongshu_core::core::{
     ArtifactRepository, ArtifactType, ClaimResult, Database, GoalRepository, GoalType,
-    MemoryCandidateStore, MemoryPolicy, ObservationStore, ObservationType, RetryOutcome,
-    RunbookStore, Scheduler, StepStatus, SuggestionEngine, SuggestionStatus, TaskPlanner,
-    TaskRepository, TaskStatus, TaskStep,
+    MemoryCandidateStore, MemoryPolicy, ObservationStore, ObservationType, PolicyCandidateStore,
+    RetryOutcome, RunbookStore, Scheduler, StepStatus, SuggestionEngine, SuggestionStatus,
+    TaskPlanner, TaskRepository, TaskStatus, TaskStep,
 };
 use zhongshu_core::event::{Event, EventBus, GoalEvent, SuggestionEvent, TaskEvent};
 use zhongshu_core::task::Task as WorkerTask;
@@ -37,7 +38,7 @@ pub fn spawn_memory_evaluation(memory_policy: MemoryPolicy, registry: Arc<LlmReg
                 }
             };
             let m = memory_policy.clone();
-            match m.evaluate_with(&*client.provider).await {
+            match m.promote_with_embeddings(&*client.provider).await {
                 Ok(accepted) => {
                     if !accepted.is_empty() {
                         tracing::info!(
@@ -319,6 +320,7 @@ pub fn spawn_task_executor(
             let mut all_output = String::new();
             let mut step_failed = false;
             let mut step_error = String::new();
+            let mut step_unverified = false;
 
             for step in &plan_steps {
                 let prompt = if all_output.is_empty() {
@@ -342,7 +344,12 @@ pub fn spawn_task_executor(
                 .await;
 
                 let worker_task = task_step_to_worker_task(&task_id, &title, step, &prompt);
-                let runtime_snapshot = { worker_runtime.read().await.clone() };
+                let mut runtime_snapshot = { worker_runtime.read().await.clone() };
+                // Enable checkpoint + ledger for crash recovery (Durable profile).
+                runtime_snapshot.checkpoint_store =
+                    Some(zhongshu_core::core::checkpoint::CheckpointStore::new(
+                        zhongshu_core::core::Database::new(db_path.clone()),
+                    ));
 
                 // Post-plan cancel check
                 if let Ok(Some(t)) = task_repo.get(&task_id) {
@@ -353,11 +360,13 @@ pub fn spawn_task_executor(
                     }
                 }
 
-                let step_output = match Worker::execute(
+                let step_output = match Worker::execute_with_cancel(
                     &runtime_snapshot,
                     &worker_profile,
                     worker_task,
                     None,
+                    CancellationToken::new(),
+                    zhongshu_core::runtime::ExecutionProfile::Durable,
                 )
                 .await
                 {
@@ -413,6 +422,7 @@ pub fn spawn_task_executor(
                                 StepStatus::Completed
                             }
                             zhongshu_core::agent::RunOutcome::CompletedUnverified => {
+                                step_unverified = true;
                                 StepStatus::Submitted
                             }
                             zhongshu_core::agent::RunOutcome::Blocked => StepStatus::ToolBlocked,
@@ -533,7 +543,7 @@ pub fn spawn_task_executor(
                     }
                 })
                 .await;
-            } else {
+            } else if !step_unverified {
                 let steps_for_runbook = plan_steps.clone();
                 let db = db_path.clone();
                 tokio::task::spawn_blocking(move || {
@@ -578,13 +588,22 @@ pub fn spawn_task_executor(
                         ttl,
                         out.chars().take(200).collect::<String>()
                     );
-                    let _ = mc.insert(&summary, Some("procedure"), 0.6, Some("task"), Some(&tid));
+                    let _ = mc.insert(&summary, Some("procedure"), 0.8, Some("task"), Some(&tid), None, None, None);
                     ebus.publish(Event::Task(TaskEvent::Completed {
                         task_id: tid.clone(),
                         title: ttl.clone(),
                         output: out.clone(),
                     }));
                     tracing::info!("executor: completed task '{}'", ttl);
+                });
+            } else {
+                // Steps completed but without verification — leave pending.
+                let trepo = task_repo.clone();
+                let tid = task_id.clone();
+                let ttl = title.clone();
+                tokio::task::spawn_blocking(move || {
+                    trepo.set_summary(&tid, &format!("unverified: {ttl}")).ok();
+                    tracing::info!("executor: task '{}' not completed — verification missing", ttl);
                 });
             }
             lease_handle.abort();
@@ -826,7 +845,8 @@ pub fn spawn_compensation(eb: Arc<EventBus>, core_db_path: PathBuf) {
 pub fn spawn_auto_evolution(
     observer: Arc<Mutex<EquipmentObserver>>,
     controller: Arc<AgentController>,
-    equipment: Arc<Mutex<EquipmentRegistry>>,
+    _equipment: Arc<Mutex<EquipmentRegistry>>,
+    core_db_path: PathBuf,
 ) {
     tokio::spawn(async move {
         loop {
@@ -879,33 +899,25 @@ pub fn spawn_auto_evolution(
                 );
                 continue;
             }
-            // Write manifest to a temp directory for installation.
-            let tmp = std::env::temp_dir().join(format!("zhongshu_evolve_{}", manifest.name));
-            if let Err(e) = std::fs::create_dir_all(&tmp) {
-                tracing::warn!("auto_evolve: failed to create temp dir: {e}");
-                continue;
-            }
-            if let Err(e) = write_auto_evolve_package(
-                &tmp,
-                &manifest,
-                &serde_json::to_string_pretty(&manifest).unwrap(),
-            ) {
-                tracing::warn!("auto_evolve: failed to write temp package: {e}");
-                let _ = std::fs::remove_dir_all(&tmp);
-                continue;
-            }
-            // Install via registry.
-            let name = manifest.name.clone();
-            match equipment.lock().unwrap().install_from(&tmp) {
-                Ok(id) => {
-                    tracing::info!("auto_evolve: installed '{}'", id);
-                    controller.refresh_skill_prompts();
-                }
+            // Save as SkillCandidate instead of auto-installing (Phase 5).
+            let manifest_json = match serde_json::to_string_pretty(&manifest) {
+                Ok(j) => j,
                 Err(e) => {
-                    tracing::warn!("auto_evolve: install failed for '{name}': {e}");
+                    tracing::warn!("auto_evolve: serialize failed: {e}");
+                    continue;
                 }
+            };
+            let candidate_store = zhongshu_core::core::memory::SkillCandidateStore::new(
+                zhongshu_core::core::Database::new(core_db_path.clone()),
+            );
+            match candidate_store.insert(&manifest.name, &manifest_json, None, None, None) {
+                Ok(sc) => tracing::info!(
+                    "auto_evolve: generated skill candidate '{}' (id={}) — awaiting user approval",
+                    sc.name,
+                    sc.id
+                ),
+                Err(e) => tracing::warn!("auto_evolve: failed to save candidate: {e}"),
             }
-            let _ = std::fs::remove_dir_all(&tmp);
         }
     });
 }
@@ -929,8 +941,8 @@ pub fn spawn_runbook_to_skill(
     eb: Arc<EventBus>,
     registry: Arc<LlmRegistry>,
     core_db_path: PathBuf,
-    equipment: Arc<Mutex<EquipmentRegistry>>,
-    controller: Arc<AgentController>,
+    _equipment: Arc<Mutex<EquipmentRegistry>>,
+    _controller: Arc<AgentController>,
 ) {
     tokio::spawn(async move {
         let mut rx = eb.subscribe();
@@ -1056,16 +1068,76 @@ Runbook 目标：{goal}
                 continue;
             }
             let name = manifest.name.clone();
-            match equipment.lock().unwrap().install_from(&tmp) {
-                Ok(id) => {
-                    tracing::info!("runbook2skill: installed skill '{}' from runbook", id);
-                    controller.refresh_skill_prompts();
-                }
-                Err(e) => {
-                    tracing::warn!("runbook2skill: install failed for '{name}': {e}");
-                }
+            // Save as SkillCandidate rather than auto-installing (Phase 5).
+            let candidate_store = zhongshu_core::core::memory::SkillCandidateStore::new(
+                zhongshu_core::core::Database::new(core_db_path.clone()),
+            );
+            match candidate_store.insert(
+                &name,
+                &manifest_json,
+                Some(&rb_id),
+                Some(&task_id),
+                None,
+            ) {
+                Ok(sc) => tracing::info!(
+                    "runbook2skill: saved skill candidate '{}' (id={}, runbook={}) — awaiting user approval",
+                    sc.name,
+                    sc.id,
+                    rb_id
+                ),
+                Err(e) => tracing::warn!("runbook2skill: failed to save candidate: {e}"),
             }
             let _ = std::fs::remove_dir_all(&tmp);
+        }
+    });
+}
+
+/// Periodic policy learner: evaluates candidates in shadow/canary status
+/// and promotes or rolls back based on metric comparison.
+pub fn spawn_policy_learner(core_db_path: PathBuf) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1800));
+        loop {
+            interval.tick().await;
+            let store = PolicyCandidateStore::new(Database::new(core_db_path.clone()));
+            // Evaluate shadowing candidates: compare canary vs baseline
+            if let Ok(candidates) = store.list(Some("shadowing")) {
+                for c in candidates {
+                    let decision = match (&c.baseline_metric, &c.canary_metric) {
+                        (Some(base), Some(canary)) => {
+                            match (base.parse::<f64>(), canary.parse::<f64>()) {
+                                (Ok(b), Ok(c)) if c > b => "approved",
+                                (Ok(_), Ok(_)) => "rolled_back",
+                                _ => continue,
+                            }
+                        }
+                        _ => continue,
+                    };
+                    if let Err(e) = store.update_status(&c.id, decision) {
+                        tracing::warn!("policy_learner: failed to update {}: {e}", c.id);
+                    } else {
+                        tracing::info!(
+                            "policy_learner: candidate '{}' ({}) → {decision}",
+                            c.title,
+                            c.area
+                        );
+                    }
+                }
+            }
+            // Promote approved candidates to active
+            if let Ok(approved) = store.list(Some(zhongshu_core::core::models::CandidateStatus::Approved.as_str())) {
+                for c in approved {
+                    if let Err(e) = store.update_status(&c.id, zhongshu_core::core::models::CandidateStatus::Active.as_str()) {
+                        tracing::warn!("policy_learner: failed to activate {}: {e}", c.id);
+                    } else {
+                        tracing::info!(
+                            "policy_learner: activated policy '{}' ({})",
+                            c.title,
+                            c.area
+                        );
+                    }
+                }
+            }
         }
     });
 }

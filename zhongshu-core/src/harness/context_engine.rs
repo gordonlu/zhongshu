@@ -194,6 +194,7 @@ mod tests {
             confidence: 1.0,
             relevance,
             trust: TrustLevel::Trusted,
+            pinned: false,
         }
     }
 

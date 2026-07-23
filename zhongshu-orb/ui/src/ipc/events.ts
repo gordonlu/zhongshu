@@ -3,16 +3,24 @@ export type EntryRole = 'User' | 'Assistant' | 'System'
 export type ToolStatus =
   | 'Running'
   | { Done: { success: boolean } }
+  | { Cancelled: { reason?: string } }
 
 export type ToolCallEntry = {
   name: string
   status: ToolStatus
+  tool_call_id?: string
 }
+
+export type SourceType = 'model' | 'reasoning' | 'tool' | 'memory' | 'web'
 
 export type ChatEntry = {
   role: EntryRole
   content: string
   tool_calls: ToolCallEntry[]
+  model?: string
+  duration_ms?: number
+  run_id?: string
+  source_type?: SourceType
 }
 
 export type PatchDiffPayload = {
@@ -31,6 +39,10 @@ export type AuthRequest = {
   source: string
   tool: string
   command: string
+  working_dir?: string
+  scope?: string
+  url?: string
+  diff?: PatchDiffPayload
 }
 
 export type SettingsConfig = {
@@ -58,11 +70,16 @@ export type CodingUiEvent =
   | { kind: 'worker_conflict'; session_id?: string; worker: string; task_id: string; reason: string }
   | { kind: 'patch_preview'; session_id?: string; path: string; operation: string; diff_summary: string; diff?: PatchDiffPayload | null }
   | { kind: 'patch_applied'; session_id?: string; path: string; operation: string; changed: boolean }
-  | { kind: 'verification'; command: string; success: boolean; exit_code?: number }
+  | { kind: 'verification'; command: string; success: boolean; exit_code?: number; file_locations?: string[]; suggestion?: string }
+  | { kind: 'workspace_detected'; path: string; description: string; file_count: number }
   | { kind: 'recovery_feedback'; rule_id: string; message: string }
   | { kind: 'context_pressure'; pressure_percent: number; dropped_evidence: number; dropped_recent: number }
   | { kind: 'context_included'; description: string; estimated_tokens: number }
   | { kind: 'replay_available'; conversation_id?: number; replay_execution_id?: string }
+  | { kind: 'model_fallback'; from_model: string; to_model: string; reason: string }
+  | { kind: 'architecture_analysis'; summary: string; components: { name: string; description: string }[] }
+  | { kind: 'conflict_detected'; session_id?: string; path: string; worker_a: string; worker_b: string; reason: string }
+  | { kind: 'memory_hit'; count: number; entries: { content: string; source: string }[] }
 
 export type OrganizationUiEvent =
   | { kind: 'routing_decided'; routing_id: string; strategy: string; reason: string; worker_count: number }
@@ -152,12 +169,13 @@ export type OrganizationRecoveryResult = {
 export type OverlayToUiEvent =
   | { type: 'user_message'; content: string }
   | { type: 'stop' }
-  | { type: 'delta'; content: string }
-  | { type: 'complete' }
+  | { type: 'model'; label: string }
+  | { type: 'delta'; content: string; model?: string; duration_ms?: number; source_type?: SourceType }
+  | { type: 'complete'; duration_ms?: number }
   | { type: 'history'; entries: ChatEntry[]; has_more: boolean }
   | { type: 'prepend_history'; entries: ChatEntry[]; has_more: boolean }
-  | { type: 'tool_call'; name: string }
-  | { type: 'tool_result'; name: string; success: boolean }
+  | { type: 'tool_call'; name: string; tool_call_id?: string }
+  | { type: 'tool_result'; name: string; success: boolean; reason?: string; external_source?: boolean }
   | { type: 'auth'; request: AuthRequest }
   | { type: 'settings'; config: SettingsConfig }
   | { type: 'tasks'; tasks: unknown[] }
@@ -177,3 +195,69 @@ export type OverlayToUiEvent =
   | { type: 'phase_transition'; from: string; to: string }
   | { type: 'show_personality' }
   | { type: 'clear' }
+  | { type: 'memory_entries'; entries: MemoryEntry[] }
+  | { type: 'chrome_state'; state: ChromeState }
+  | { type: 'debug_entries'; entries: DebugEntry[] }
+  | { type: 'compress_entries'; entries: CompressEntry[] }
+  | { type: 'auth_entries'; entries: AuthEntry[] }
+  | { type: 'memory_hit'; count: number; entries: { content: string; source: string }[] }
+  | { type: 'model_fallback'; from: string; to: string; reason: string }
+  | { type: 'equipment_proposal'; id: string; name: string; version: string; source: string; description: string }
+  | { type: 'equipment_preview'; id: string; manifest: unknown; capabilities: string[] }
+  | { type: 'privacy_notice'; text: string }
+  | { type: 'login_state_hint'; hint: string }
+  | { type: 'task_artifact'; task_id: string; artifact: unknown }
+  | { type: 'context_inconsistency'; label: string; detail: string }
+
+// ── Future panel data contracts ──
+// These types define the shape of data for panels that are not yet
+// connected to backend IPC. When the backend sends these events, the
+// corresponding panel in PanelHost will render the data automatically.
+
+export type AuthEntry = {
+  id: string
+  tool: string
+  command: string
+  source: string
+  approved: boolean
+  timestamp: number
+}
+
+export type CompressEntry = {
+  id: string
+  timestamp: number
+  messageCount: number
+  tokenBefore: number
+  tokenAfter: number
+  summary: string
+}
+
+export type MemoryEntry = {
+  id: string
+  content: string
+  source: string
+  confidence: number
+  lastUsed: number
+  createdAt: number
+  enabled: boolean
+  sourceTextRef?: string
+  sourceUrl?: string
+}
+
+export type ChromeState = {
+  connected: boolean
+  url?: string
+  recentActions: string[]
+  screenshot?: string
+  consoleErrors: number
+  networkRequests: number
+  busy: boolean
+}
+
+export type DebugEntry = {
+  id: string
+  type: 'tool_call' | 'tool_result' | 'llm_request' | 'llm_response' | 'memory' | 'error'
+  timestamp: number
+  summary: string
+  details?: string
+}

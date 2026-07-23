@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -6,6 +7,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use once_cell::sync::Lazy;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
@@ -88,6 +90,9 @@ impl Tool for BrowserAutomationTool {
             None => return ToolOutput::error("'action' must be a string"),
         };
 
+        record_chrome_action(action).await;
+        set_chrome_busy(true).await;
+
         let result = match action {
             "open" => open_page(arguments).await,
             "snapshot" => snapshot(arguments).await,
@@ -123,9 +128,18 @@ impl Tool for BrowserAutomationTool {
         match result {
             Ok(mut v) => {
                 v["risk"] = json!(classify_browser_action_risk(action));
+                if matches!(action, "open" | "snapshot") {
+                    if let Some(url) = v["url"].as_str() {
+                        update_chrome_url(Some(url.to_string())).await;
+                    }
+                }
+                set_chrome_busy(false).await;
                 ToolOutput::success(v).external()
             }
-            Err(e) => ToolOutput::error(format!("浏览器自动化失败: {e}")),
+            Err(e) => {
+                set_chrome_busy(false).await;
+                ToolOutput::error(format!("浏览器自动化失败: {e}"))
+            }
         }
     }
 }
@@ -453,6 +467,10 @@ async fn console_messages(_args: &Value) -> anyhow::Result<Value> {
             true,
         )
         .await?;
+    if let Some(msgs) = result.as_array() {
+        let error_count = msgs.iter().filter(|m| m["level"].as_str() == Some("error")).count();
+        add_chrome_console_errors(error_count).await;
+    }
     Ok(sanitize_external_value(
         json!({"action": "console", "tab_id": tab.id, "messages": result}),
     ))
@@ -474,6 +492,7 @@ async fn ensure_browser() -> anyhow::Result<tokio::sync::MutexGuard<'static, Opt
         };
         if needs_start {
             *guard = Some(ManagedBrowser::start().await?);
+            set_chrome_connected(true).await;
         }
     }
     Ok(BROWSER.lock().await)
@@ -820,6 +839,54 @@ mod tests {
 /// This is intentionally action-level instead of tool-level: browser automation
 /// includes read-like observation, navigation, interaction, and arbitrary JS
 /// execution in the same tool surface.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChromeSnapshot {
+    pub connected: bool,
+    pub current_url: Option<String>,
+    pub recent_actions: Vec<String>,
+    pub console_error_count: usize,
+    pub network_request_count: usize,
+    pub busy: bool,
+}
+
+static CHROME_SNAPSHOT: Lazy<Mutex<ChromeSnapshot>> = Lazy::new(|| Mutex::new(ChromeSnapshot::default()));
+static CHROME_RECENT_ACTIONS: Lazy<Mutex<VecDeque<String>>> = Lazy::new(|| Mutex::new(VecDeque::new()));
+
+pub async fn current_chrome_snapshot() -> ChromeSnapshot {
+    CHROME_SNAPSHOT.lock().await.clone()
+}
+
+pub(crate) async fn record_chrome_action(action: &str) {
+    let mut recent = CHROME_RECENT_ACTIONS.lock().await;
+    recent.push_back(action.to_string());
+    while recent.len() > 50 {
+        recent.pop_front();
+    }
+    let actions: Vec<String> = recent.iter().cloned().collect();
+    let mut snap = CHROME_SNAPSHOT.lock().await;
+    snap.recent_actions = actions;
+}
+
+pub(crate) async fn update_chrome_url(url: Option<String>) {
+    CHROME_SNAPSHOT.lock().await.current_url = url;
+}
+
+pub(crate) async fn set_chrome_connected(connected: bool) {
+    CHROME_SNAPSHOT.lock().await.connected = connected;
+}
+
+pub(crate) async fn set_chrome_busy(busy: bool) {
+    CHROME_SNAPSHOT.lock().await.busy = busy;
+}
+
+pub(crate) async fn add_chrome_console_errors(count: usize) {
+    CHROME_SNAPSHOT.lock().await.console_error_count += count;
+}
+
+pub(crate) async fn add_chrome_network_requests(count: usize) {
+    CHROME_SNAPSHOT.lock().await.network_request_count += count;
+}
+
 pub fn classify_browser_action_risk(action: &str) -> &'static str {
     match action {
         "open" | "snapshot" | "console" | "wait" | "scroll" | "screenshot" => "read",
@@ -850,6 +917,9 @@ async fn network_events(_args: &Value) -> anyhow::Result<Value> {
     let tab = browser.active_tab().await?;
     let result = browser.evaluate(&tab.websocket_url,
         r#"(()=>{const arr=window.__zhongshuNetwork||[];window.__zhongshuNetwork=[];return JSON.stringify(arr.slice(-50))})()"#, true).await?;
+    if let Some(events) = result.as_array() {
+        add_chrome_network_requests(events.len()).await;
+    }
     Ok(sanitize_external_value(
         json!({"action":"network_events","events":result}),
     ))

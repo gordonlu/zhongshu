@@ -5,8 +5,9 @@ use crate::agent::llm::{Message, StreamEvent, StreamToolCall, ToolCall};
 use crate::agent::runtime::AgentRuntime;
 use crate::core::checkpoint::AgentCheckpoint;
 use crate::core::context::ContextPack;
+use crate::event::{Event, HarnessUiEvent};
 use crate::harness::trace::event::HarnessEvent;
-use crate::tool::{infer_side_effect, SideEffect, ToolOutput, ToolStatus, ToolTermination};
+use crate::tool::{ToolOutput, ToolStatus, ToolTermination};
 use anyhow::Context;
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
@@ -151,7 +152,7 @@ impl ToolCompletionStatus {
 /// The caller owns the message list (system prompt, profile context,
 /// context engine, user input — everything) and passes it in.
 /// After completion the final message list is returned inside `LoopResult`.
-pub async fn run_agent(
+pub(crate) async fn run_agent(
     runtime: &mut AgentRuntime,
     messages: Vec<Message>,
     callbacks: Option<Arc<AgentCallbacks>>,
@@ -162,7 +163,7 @@ pub async fn run_agent(
         .await
 }
 
-pub async fn run_agent_with_verification_policy(
+pub(crate) async fn run_agent_with_verification_policy(
     runtime: &mut AgentRuntime,
     mut messages: Vec<Message>,
     callbacks: Option<Arc<AgentCallbacks>>,
@@ -254,6 +255,9 @@ pub async fn run_agent_with_verification_policy(
             Err(e) => warn!(error = %e, "failed to load agent checkpoint"),
         }
     }
+
+    // ── ActionJournal (wraps the append-only ledger) ────────────────
+    let journal = crate::action::ActionJournal::new(runtime.ledger.clone(), &run_id);
 
     for step in start_step..runtime.budget.max_steps {
         // Harness records use 1-based steps so "0" can remain the
@@ -538,45 +542,24 @@ pub async fn run_agent_with_verification_policy(
                 }
             }
 
-            // Idempotency check: see if this tool call was already completed
-            // in a previous run (survives restarts via the append-only ledger).
-            if let Some(ref check) = runtime.idempotency_checker {
-                if (check)(&tc.function.name, &tc.function.arguments) {
-                    info!(tool = %tc.function.name, "tool already completed, skipping");
-                    messages.push(Message::tool_result(
-                        &tc.id,
-                        format!(
-                            "<observation tool=\"{}\" status=\"completed\">此操作用于上次中断前已完成，跳过重复执行。</observation>",
-                            tc.function.name
-                        ),
-                    ));
-                    continue;
-                }
-            }
-
-            // ── Record tool start ────────────────────────────────────
-            // Notify the ledger and UI that execution is beginning, with
-            // the real arguments so the start/end keys match.
-            if let Some(ref cb) = callbacks {
-                (cb.on_tool_start)(&tc.function.name, &tc.function.arguments);
-            }
-
             // ── Checkpoint before tool execution ──────────────────────
             // Save the full agent state so a crash during the tool call
             // can be recovered.  The checkpoint is overwritten on each
             // tool call so only the latest one matters.
-            if let Some(ref cs) = runtime.checkpoint_store {
-                let cp = AgentCheckpoint {
-                    run_id: run_id.clone(),
-                    step,
-                    tool_calls_made,
-                    consecutive_failures: consecutive_tool_failures,
-                    tool_call_counts: tool_call_counts.clone(),
-                    messages: messages.clone(),
-                    created_at: 0,
-                };
-                if let Err(e) = cs.save(&cp, true) {
-                    warn!(error = %e, "failed to save agent checkpoint");
+            if runtime.profile.saves_checkpoint() {
+                if let Some(ref cs) = runtime.checkpoint_store {
+                    let cp = AgentCheckpoint {
+                        run_id: run_id.clone(),
+                        step,
+                        tool_calls_made,
+                        consecutive_failures: consecutive_tool_failures,
+                        tool_call_counts: tool_call_counts.clone(),
+                        messages: messages.clone(),
+                        created_at: 0,
+                    };
+                    if let Err(e) = cs.save(&cp, true) {
+                        warn!(error = %e, "failed to save agent checkpoint");
+                    }
                 }
             }
 
@@ -593,59 +576,74 @@ pub async fn run_agent_with_verification_policy(
                     crate::harness::tool::transaction::workspace_mutation_snapshot(&workspace_root)
                 })
                 .flatten();
-            let execution = executor
-                .execute(
+
+            // ── Dispatch action via ActionRuntime ──────────────────────
+            // Handles: idempotency → start callback → tool execution →
+            // interruption/unknown-outcome → auth wait → done callback
+            let action_result = crate::action::dispatch_with(
+                crate::action::ActionRequest::new(
+                    &tc.id,
                     &tc.function.name,
                     &tc.function.arguments,
-                    Some(cancel_token.clone()),
-                )
-                .await;
-            let termination = execution.termination;
-            let output = execution.output;
+                    step,
+                    tool_calls_made,
+                ),
+                &executor,
+                &journal,
+                &cancel_token,
+                callbacks.as_deref(),
+            )
+            .await;
 
-            // Interruption handling: check cancellation status and side effect
-            if termination != ToolTermination::Completed {
-                let side_effect = execution
-                    .spec
-                    .as_ref()
-                    .map(|s| s.side_effect)
-                    .unwrap_or_else(|| infer_side_effect(&tc.function.name));
-                match side_effect {
-                    SideEffect::ReadOnly => {
-                        // Fast read-only: accept result if tool already completed
-                    }
-                    SideEffect::LocalWrite
-                    | SideEffect::SystemChange
-                    | SideEffect::ExternalAction
-                    | SideEffect::Irreversible => {
-                        // Timeout/cancellation only proves the wait ended; it does
-                        // NOT prove no side effect occurred. Report unknown effect
-                        // so the agent does not assume the operation was skipped.
-                        let original = output.error.as_deref().unwrap_or("未知原因");
-                        let interrupted = ToolOutput::error(format!(
-                            "{}。实际执行状态未知，此操作可能已部分或完全执行，请核实系统状态。",
-                            original,
-                        ));
-                        // Interrupted tools do not count as tool failures for recovery
-                        // (consecutive_failures is not incremented for these)
-                        messages.push(Message::tool_result(
-                            &tc.id,
-                            interrupted.render_observation(&tc.function.name),
-                        ));
-                        if let Some(ref cb) = callbacks {
-                            (cb.on_tool_done)(
-                                &tc.function.name,
-                                &tc.function.arguments,
-                                ToolCompletionStatus::UnknownEffect,
-                            );
-                        }
-                        continue;
-                    }
-                }
+            // ── Idempotent skip ───────────────────────────────────────
+            if action_result.was_idempotent_skip {
+                messages.push(Message::tool_result(&tc.id, action_result.observation));
+                continue;
             }
 
-            let tool_success = matches!(output.status, ToolStatus::Success);
-            let exit_code = tool_exit_code(&output);
+            // ── Unknown outcome (interrupted side-effecting tool) ──────
+            if action_result.status == crate::action::ActionStatus::UnknownOutcome {
+                messages.push(Message::tool_result(&tc.id, action_result.observation));
+                // Not counted as consecutive failure
+                continue;
+            }
+
+            // ── Auth Required (dispatch already waited for approval) ──
+            if action_result.output_status == ToolStatus::AuthRequired {
+                messages.push(Message::tool_result(&tc.id, action_result.observation));
+
+                if let Some(ref tool_output) = action_result.tool_output {
+                    crate::harness::recovery::record_signal(
+                        &mut runtime.harness_state.recovery,
+                        crate::harness::recovery::policy::RecoverySignal::permission_blocked(
+                            tool_output
+                                .error
+                                .clone()
+                                .unwrap_or_else(|| "tool requires approval".into()),
+                        ),
+                    );
+                    let recovery_feedback = crate::harness::recovery::check(
+                        &mut runtime.harness_state.recovery,
+                        false,
+                        false,
+                        false,
+                        harness_step,
+                    );
+                    emit_recovery_feedback(runtime, &mut messages, recovery_feedback);
+                }
+
+                if action_result.status == crate::action::ActionStatus::Cancelled {
+                    messages.push(Message::system("用户已中断当前操作，之前的审批请求已取消。"));
+                }
+                continue;
+            }
+
+            // ── Trace recording ───────────────────────────────────────
+            let tool_success = matches!(action_result.output_status, ToolStatus::Success);
+            let exit_code = action_result
+                .tool_output
+                .as_ref()
+                .and_then(tool_exit_code);
             record_trace(
                 runtime,
                 HarnessEvent::ToolCall {
@@ -657,81 +655,7 @@ pub async fn run_agent_with_verification_policy(
             );
             record_verification_trace(runtime, tc, tool_success, exit_code, harness_step);
 
-            // AuthRequired means the tool was not actually executed.
-            // Wait for the user to approve/deny before continuing.
-            if output.status == ToolStatus::AuthRequired {
-                if let Some(ref cb) = callbacks {
-                    (cb.on_tool_done)(
-                        &tc.function.name,
-                        &tc.function.arguments,
-                        ToolCompletionStatus::AwaitingApproval,
-                    );
-                }
-                info!(tool = %tc.function.name, status = "auth_required");
-                crate::harness::recovery::record_signal(
-                    &mut runtime.harness_state.recovery,
-                    crate::harness::recovery::policy::RecoverySignal::permission_blocked(
-                        output
-                            .error
-                            .clone()
-                            .unwrap_or_else(|| "tool requires approval".into()),
-                    ),
-                );
-                let recovery_feedback = crate::harness::recovery::check(
-                    &mut runtime.harness_state.recovery,
-                    false,
-                    false,
-                    false,
-                    harness_step,
-                );
-                emit_recovery_feedback(runtime, &mut messages, recovery_feedback);
-                messages.push(Message::tool_result(
-                    &tc.id,
-                    output.render_observation(&tc.function.name),
-                ));
-
-                // Create a request-scoped oneshot channel for the approval outcome.
-                // Use the request_id embedded by the tool at creation time.
-                let rid = output.request_id.clone();
-                let mut approval_outcome = "cancelled";
-                if let Some(ref rid) = rid {
-                    let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
-                    // Atomically check the request still exists and register.
-                    // If the request was already resolved (user approved/denied
-                    // before we could register), default to cancelled.
-                    if crate::authority::register_waiter_if_pending(rid, outcome_tx).is_ok() {
-                        let outcome = tokio::select! {
-                            result = outcome_rx => {
-                                match result {
-                                    Ok(crate::authority::AuthOutcome::Approved) => "approved",
-                                    Ok(crate::authority::AuthOutcome::Denied) => "denied",
-                                    _ => "cancelled",
-                                }
-                            }
-                            _ = cancel_token.cancelled() => {
-                                crate::authority::take_pending(rid);
-                                messages.push(Message::system("用户已中断当前操作，之前的审批请求已取消。"));
-                                "cancelled"
-                            }
-                        };
-                        approval_outcome = outcome;
-                    }
-                }
-                // Generate correct observation.
-                if let Some(last) = messages.last_mut() {
-                    match approval_outcome {
-                        "approved" => {
-                            last.content = format!("<observation tool=\"{}\" status=\"approved\">用户已授权，可以执行此工具。</observation>", tc.function.name);
-                        }
-                        "denied" => {
-                            last.content = format!("<observation tool=\"{}\" status=\"denied\">用户已拒绝此工具执行，请换其他方法。</observation>", tc.function.name);
-                        }
-                        _ => {}
-                    }
-                }
-                continue;
-            }
-
+            // ── Budget check ──────────────────────────────────────────
             if tool_calls_made >= runtime.budget.max_tool_calls as usize {
                 warn!(
                     made = tool_calls_made,
@@ -749,59 +673,36 @@ pub async fn run_agent_with_verification_policy(
                 ));
             }
 
-            match output.status {
-                ToolStatus::Success => {
-                    consecutive_tool_failures = 0;
-                    info!(tool = %tc.function.name, "✓");
-                    messages.push(Message::tool_result(
-                        &tc.id,
-                        output.render_observation(&tc.function.name),
-                    ));
-                    if let Some(ref cb) = callbacks {
-                        (cb.on_tool_done)(
-                            &tc.function.name,
-                            &tc.function.arguments,
-                            ToolCompletionStatus::Completed,
-                        );
-                    }
-                }
-                ToolStatus::Error => {
-                    consecutive_tool_failures += 1;
-                    warn!(tool = %tc.function.name, error = ?output.error, consec = consecutive_tool_failures, "✗");
-                    messages.push(Message::tool_result(
-                        &tc.id,
-                        output.render_observation(&tc.function.name),
-                    ));
-                    if let Some(ref cb) = callbacks {
-                        let status = match termination {
-                            ToolTermination::Completed => ToolCompletionStatus::Failed,
-                            ToolTermination::TimedOut => ToolCompletionStatus::TimedOut,
-                            ToolTermination::Cancelled => ToolCompletionStatus::Cancelled,
-                        };
-                        (cb.on_tool_done)(&tc.function.name, &tc.function.arguments, status);
-                    }
+            // ── Push result message ───────────────────────────────────
+            messages.push(Message::tool_result(&tc.id, action_result.observation));
 
-                    if consecutive_tool_failures >= 3 {
-                        let tokens = estimate_total_tokens(&messages);
-                        return Ok(finish_loop_result(
-                            runtime,
-                            &mut messages,
-                            StopReason::ToolFailurePersistent,
-                            tool_calls_made,
-                            tokens,
-                            &run_id,
-                        ));
-                    }
-                }
-                _ => {
-                    messages.push(Message::tool_result(
-                        &tc.id,
-                        output.render_observation(&tc.function.name),
+            // ── Failure tracking ──────────────────────────────────────
+            let was_error = matches!(
+                action_result.status,
+                crate::action::ActionStatus::Failed | crate::action::ActionStatus::TimedOut
+            );
+            if action_result.status == crate::action::ActionStatus::Completed {
+                consecutive_tool_failures = 0;
+                info!(tool = %tc.function.name, "✓");
+            } else if was_error {
+                consecutive_tool_failures += 1;
+                warn!(tool = %tc.function.name, error = ?action_result.output_error, consec = consecutive_tool_failures, "✗");
+                if consecutive_tool_failures >= 3 {
+                    let tokens = estimate_total_tokens(&messages);
+                    return Ok(finish_loop_result(
+                        runtime,
+                        &mut messages,
+                        StopReason::ToolFailurePersistent,
+                        tool_calls_made,
+                        tokens,
+                        &run_id,
                     ));
                 }
             }
 
             // Harness: post-tool checks
+            let termination = action_result.tool_termination;
+            let output = action_result.tool_output.clone().unwrap_or_else(|| ToolOutput::error(String::from("missing")));
             {
                 // Update last_edit_step for mutation tools and shell mutations
                 let shell_has_new_mutations = if tc.function.name == "shell" {
@@ -1036,6 +937,47 @@ pub async fn run_agent_with_verification_policy(
                                     }
                                 }
                             }
+
+                            // Emit architecture analysis event
+                            if let Some(ref eb) = runtime.event_bus {
+                                let file_count = idx.files.len();
+                                let feedback_count = feedback.len();
+                                let summary = if feedback.is_empty() {
+                                    format!("分析 {} 个文件，未发现架构违规", file_count)
+                                } else {
+                                    format!(
+                                        "分析 {} 个文件，发现 {} 条架构反馈",
+                                        file_count, feedback_count
+                                    )
+                                };
+                                let components: Vec<crate::event::ArchitectureComponent> = idx
+                                    .files
+                                    .iter()
+                                    .take(30)
+                                    .map(|(path, file_idx)| {
+                                        let desc = if file_idx.items.is_empty() {
+                                            path.display().to_string()
+                                        } else {
+                                            format!(
+                                                "{} — {} 个符号",
+                                                path.display(),
+                                                file_idx.items.len()
+                                            )
+                                        };
+                                        crate::event::ArchitectureComponent {
+                                            name: path
+                                                .file_name()
+                                                .map(|n| n.to_string_lossy().to_string())
+                                                .unwrap_or_default(),
+                                            description: desc,
+                                        }
+                                    })
+                                    .collect();
+                                eb.publish(Event::Harness(HarnessUiEvent::ArchitectureAnalysis {
+                                    summary,
+                                    components,
+                                }));
+                            }
                         }
                         (traces, impact_msgs, semantic_feedback)
                     };
@@ -1049,6 +991,7 @@ pub async fn run_agent_with_verification_policy(
                         let text = crate::harness::render::render_feedback(fb);
                         info!("arch semantic: {text}");
                     }
+
                 }
             }
         }
@@ -1100,7 +1043,7 @@ fn close_unresolved_tool_calls(messages: &mut Vec<Message>) {
     }
 }
 
-pub async fn run_agent_with_context(
+pub(crate) async fn run_agent_with_context(
     runtime: &mut AgentRuntime,
     context: ContextPack,
     callbacks: Option<Arc<AgentCallbacks>>,

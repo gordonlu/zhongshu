@@ -21,7 +21,7 @@ import {
   ZoomOut,
 } from 'lucide-react'
 import { createIpcBridge } from './ipc/bridge'
-import type { AuthRequest, OrganizationEmployeeInfo, OverlayToUiEvent, SettingsConfig } from './ipc/events'
+import type { AuthEntry, AuthRequest, ChromeState, CompressEntry, DebugEntry, MemoryEntry, OrganizationEmployeeInfo, OverlayToUiEvent, SettingsConfig } from './ipc/events'
 import { chatReducer, initialChatState } from './state/chatReducer'
 import { codingReducer, initialCodingState } from './state/codingReducer'
 import { ChatStream } from './components/chat/ChatStream'
@@ -29,8 +29,9 @@ import { Composer } from './components/chat/Composer'
 import { CodingWorkbench } from './components/coding/CodingWorkbench'
 import { ApprovalBar } from './components/ApprovalBar'
 import { SettingsDialog } from './components/settings/SettingsDialog'
-import { ResourceDialog } from './components/resources/ResourceDialog'
 import { OrganizationDialog } from './components/organization/OrganizationDialog'
+import { PanelHost } from './components/panels/PanelHost'
+import { StartupGate } from './components/onboarding/StartupGate'
 import { demoCodingEvents } from './dev/fixtures'
 
 const bridge = createIpcBridge()
@@ -50,9 +51,11 @@ function initialTheme(): Theme {
   return window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
 }
 
-type ResourceDialogState = {
-  kind: 'tasks' | 'runbooks' | 'equipment'
-  items: unknown[]
+type PanelHostState = {
+  tab: 'tasks' | 'runbooks' | 'equipment' | 'auth' | 'memory' | 'chrome' | 'debug'
+  tasks: unknown[]
+  runbooks: unknown[]
+  equipment: unknown[]
 }
 
 type OrganizationDialogState = {
@@ -67,9 +70,21 @@ export function App() {
   const [mode, setMode] = useState('assistant')
   const [authRequest, setAuthRequest] = useState<AuthRequest | null>(null)
   const [settingsConfig, setSettingsConfig] = useState<SettingsConfig | null>(null)
-  const [resourceDialog, setResourceDialog] = useState<ResourceDialogState | null>(null)
+  const [panelHost, setPanelHost] = useState<PanelHostState | null>(null)
+  const [taskCount, setTaskCount] = useState(0)
+  const [authEntries, setAuthEntries] = useState<AuthEntry[]>([])
+  const [compressEntries, setCompressEntries] = useState<CompressEntry[]>([])
+  const [memoryEntries, setMemoryEntries] = useState<MemoryEntry[]>([])
+  const [chromeState, setChromeState] = useState<ChromeState>(() => ({
+    connected: false,
+    recentActions: [],
+    consoleErrors: 0,
+    networkRequests: 0,
+    busy: false,
+  }))
+  const [debugEntries, setDebugEntries] = useState<DebugEntry[]>([])
   const [organizationDialog, setOrganizationDialog] = useState<OrganizationDialogState | null>(null)
-  const [workbenchOpen, setWorkbenchOpen] = useState(true)
+  const [workbenchOpen, setWorkbenchOpen] = useState(false)
   const [zoomActive, setZoomActive] = useState(false)
   const [isMaximized, setIsMaximized] = useState(false)
   const [theme, setTheme] = useState<Theme>(initialTheme)
@@ -132,11 +147,12 @@ export function App() {
       } else if (event.type === 'settings') {
         setSettingsConfig(event.config)
       } else if (event.type === 'tasks') {
-        setResourceDialog({ kind: 'tasks', items: event.tasks })
+        setTaskCount(event.tasks.length)
+        setPanelHost((prev) => ({ tab: 'tasks', tasks: event.tasks, runbooks: prev?.runbooks ?? [], equipment: prev?.equipment ?? [] }))
       } else if (event.type === 'runbooks') {
-        setResourceDialog({ kind: 'runbooks', items: event.runbooks })
+        setPanelHost((prev) => ({ tab: 'runbooks', tasks: prev?.tasks ?? [], runbooks: event.runbooks, equipment: prev?.equipment ?? [] }))
       } else if (event.type === 'equipment') {
-        setResourceDialog({ kind: 'equipment', items: event.items })
+        setPanelHost((prev) => ({ tab: 'equipment', tasks: prev?.tasks ?? [], runbooks: prev?.runbooks ?? [], equipment: event.items }))
       } else if (event.type === 'organization_roster') {
         const objective = pendingOrganizationObjective.current
         if (objective) {
@@ -152,6 +168,17 @@ export function App() {
         setZoomActive(event.active)
       } else if (event.type === 'show_personality') {
         setShowPersonality(true)
+      } else if (event.type === 'memory_entries') {
+        setMemoryEntries(event.entries)
+        setPanelHost((prev) => prev ?? { tab: 'memory', tasks: [], runbooks: [], equipment: [] })
+      } else if (event.type === 'chrome_state') {
+        setChromeState(event.state)
+      } else if (event.type === 'debug_entries') {
+        setDebugEntries((prev) => [...prev, ...event.entries])
+      } else if (event.type === 'compress_entries') {
+        setCompressEntries((prev) => [...prev, ...event.entries])
+      } else if (event.type === 'auth_entries') {
+        setAuthEntries((prev) => [...prev, ...event.entries])
       } else if (event.type === 'clear') {
         setAuthRequest(null)
         setToast(null)
@@ -204,8 +231,8 @@ export function App() {
         focusComposer()
         return
       }
-      if (resourceDialog) {
-        setResourceDialog(null)
+      if (panelHost) {
+        setPanelHost(null)
         focusComposer()
         return
       }
@@ -225,9 +252,10 @@ export function App() {
 
     document.addEventListener('keydown', handleEscape)
     return () => document.removeEventListener('keydown', handleEscape)
-  }, [organizationDialog, resourceDialog, settingsConfig, showPersonality])
+  }, [organizationDialog, panelHost, settingsConfig, showPersonality])
 
   const isCodingMode = mode === 'coding' || codingState.active
+  const needsOnboarding = settingsConfig !== null && !settingsConfig.api_key && !settingsConfig.api_key_saved
   const submitComposer = (delegateReview = false) => {
     const text = composerText.trim()
     if (!text) return
@@ -334,6 +362,7 @@ export function App() {
             onClick={() => bridge.send({ type: 'list_tasks' })}
           >
             <ClipboardList size={iconSize} />
+            {taskCount > 0 ? <span className="badge">{taskCount}</span> : null}
           </button>
           <button
             type="button"
@@ -544,7 +573,15 @@ export function App() {
         </button>
       </footer>
 
-      {settingsConfig ? (
+      {needsOnboarding ? (
+        <StartupGate
+          config={settingsConfig!}
+          onSave={(config) => {
+            bridge.send({ type: 'save_settings', config })
+            setSettingsConfig(null)
+          }}
+        />
+      ) : settingsConfig ? (
         <SettingsDialog
           config={settingsConfig}
           onClose={() => setSettingsConfig(null)}
@@ -563,14 +600,23 @@ export function App() {
         />
       ) : null}
 
-      {resourceDialog ? (
-        <ResourceDialog
-          kind={resourceDialog.kind}
-          items={resourceDialog.items}
-          onClose={() => setResourceDialog(null)}
+      {panelHost ? (
+        <PanelHost
+          initialTab={panelHost.tab}
+          tasks={panelHost.tasks}
+          runbooks={panelHost.runbooks}
+          equipment={panelHost.equipment}
+          authEntries={authEntries}
+          compressEntries={compressEntries}
+          memoryEntries={memoryEntries}
+          chromeState={chromeState}
+          debugEntries={debugEntries}
+          onClose={() => setPanelHost(null)}
           onToggleEquipment={(id) => bridge.send({ type: 'toggle_equipment', id })}
           onCancelTask={(task_id) => bridge.send({ type: 'cancel_task', task_id })}
           onCompleteTask={(task_id) => bridge.send({ type: 'complete_task', task_id })}
+          onToggleMemory={(id, enabled) => bridge.send({ type: 'toggle_memory', id, enabled })}
+          onDeleteMemory={(id) => bridge.send({ type: 'delete_memory', id })}
         />
       ) : null}
 

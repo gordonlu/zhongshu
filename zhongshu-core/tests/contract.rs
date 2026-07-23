@@ -21,7 +21,7 @@ use zhongshu_core::agent::llm::{
     Role, StreamEvent, ToolCall,
 };
 use zhongshu_core::agent::{
-    run_agent, AgentBudget, AgentRuntime, LoopResult, RunOutcome, StopReason,
+    execute_agent_loop_with_messages, AgentBudget, AgentRuntime, LoopResult, RunOutcome, StopReason,
 };
 use zhongshu_core::tool::{Tool, ToolOutput, ToolRegistry};
 
@@ -174,12 +174,13 @@ async fn run_agent_with(
     cancel: CancellationToken,
 ) -> LoopResult {
     let mut runtime = AgentRuntime::new(provider, registry, "contract-test", budget);
-    run_agent(
+    execute_agent_loop_with_messages(
         &mut runtime,
         vec![Message::user("run contract test")],
         None,
         "contract-test",
         cancel,
+        zhongshu_core::runtime::ExecutionProfile::Interactive,
     )
     .await
     .unwrap()
@@ -256,12 +257,13 @@ async fn max_tool_calls_exhausted_returns_blocked() {
         },
     );
 
-    let result = run_agent(
+    let result = execute_agent_loop_with_messages(
         &mut runtime,
         vec![Message::user("run contract test")],
         None,
         "contract-test",
         CancellationToken::new(),
+        zhongshu_core::runtime::ExecutionProfile::Interactive,
     )
     .await
     .unwrap();
@@ -294,12 +296,13 @@ async fn max_steps_exhausted_returns_blocked() {
         },
     );
 
-    let result = run_agent(
+    let result = execute_agent_loop_with_messages(
         &mut runtime,
         vec![Message::user("run contract test")],
         None,
         "contract-test",
         CancellationToken::new(),
+        zhongshu_core::runtime::ExecutionProfile::Interactive,
     )
     .await
     .unwrap();
@@ -341,12 +344,13 @@ async fn cancel_during_run_returns_interrupted() {
     );
 
     let handle = tokio::spawn(async move {
-        run_agent(
+        execute_agent_loop_with_messages(
             &mut runtime,
             vec![Message::user("run contract test")],
             None,
             "contract-test",
             cancel_clone,
+            zhongshu_core::runtime::ExecutionProfile::Interactive,
         )
         .await
         .unwrap()
@@ -366,7 +370,7 @@ async fn cancel_during_run_returns_interrupted() {
 async fn crash_during_tool_detects_inflight_and_reports_unknown_effect() {
     use std::collections::HashMap;
     use std::sync::Arc;
-    use zhongshu_core::agent::run_agent;
+    use zhongshu_core::agent::execute_agent_loop_with_messages;
     use zhongshu_core::agent::AgentCallbacks;
     use zhongshu_core::core::checkpoint::{AgentCheckpoint, CheckpointStore};
     use zhongshu_core::core::ledger::RunLedger;
@@ -448,12 +452,13 @@ async fn crash_during_tool_detects_inflight_and_reports_unknown_effect() {
         run_id,
     });
 
-    let recovery_result = run_agent(
+    let recovery_result = execute_agent_loop_with_messages(
         &mut recovery_runtime,
         vec![Message::user("recovery test")],
         Some(callbacks.clone()),
         "crash-test",
         CancellationToken::new(),
+        zhongshu_core::runtime::ExecutionProfile::Interactive,
     )
     .await
     .unwrap();
@@ -490,12 +495,13 @@ async fn tool_error_observation_renders_error_text() {
         small_budget(),
     );
 
-    let result = run_agent(
+    let result = execute_agent_loop_with_messages(
         &mut runtime,
         vec![Message::user("run contract test")],
         None,
         "contract-test",
         CancellationToken::new(),
+        zhongshu_core::runtime::ExecutionProfile::Interactive,
     )
     .await
     .unwrap();
@@ -517,23 +523,25 @@ async fn two_consecutive_runs_produce_independent_results() {
         small_budget(),
     );
 
-    let r1 = run_agent(
+    let r1 = execute_agent_loop_with_messages(
         &mut runtime,
         vec![Message::user("first run")],
         None,
         "contract-test",
         CancellationToken::new(),
+        zhongshu_core::runtime::ExecutionProfile::Interactive,
     )
     .await
     .unwrap();
     assert_eq!(r1.outcome, RunOutcome::CompletedUnverified);
 
-    let r2 = run_agent(
+    let r2 = execute_agent_loop_with_messages(
         &mut runtime,
         vec![Message::user("second run")],
         None,
         "contract-test",
         CancellationToken::new(),
+        zhongshu_core::runtime::ExecutionProfile::Interactive,
     )
     .await
     .unwrap();
@@ -553,12 +561,13 @@ async fn pre_cancelled_token_returns_interrupted() {
         small_budget(),
     );
 
-    let result = run_agent(
+    let result = execute_agent_loop_with_messages(
         &mut runtime,
         vec![Message::user("should not run")],
         None,
         "contract-test",
         cancel,
+        zhongshu_core::runtime::ExecutionProfile::Interactive,
     )
     .await
     .unwrap();

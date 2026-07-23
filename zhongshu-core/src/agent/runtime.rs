@@ -3,7 +3,9 @@ use std::sync::Arc;
 use crate::agent::llm::LlmProvider;
 use crate::agent::loop_::AgentBudget;
 use crate::core::checkpoint::CheckpointStore;
+use crate::event::EventBus;
 use crate::harness::HarnessState;
+use crate::runtime::ExecutionProfile;
 use crate::tool::ToolRegistry;
 
 /// Long-lived execution context for an agent.
@@ -32,6 +34,10 @@ pub struct AgentRuntime {
     pub checkpoint_store: Option<CheckpointStore>,
     /// Optional ledger for reconciling in-flight tools after a crash.
     pub ledger: Option<crate::core::ledger::RunLedger>,
+    /// Event bus for publishing events to the UI layer.
+    pub event_bus: Option<EventBus>,
+    /// Execution profile controlling checkpoint/journal behavior.
+    pub profile: ExecutionProfile,
 }
 
 impl AgentRuntime {
@@ -51,6 +57,8 @@ impl AgentRuntime {
             idempotency_checker: None,
             checkpoint_store: None,
             ledger: None,
+            event_bus: None,
+            profile: ExecutionProfile::default(),
         }
     }
 
@@ -71,6 +79,8 @@ impl AgentRuntime {
             idempotency_checker: None,
             checkpoint_store: None,
             ledger: None,
+            event_bus: None,
+            profile: ExecutionProfile::default(),
         }
     }
 

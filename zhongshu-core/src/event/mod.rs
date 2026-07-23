@@ -50,6 +50,23 @@ pub enum AgentState {
     Done { success: bool },
 }
 
+impl From<crate::runtime::RunStatus> for AgentState {
+    fn from(s: crate::runtime::RunStatus) -> Self {
+        match s {
+            crate::runtime::RunStatus::Created => AgentState::Idle,
+            crate::runtime::RunStatus::Running | crate::runtime::RunStatus::Recovering => {
+                AgentState::Thinking
+            }
+            crate::runtime::RunStatus::WaitingApproval => AgentState::Executing,
+            crate::runtime::RunStatus::Paused => AgentState::Thinking,
+            crate::runtime::RunStatus::Completed => AgentState::Done { success: true },
+            crate::runtime::RunStatus::Failed
+            | crate::runtime::RunStatus::Cancelled
+            | crate::runtime::RunStatus::UnknownOutcome => AgentState::Done { success: false },
+        }
+    }
+}
+
 // ── Hierarchical Event (broadcast — allowed to drop) ────────────────
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -93,6 +110,7 @@ impl Event {
                 HarnessUiEvent::ContextIncluded { .. } => "context_included",
                 HarnessUiEvent::ContextPressure { .. } => "context_pressure",
                 HarnessUiEvent::ReplayAvailable { .. } => "replay_available",
+                HarnessUiEvent::ArchitectureAnalysis { .. } => "architecture_analysis",
             },
             Event::Organization(e) => match e {
                 OrganizationEvent::RoutingDecided { .. } => "organization_routing_decided",
@@ -204,6 +222,11 @@ pub enum OrganizationEvent {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum MemoryEvent {
     Compacted,
+    MemoryHit {
+        query: String,
+        count: usize,
+        entries: Vec<serde_json::Value>,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -407,6 +430,10 @@ pub enum HarnessUiEvent {
         success: bool,
         exit_code: Option<i32>,
         step: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_locations: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        suggestion: Option<String>,
     },
     RecoveryFeedback {
         rule_id: String,
@@ -416,6 +443,16 @@ pub enum HarnessUiEvent {
         from: String,
         to: String,
     },
+    ArchitectureAnalysis {
+        summary: String,
+        components: Vec<ArchitectureComponent>,
+    },
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ArchitectureComponent {
+    pub name: String,
+    pub description: String,
 }
 
 // ── SnapshotStore (ring buffer with sequence numbers) ───────────────

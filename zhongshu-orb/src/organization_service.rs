@@ -279,7 +279,7 @@ impl OrganizationController {
                 from: final_state,
                 to: AgentState::Idle,
             }));
-            run_controller.finish_run(stop_reason).await;
+            run_controller.finish_run(stop_reason, None).await;
             // Clean up the organization checkpoint on normal completion.
             if let Some(ref cs) = checkpoint_store {
                 if let Err(e) = cs.delete(&task_id) {
@@ -431,7 +431,7 @@ impl OrganizationController {
                 from: final_state,
                 to: AgentState::Idle,
             }));
-            run_controller.finish_run(stop_reason).await;
+            run_controller.finish_run(stop_reason, None).await;
             if let Some(ref cs) = checkpoint_store {
                 let _ = cs.delete(&task_id);
             }
@@ -473,7 +473,7 @@ impl OrganizationController {
         self.busy.store(false, Ordering::Release);
         let run_controller = self.run_controller.clone();
         tokio::spawn(async move {
-            run_controller.finish_run("cancelled").await;
+            run_controller.finish_run("cancelled", None).await;
         });
         self.event_bus
             .publish(Event::Agent(AgentEvent::StateChanged {

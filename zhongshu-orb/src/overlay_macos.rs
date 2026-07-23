@@ -543,6 +543,9 @@ mod tests {
             role: EntryRole::User,
             content: "hello".into(),
             tool_calls: vec![],
+            model: None,
+            duration_ms: None,
+            run_id: None,
         };
         handle.set_history(&[entry], false);
     }
@@ -554,6 +557,9 @@ mod tests {
             role: EntryRole::Assistant,
             content: "world".into(),
             tool_calls: vec![],
+            model: None,
+            duration_ms: None,
+            run_id: None,
         };
         handle.prepend_history(&[entry], true);
     }
@@ -566,6 +572,10 @@ mod tests {
             source: "test".into(),
             tool: "bash".into(),
             command: "echo hello".into(),
+            working_dir: None,
+            scope: None,
+            url: None,
+            diff: None,
         };
         handle.show_auth(&req);
     }

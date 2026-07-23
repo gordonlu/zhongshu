@@ -7,6 +7,8 @@ use uuid::Uuid;
 use crate::agent::intent::{intent_classify, InterruptionIntent};
 use crate::core::RunLedger;
 use crate::event::{Event, EventBus, ResponseEvent, RunEvent};
+use crate::runtime::cancellation::{CancelMode, CancelOutcome};
+use crate::runtime::RunStatus;
 use crate::tool::spec::SideEffect;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +53,7 @@ pub struct InterruptionCtx {
 
 #[derive(Debug, Clone)]
 pub enum InterruptionAction {
+    Stop,
     ContinueWithNote { note: String },
     PauseAndRespond { summary: String },
     CancelAndReplan { reason: String },
@@ -70,6 +73,9 @@ pub struct RunController {
     last_action: std::sync::Mutex<Option<InterruptionAction>>,
     interrupted: AtomicBool,
     ledger: RwLock<Option<RunLedger>>,
+    /// Canonical status projected from `state`.
+    /// Kept in sync via `set_state()` for migration; new code reads this.
+    canonical_status: RwLock<crate::runtime::RunStatus>,
 }
 
 impl RunController {
@@ -87,6 +93,7 @@ impl RunController {
             last_action: std::sync::Mutex::new(None),
             interrupted: AtomicBool::new(false),
             ledger: RwLock::new(None),
+            canonical_status: RwLock::new(crate::runtime::RunStatus::Created),
         }
     }
 
@@ -109,7 +116,7 @@ impl RunController {
     pub fn start_run(&self, goal: &str) -> Uuid {
         let run_id = Uuid::new_v4();
         *self.run_id.write().unwrap() = Some(run_id);
-        *self.state.write().unwrap() = RunState::Thinking;
+        self.set_state(RunState::Thinking);
         *self.original_goal.write().unwrap() = goal.to_string();
         self.interrupted.store(false, Ordering::SeqCst);
         self.partial_response.lock().unwrap().clear();
@@ -136,9 +143,9 @@ impl RunController {
     /// the agent loop to load its durable checkpoint and reconcile tool state.
     pub fn restore_interrupted_run(&self, run_id: Uuid, goal: &str) {
         *self.run_id.write().unwrap() = Some(run_id);
-        *self.state.write().unwrap() = RunState::Interrupted {
+        self.set_state(RunState::Interrupted {
             reason: "process_restart_recovery".into(),
-        };
+        });
         *self.original_goal.write().unwrap() = goal.to_string();
         self.interrupted.store(true, Ordering::SeqCst);
         *self.cancel_token.lock().unwrap() = CancellationToken::new();
@@ -168,7 +175,21 @@ impl RunController {
     }
 
     pub fn set_state(&self, state: RunState) {
+        *self.canonical_status.write().unwrap() =
+            crate::runtime::RunStatus::from_run_state(&state);
         *self.state.write().unwrap() = state;
+    }
+
+    /// Canonical run status (projected from RunState).
+    /// New code should prefer this over `state()`.
+    pub fn canonical_status(&self) -> crate::runtime::RunStatus {
+        *self.canonical_status.read().unwrap()
+    }
+
+    /// Derive UI-facing state from canonical status.
+    /// This is the single source of truth for AgentState transitions.
+    pub fn agent_state(&self) -> crate::event::AgentState {
+        crate::event::AgentState::from(self.canonical_status())
     }
 
     pub fn cancel_token(&self) -> CancellationToken {
@@ -231,12 +252,13 @@ impl RunController {
         let tool = self.current_tool();
         let goal = self.original_goal.read().unwrap().clone();
         let state_str = format!("{:?}", self.state.read().unwrap());
+        let original_state = self.state.read().unwrap().clone(); // snapshot before overwrite
 
         // Mark interrupted
         self.interrupted.store(true, Ordering::SeqCst);
-        *self.state.write().unwrap() = RunState::Interrupted {
+        self.set_state(RunState::Interrupted {
             reason: "user_interjection".into(),
-        };
+        });
 
         // Cancel current LLM request (best-effort)
         self.cancel_token.lock().unwrap().cancel();
@@ -264,9 +286,8 @@ impl RunController {
         // Classify intent
         let intent = intent_classify(user_message);
 
-        // Determine action
-        let state_snapshot = self.state.read().unwrap().clone();
-        let action = self.determine_action(intent, &state_snapshot, tool.as_ref());
+        // Determine action using original state, not the overwritten Interrupted
+        let action = self.determine_action(intent, &original_state, tool.as_ref());
         *self.last_action.lock().unwrap() = Some(action.clone());
         action
     }
@@ -278,9 +299,7 @@ impl RunController {
         _tool: Option<&ToolCallInfo>,
     ) -> InterruptionAction {
         match intent {
-            InterruptionIntent::Stop => InterruptionAction::CancelAndReplan {
-                reason: "用户要求停止".into(),
-            },
+            InterruptionIntent::Stop => InterruptionAction::Stop,
             InterruptionIntent::Redirect | InterruptionIntent::Constraint => {
                 InterruptionAction::CancelAndReplan {
                     reason: match intent {
@@ -383,7 +402,7 @@ impl RunController {
         let run_id = self.run_id.read().unwrap().unwrap_or_else(Uuid::new_v4);
         *self.cancel_token.lock().unwrap() = CancellationToken::new();
         self.interrupted.store(false, Ordering::SeqCst);
-        *self.state.write().unwrap() = RunState::Resuming;
+        self.set_state(RunState::Resuming);
         self.event_bus.publish(Event::Run(RunEvent::Resuming {
             run_id: run_id.to_string(),
         }));
@@ -393,10 +412,10 @@ impl RunController {
         run_id
     }
 
-    pub async fn finish_run(&self, stop_reason: &str) {
-        *self.state.write().unwrap() = RunState::Finished {
+    pub async fn finish_run(&self, stop_reason: &str, outcome: Option<&str>) {
+        self.set_state(RunState::Finished {
             stop_reason: stop_reason.into(),
-        };
+        });
         self.interrupted.store(false, Ordering::SeqCst);
         if let Some(rid) = *self.run_id.read().unwrap() {
             self.event_bus.publish(Event::Run(RunEvent::Finished {
@@ -404,7 +423,7 @@ impl RunController {
                 stop_reason: stop_reason.into(),
             }));
             if let Some(ref ledger) = *self.ledger.read().unwrap() {
-                let _ = ledger.record_run_finished(&rid.to_string(), stop_reason, "");
+                let _ = ledger.record_run_finished(&rid.to_string(), stop_reason, outcome.unwrap_or(""));
             }
         }
     }
@@ -476,6 +495,45 @@ impl RunController {
         ledger.is_tool_completed(&rid, &key).unwrap_or(false)
     }
 
+    /// Unified cancel entry point.
+    ///
+    /// - `Graceful`: cancels the CancellationToken and transitions state.
+    /// - `ForceAfterTimeout`: same as Graceful; the caller is responsible
+    ///   for the force-abort fallback (e.g. JoinHandle::abort()).
+    ///
+    /// Returns `CancelOutcome::NoActiveRun` if there is no run to cancel.
+    pub fn request_cancel(&self, mode: CancelMode) -> CancelOutcome {
+        let rid = match *self.run_id.read().unwrap() {
+            Some(rid) => rid,
+            None => return CancelOutcome::NoActiveRun,
+        };
+        let rid_str = rid.to_string();
+
+        // Stop the CancellationToken so the current Attempt sees it.
+        self.cancel_token.lock().unwrap().cancel();
+
+        // Canonical status.
+        *self.canonical_status.write().unwrap() = RunStatus::Cancelled;
+        *self.state.write().unwrap() = RunState::Interrupted {
+            reason: match mode {
+                CancelMode::Graceful => "user_cancelled".into(),
+                CancelMode::ForceAfterTimeout { .. } => "timeout".into(),
+            },
+        };
+        self.interrupted.store(true, Ordering::SeqCst);
+
+        self.event_bus.publish(Event::Run(RunEvent::Interrupted {
+            run_id: rid_str.clone(),
+            reason: "user_cancelled".into(),
+        }));
+
+        if let Some(ref ledger) = *self.ledger.read().unwrap() {
+            let _ = ledger.record_run_interrupted(&rid_str, "user_cancelled");
+        }
+
+        CancelOutcome::Accepted
+    }
+
     pub fn record_approval(&self, tool: &str, decision: &str) {
         if let Some(rid) = *self.run_id.read().unwrap() {
             if let Some(ref ledger) = *self.ledger.read().unwrap() {
@@ -534,7 +592,7 @@ mod tests {
 
         assert!(ctrl.is_interrupted());
         assert!(matches!(ctrl.state(), RunState::Interrupted { .. }));
-        assert!(matches!(action, InterruptionAction::CancelAndReplan { .. }));
+        assert!(matches!(action, InterruptionAction::Stop));
 
         // Interruption context should contain partial response
         let ctx_set = ctrl.interruption_ctx.lock().unwrap().is_some();
@@ -552,12 +610,12 @@ mod tests {
     }
 
     #[test]
-    fn test_intent_stop_maps_to_cancel_and_replan() {
+    fn test_intent_stop_maps_to_stop_action() {
         let (ctrl, _) = make_controller();
         ctrl.start_run("test");
 
         let action = ctrl.interrupt("停");
-        assert!(matches!(action, InterruptionAction::CancelAndReplan { .. }));
+        assert!(matches!(action, InterruptionAction::Stop));
     }
 
     #[test]

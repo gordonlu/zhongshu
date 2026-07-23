@@ -4,6 +4,7 @@ pub mod auto_delegation;
 pub mod contract;
 pub mod delegation;
 pub mod dispatcher;
+pub mod entry;
 pub mod execution_graph;
 pub mod intent;
 pub mod llm;
@@ -31,9 +32,9 @@ pub use execution_graph::{
     ExecutionScheduleReport, ExecutionTransition, NodeExecutionOutcome, NodeRequirements,
     EXECUTION_GRAPH_CHECKPOINT_VERSION,
 };
+pub use entry::{execute_agent_loop, execute_agent_loop_with_messages};
 pub use loop_::{
-    run_agent, run_agent_with_context, run_agent_with_verification_policy, AgentBudget,
-    AgentCallbacks, LoopResult, RunOutcome, StopReason,
+    AgentBudget, AgentCallbacks, LoopResult, RunOutcome, StopReason, ToolCompletionStatus,
 };
 pub use orchestrator::{
     AppliedWorkerPatchPipeline, AssignmentFileOverlap, Conflict, EmployeeWorkReport,

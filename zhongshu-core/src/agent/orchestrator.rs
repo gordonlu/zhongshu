@@ -3210,6 +3210,7 @@ impl Orchestrator {
                 task,
                 None,
                 cancel_token,
+                crate::runtime::ExecutionProfile::Worker,
             )
             .await;
         };
@@ -3284,7 +3285,7 @@ impl Orchestrator {
         // short-circuit does not weaken acceptance.
         profile.verification_policy = crate::agent::profile::VerificationPolicy::NotRequired;
         let result =
-            Worker::execute_with_cancel(&runtime, &profile, task, None, cancel_token).await;
+            Worker::execute_with_cancel(&runtime, &profile, task, None, cancel_token, crate::runtime::ExecutionProfile::Worker).await;
         if let Some(sandbox) = sandbox {
             if let Err(cleanup_error) = sandbox.cleanup() {
                 return match result {
@@ -4208,6 +4209,7 @@ impl Orchestrator {
         Ok(Report {
             task_id: "parent-review".into(),
             worker: "orchestrator".into(),
+            run_id: "parent-review".into(),
             summary: if content.chars().count() > 200 {
                 format!("{}...", content.chars().take(200).collect::<String>())
             } else {
@@ -5616,6 +5618,7 @@ pub mod tests {
         let report_a = Report {
             task_id: "t1".into(),
             worker: "w1".into(),
+            run_id: "test".into(),
             summary: "".into(),
             findings: "".into(),
             confidence: 0.5,
@@ -5631,6 +5634,7 @@ pub mod tests {
         let report_b = Report {
             task_id: "t2".into(),
             worker: "w2".into(),
+            run_id: "test".into(),
             summary: "".into(),
             findings: "".into(),
             confidence: 0.5,
@@ -5654,6 +5658,7 @@ pub mod tests {
         let report_a = Report {
             task_id: "t1".into(),
             worker: "w1".into(),
+            run_id: "test".into(),
             summary: "".into(),
             findings: "".into(),
             confidence: 0.5,
@@ -5669,6 +5674,7 @@ pub mod tests {
         let report_b = Report {
             task_id: "t2".into(),
             worker: "w2".into(),
+            run_id: "test".into(),
             summary: "".into(),
             findings: "".into(),
             confidence: 0.5,
@@ -5699,6 +5705,7 @@ pub mod tests {
         let report = Report {
             task_id: "t1".into(),
             worker: "w1".into(),
+            run_id: "test".into(),
             summary: "".into(),
             findings: "".into(),
             confidence: 0.5,
@@ -5729,6 +5736,7 @@ pub mod tests {
         let report = Report {
             task_id: "t1".into(),
             worker: "w1".into(),
+            run_id: "test".into(),
             summary: "".into(),
             findings: "".into(),
             confidence: 0.5,
@@ -5761,6 +5769,7 @@ pub mod tests {
         let report = Report {
             task_id: "t1".into(),
             worker: "w1".into(),
+            run_id: "test".into(),
             summary: "".into(),
             findings: "".into(),
             confidence: 0.5,
@@ -5785,6 +5794,7 @@ pub mod tests {
         let report = Report {
             task_id: "t1".into(),
             worker: "unknown".into(),
+            run_id: "test".into(),
             summary: "".into(),
             findings: "".into(),
             confidence: 0.5,
@@ -7376,10 +7386,9 @@ pub mod tests {
         };
 
         let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir_all(temp.path().join("work")).unwrap();
-        std::fs::write(temp.path().join("work/copy.txt"), "old\n").unwrap();
+        std::fs::write(temp.path().join("copy.txt"), "old\n").unwrap();
         std::fs::write(
-            temp.path().join("work/test_copy.py"),
+            temp.path().join("test_copy.py"),
             "import pathlib, unittest\nclass CopyTest(unittest.TestCase):\n    def test_copy(self):\n        self.assertEqual(pathlib.Path(__file__).with_name('copy.txt').read_text(), 'new\\n')\n",
         )
         .unwrap();
@@ -7413,7 +7422,7 @@ pub mod tests {
         );
         let scopes = vec![OrganizationFileScope {
             employee: "writer".into(),
-            owned_files: vec![PathBuf::from("work")],
+            owned_files: vec![PathBuf::from("copy.txt")],
         }];
         let coordinator = MockFileClaimCoordinator::new();
         let database = crate::core::Database::new(temp.path().join("durable-mutation.db"));
@@ -7442,7 +7451,7 @@ pub mod tests {
         );
         assert_eq!(calls.load(Ordering::SeqCst), 3);
         assert_eq!(
-            std::fs::read_to_string(temp.path().join("work/copy.txt")).unwrap(),
+            std::fs::read_to_string(temp.path().join("copy.txt")).unwrap(),
             "new\n"
         );
         assert!(report
@@ -8338,7 +8347,7 @@ pub mod tests {
             .await
             .expect("scripted recovery pipeline");
 
-        assert_eq!(report.analyst.outcome, crate::agent::RunOutcome::Failed);
+        assert_eq!(report.analyst.outcome, crate::agent::RunOutcome::Blocked);
         assert_eq!(
             report.verifier.outcome,
             crate::agent::RunOutcome::CompletedVerified
@@ -8348,7 +8357,7 @@ pub mod tests {
         assert!(report
             .acceptance_reasons
             .iter()
-            .any(|reason| reason.contains("analysis worker ended with failed")));
+            .any(|reason| reason.contains("analysis worker ended with blocked")));
     }
 
     #[tokio::test]

@@ -142,6 +142,7 @@ mod tests {
         Report {
             task_id: "t1".into(),
             worker: "test".into(),
+            run_id: "test-run".into(),
             summary: "test".into(),
             findings: "test".into(),
             success: true,

@@ -183,8 +183,20 @@ export function CodingWorkbench({ state, onReconcileDag, onAbandonDag }: CodingW
             {state.verifications.length === 0 ? <p className="muted">No checks.</p> : null}
             {visibleVerifications.map((verification, index) => (
               <div key={`${verification.command}-${index}`} className={verification.success ? 'check-pass' : 'check-fail'}>
-                <span>{verification.success ? 'pass' : 'fail'}</span>
-                <code>{verification.command}</code>
+                <div className="check-header">
+                  <span>{verification.success ? 'pass' : 'fail'}</span>
+                  <code>{verification.command}</code>
+                </div>
+                {verification.fileLocations && verification.fileLocations.length > 0 ? (
+                  <div className="check-file-locations">
+                    {verification.fileLocations.map((file) => (
+                      <code key={file} className="check-file">{file}</code>
+                    ))}
+                  </div>
+                ) : null}
+                {verification.suggestion ? (
+                  <div className="check-suggestion">{verification.suggestion}</div>
+                ) : null}
               </div>
             ))}
           </section>

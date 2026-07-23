@@ -151,11 +151,14 @@ impl DelegationController {
                 to: AgentState::Idle,
             }));
             run_controller
-                .finish_run(match final_state {
-                    AgentState::Done { success: true } => "completed_verified",
-                    AgentState::Submitted => "completed_unverified",
-                    _ => "failed",
-                })
+                .finish_run(
+                    match final_state {
+                        AgentState::Done { success: true } => "completed_verified",
+                        AgentState::Submitted => "completed_unverified",
+                        _ => "failed",
+                    },
+                    None,
+                )
                 .await;
             current_task.lock().unwrap().take();
             current_session.lock().unwrap().take();
@@ -186,7 +189,7 @@ impl DelegationController {
         self.busy.store(false, Ordering::Release);
         let run_controller = self.run_controller.clone();
         tokio::spawn(async move {
-            run_controller.finish_run("cancelled").await;
+            run_controller.finish_run("cancelled", None).await;
         });
         self.event_bus
             .publish(Event::Agent(AgentEvent::StateChanged {
@@ -279,6 +282,7 @@ mod tests {
         Report {
             task_id: worker.into(),
             worker: worker.into(),
+            run_id: "unknown".into(),
             summary: summary.into(),
             findings: summary.into(),
             success: outcome == RunOutcome::CompletedVerified,

@@ -7,12 +7,13 @@ use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::window::WindowId;
 
+use zhongshu_core::agent::intent::{intent_classify, InterruptionIntent};
 use zhongshu_core::agent::run::RunController;
 use zhongshu_core::agent::{AgentRuntime, ModelRouter};
 use zhongshu_core::authority;
 use zhongshu_core::event::{
-    AgentEvent, AgentState, Event, EventBus, EventRx, HarnessUiEvent, MessageId, ResponseEvent,
-    ResponseRole, ResponseRx, ResponseTx, RunEvent, TaskEvent, ToolEvent,
+    AgentEvent, AgentState, Event, EventBus, EventRx, HarnessUiEvent, MemoryEvent, MessageId,
+    ResponseEvent, ResponseRole, ResponseRx, ResponseTx, RunEvent, TaskEvent, ToolEvent,
 };
 use zhongshu_core::integration::DeeplosslessProxy;
 use zhongshu_message_core::streaming::ControlTokenFilter;
@@ -32,6 +33,7 @@ use crate::overlay_contract::{
 };
 use crate::overlay_host::OverlayHandleExt;
 use zhongshu_core::equipment::{EquipmentObserver, EquipmentRegistry};
+use zhongshu_core::tool::browser_automation;
 use zhongshu_core::tool::ToolRegistry;
 
 const MIN_STREAMING_TIMEOUT_SECS: u64 = 120;
@@ -92,10 +94,16 @@ pub struct ZhongshuApp {
     /// replay events the overlay hasn't seen.
     pub overlay_event_cursor: u64,
     pub auth_watch: watch::Receiver<Option<zhongshu_core::authority::PendingRequest>>,
+    /// Cached pending auth request for overlay reconnection.
+    pub pending_auth_request: Option<zhongshu_core::authority::PendingRequest>,
     pub run_controller: Arc<RunController>,
     pub active_run_id: Option<Uuid>,
     pub organization_graph_versions: Vec<(String, u64)>,
     pub last_organization_graph_poll: Instant,
+    pub last_chrome_state_poll: Instant,
+    pub panel_debug_entries: Vec<crate::overlay_contract::DebugEntryData>,
+    pub panel_compress_entries: Vec<crate::overlay_contract::CompressEntryData>,
+    pub panel_auth_entries: Vec<crate::overlay_contract::AuthEntryData>,
 }
 
 impl ZhongshuApp {
@@ -161,10 +169,15 @@ impl ZhongshuApp {
             overlay_zoomed: false,
             overlay_event_cursor: 0,
             auth_watch,
+            pending_auth_request: None,
             run_controller,
             active_run_id: None,
             organization_graph_versions: Vec::new(),
             last_organization_graph_poll: Instant::now(),
+            last_chrome_state_poll: Instant::now(),
+            panel_debug_entries: Vec::new(),
+            panel_compress_entries: Vec::new(),
+            panel_auth_entries: Vec::new(),
         })
     }
 
@@ -173,11 +186,54 @@ impl ZhongshuApp {
     fn drain(&mut self) {
         let activity = self.reduce_events() | self.reduce_responses();
         self.poll_pending_auth();
+        self.flush_panel_events();
+        self.poll_chrome_state();
         self.poll_overlay_actions();
         self.poll_organization_graphs();
         if activity {
             self.last_activity = Instant::now();
         }
+    }
+
+    fn flush_panel_events(&mut self) {
+        let Some(ref ov) = self.overlay else {
+            self.panel_debug_entries.clear();
+            self.panel_compress_entries.clear();
+            return;
+        };
+        if !self.panel_debug_entries.is_empty() {
+            let entries = std::mem::take(&mut self.panel_debug_entries);
+            ov.send(&serde_json::to_value(OverlayToUiEvent::DebugEntries { entries }).unwrap_or_default());
+        }
+        if !self.panel_compress_entries.is_empty() {
+            let entries = std::mem::take(&mut self.panel_compress_entries);
+            ov.send(&serde_json::to_value(OverlayToUiEvent::CompressEntries { entries }).unwrap_or_default());
+        }
+        if !self.panel_auth_entries.is_empty() {
+            let entries = std::mem::take(&mut self.panel_auth_entries);
+            ov.send(&serde_json::to_value(OverlayToUiEvent::AuthEntries { entries }).unwrap_or_default());
+        }
+    }
+
+    fn poll_chrome_state(&mut self) {
+        let Some(ref ov) = self.overlay else {
+            return;
+        };
+        if self.last_chrome_state_poll.elapsed() < Duration::from_millis(2000) {
+            return;
+        }
+        self.last_chrome_state_poll = Instant::now();
+        let snap = self.runtime.block_on(browser_automation::current_chrome_snapshot());
+        let state = crate::overlay_contract::ChromeStateData {
+            connected: snap.connected,
+            url: snap.current_url,
+            recent_actions: snap.recent_actions,
+            screenshot: None,
+            console_errors: snap.console_error_count,
+            network_requests: snap.network_request_count,
+            busy: snap.busy,
+        };
+        ov.send(&serde_json::to_value(OverlayToUiEvent::ChromeState { state }).unwrap_or_default());
     }
 
     fn poll_organization_graphs(&mut self) {
@@ -307,16 +363,51 @@ impl ZhongshuApp {
             }
             ov.send(&serde_json::json!({"type": "user_message", "content": text}));
             self.observer.lock().unwrap().record_user_message(&text);
+
+            // Classify the user's intent for interrupt/supplement handling.
+            let intent = intent_classify(&text);
+
+            // Stop words → immediate cancel.
+            if matches!(intent, InterruptionIntent::Stop) {
+                self.controller.cancel();
+                ov.send(&serde_json::json!({"type": "stop"}));
+                return;
+            }
+
+            // New message while pending auth → cancel the auth request.
+            if let Some(pending) = self.pending_auth_request.take() {
+                authority::deny_pending(&pending.id);
+                self.pending_auth_notified = false;
+                ov.toast(&format!("已取消对 {} 的授权请求", pending.tool));
+            }
+
+            // Delegate/org busy → unconditional toast.
             if self.delegation.is_busy()
                 || self.organization.is_busy()
                 || self.auto_delegation.is_busy()
             {
                 ov.toast("员工协作正在运行，请先停止或等待汇报。");
-            } else if self.config.agent.auto_multi_agent && !self.controller.is_idle() {
-                ov.toast("主 AI 正在运行，自动多 Agent 路由未启动。");
-            } else if self.config.agent.auto_multi_agent {
-                if !self.auto_delegation.submit(text) {
+                return;
+            }
+
+            if self.config.agent.auto_multi_agent {
+                if !self.controller.is_idle() {
+                    ov.toast("主 AI 正在运行，自动多 Agent 路由未启动。");
+                } else if !self.auto_delegation.submit(text) {
                     ov.toast("自动多 Agent 路由已经在运行。");
+                }
+                return;
+            }
+
+            // Main agent path: handle busy vs idle.
+            if !self.controller.is_idle() {
+                if matches!(intent, InterruptionIntent::Other) {
+                    // Supplement while agent is busy — queue without interrupting.
+                    self.inbox.push(text);
+                    ov.toast("已记录补充信息，将在当前回复后处理。");
+                } else {
+                    // Interrupt intent (Redirect, Constraint, etc.) → normal interrupt.
+                    self.inbox.submit(text);
                 }
             } else {
                 self.inbox.submit(text);
@@ -327,12 +418,36 @@ impl ZhongshuApp {
                 self.run_controller.record_approval(&req.tool, "approved");
             }
             authority::approve_pending(&rid);
+            self.panel_auth_entries
+                .push(crate::overlay_contract::AuthEntryData {
+                    id: rid.clone(),
+                    tool: String::new(),
+                    command: String::new(),
+                    source: String::new(),
+                    approved: true,
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0),
+                });
         }
         if let Some(rid) = ov.take_deny() {
             if let Some(req) = authority::get_pending(&rid) {
                 self.run_controller.record_approval(&req.tool, "denied");
             }
             authority::deny_pending(&rid);
+            self.panel_auth_entries
+                .push(crate::overlay_contract::AuthEntryData {
+                    id: rid.clone(),
+                    tool: String::new(),
+                    command: String::new(),
+                    source: String::new(),
+                    approved: false,
+                    timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as i64)
+                        .unwrap_or(0),
+                });
         }
         if let Some(p) = ov.take_personality() {
             let mut cfg = crate::config::load();
@@ -549,15 +664,8 @@ impl ZhongshuApp {
                 ov.send(&serde_json::json!({"type": "stop"}));
                 return;
             }
-            use zhongshu_core::agent::run::RunState;
-            if matches!(self.run_controller.state(), RunState::Interrupted { .. }) {
-                // Already interrupted — fully cancel
-                self.controller.cancel();
-            } else {
-                // Interrupt current run
-                self.run_controller.interrupt("stop");
-                ov.send(&serde_json::json!({"type": "stop"}));
-            }
+            self.controller.cancel();
+            ov.send(&serde_json::json!({"type": "stop"}));
         }
         if ov.take_toggle_zoom() {
             self.overlay_zoomed = !self.overlay_zoomed;
@@ -623,6 +731,10 @@ impl ZhongshuApp {
                         },
                         content: content.clone(),
                         tool_calls: Vec::new(),
+                        model: None,
+                        duration_ms: None,
+                        run_id: None,
+                        source_type: None,
                     })
                     .collect();
                 if !entries.is_empty() {
@@ -661,6 +773,34 @@ impl ZhongshuApp {
             }
             refresh = true;
         }
+        if ov.take_list_memories() {
+            let entries = load_memory_entries(&crate::config::config_dir().join("agent.json"));
+            ov.send(&serde_json::to_value(OverlayToUiEvent::MemoryEntries { entries }).unwrap_or_default());
+        }
+        if let Some(id) = ov.take_delete_memory() {
+            if let Some(entries) = try_delete_memory(&crate::config::config_dir().join("agent.json"), &id) {
+                ov.send(&serde_json::to_value(OverlayToUiEvent::MemoryEntries { entries }).unwrap_or_default());
+                ov.toast("记忆已删除");
+            } else {
+                ov.toast(&format!("删除失败：未找到记忆 {id}"));
+            }
+        }
+        if let Some((id, enabled)) = ov.take_toggle_memory() {
+            if let Some(entries) = try_toggle_memory(&crate::config::config_dir().join("agent.json"), &id, enabled) {
+                ov.send(&serde_json::to_value(OverlayToUiEvent::MemoryEntries { entries }).unwrap_or_default());
+            } else {
+                ov.toast(&format!("切换失败：未找到记忆 {id}"));
+            }
+        }
+        if ov.take_clear_browser_data() {
+            ov.toast("浏览器数据清除功能尚未接入后端");
+        }
+        if ov.take_open_browser_profile() {
+            ov.toast("打开浏览器目录功能尚未接入后端");
+        }
+        if ov.take_cancel_browser_action() {
+            ov.toast("取消浏览器操作功能尚未接入后端");
+        }
         if refresh {
             let tasks = match self.task_repo.list_open() {
                 Ok(t) => t,
@@ -681,29 +821,47 @@ impl ZhongshuApp {
         if self.auth_watch.has_changed().unwrap_or(false) {
             let req = self.auth_watch.borrow_and_update().clone();
             if let Some(req) = req {
+                let is_new_auth = self.pending_auth_request.is_none();
+                self.pending_auth_request = Some(req.clone());
+                if is_new_auth {
+                    self.panel_auth_entries
+                        .push(crate::overlay_contract::AuthEntryData {
+                            id: req.id.clone(),
+                            tool: req.tool.clone(),
+                            command: req.command.clone(),
+                            source: req.source.clone(),
+                            approved: false,
+                            timestamp: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as i64)
+                                .unwrap_or(0),
+                        });
+                }
                 if !self.pending_auth_notified {
-                    self.pending_auth_notified = true;
-                    let title = if req.source.is_empty() {
-                        "需要授权".into()
-                    } else {
-                        format!("需要授权 · {}", req.source)
-                    };
-                    let _ = zhongshu_core::desktop::notification::show_urgent(
-                        &title,
-                        &format!("{} - {}", req.tool, req.command),
-                    );
                     let request = AuthRequest {
                         request_id: req.id.clone(),
                         tool: req.tool.clone(),
                         source: req.source.clone(),
                         command: req.command.clone(),
+                        working_dir: None,
+                        scope: None,
+                        url: None,
+                        diff: None,
                     };
                     if let Some(ref ov) = self.overlay {
                         ov.show_auth(&request);
                     }
                 }
             } else {
+                if self.pending_auth_notified {
+                    // Auth resolved — clear the overlay's auth bar.
+                    // The frontend's "clear" handler nulls authRequest state.
+                    if let Some(ref ov) = self.overlay {
+                        ov.send(&serde_json::json!({"type": "clear"}));
+                    }
+                }
                 self.pending_auth_notified = false;
+                self.pending_auth_request = None;
             }
         }
     }
@@ -767,6 +925,20 @@ impl ZhongshuApp {
                             if let Some(ref ov) = self.overlay {
                                 ov.send(&serde_json::json!({"type":"tool_call","name":name}));
                             }
+                            self.panel_debug_entries
+                                .push(crate::overlay_contract::DebugEntryData {
+                                    id: format!("dbg-{}-{}", name, std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_millis())
+                                        .unwrap_or(0)),
+                                    entry_type: "tool_call".into(),
+                                    timestamp: std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_millis() as i64)
+                                        .unwrap_or(0),
+                                    summary: format!("工具调用: {name}"),
+                                    details: None,
+                                });
                         }
                         Event::Tool(ToolEvent::Completed { name, success, .. }) => {
                             if let Some(ref ov) = self.overlay {
@@ -779,6 +951,71 @@ impl ZhongshuApp {
                                     "工具完成: {name} {}",
                                     if success { "✓" } else { "✗" }
                                 ));
+                            }
+                            self.panel_debug_entries
+                                .push(crate::overlay_contract::DebugEntryData {
+                                    id: format!("dbg-{}-{}", name, std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_millis())
+                                        .unwrap_or(0)),
+                                    entry_type: "tool_result".into(),
+                                    timestamp: std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_millis() as i64)
+                                        .unwrap_or(0),
+                                    summary: format!("工具结果: {name} {}", if success { "✓" } else { "✗" }),
+                                    details: None,
+                                });
+                        }
+                        Event::Memory(MemoryEvent::Compacted) => {
+                            self.panel_compress_entries
+                                .push(crate::overlay_contract::CompressEntryData {
+                                    id: format!("compress-{}", std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_millis())
+                                        .unwrap_or(0)),
+                                    timestamp: std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_millis() as i64)
+                                        .unwrap_or(0),
+                                    message_count: 0,
+                                    token_before: 0,
+                                    token_after: 0,
+                                    summary: "上下文已压缩".into(),
+                                });
+                        }
+                        Event::Memory(MemoryEvent::MemoryHit {
+                            query: _,
+                            count,
+                            entries,
+                        }) => {
+                            if let Some(ref ov) = self.overlay {
+                                let hit_entries: Vec<crate::overlay_contract::MemoryHitEntry> =
+                                    entries
+                                        .iter()
+                                        .map(|v| {
+                                            serde_json::from_value(v.clone()).unwrap_or(
+                                                crate::overlay_contract::MemoryHitEntry {
+                                                    content: String::new(),
+                                                    source: String::new(),
+                                                },
+                                            )
+                                        })
+                                        .collect();
+                                send_coding_event(
+                                    ov,
+                                    CodingUiEvent::MemoryHit {
+                                        count,
+                                        entries: hit_entries.clone(),
+                                    },
+                                );
+                                ov.send(
+                                    &serde_json::to_value(OverlayToUiEvent::MemoryHit {
+                                        count,
+                                        entries: hit_entries,
+                                    })
+                                    .unwrap_or_default(),
+                                );
                             }
                         }
                         Event::Task(TaskEvent::Triggered { title, .. }) => {
@@ -795,10 +1032,26 @@ impl ZhongshuApp {
                                 );
                             }
                         }
-                        Event::Task(TaskEvent::Completed { title, .. }) => {
+                        Event::Task(TaskEvent::Completed {
+                            task_id,
+                            title,
+                            output,
+                        }) => {
                             if self.config.agent.desktop_notification {
                                 let _ =
                                     zhongshu_core::desktop::notification::show("任务完成", &title);
+                            }
+                            if let Some(ref ov) = self.overlay {
+                                ov.send(
+                                    &serde_json::to_value(OverlayToUiEvent::TaskArtifact {
+                                        task_id: task_id.clone(),
+                                        artifact: serde_json::json!({
+                                            "title": title,
+                                            "output": output.chars().take(500).collect::<String>(),
+                                        }),
+                                    })
+                                    .unwrap_or_default(),
+                                );
                             }
                         }
                         Event::Task(TaskEvent::Failed { title, error, .. }) => {
@@ -927,10 +1180,20 @@ impl ZhongshuApp {
                                         send_coding_event(
                                             ov,
                                             CodingUiEvent::WorkerConflict {
-                                                session_id,
-                                                worker,
-                                                task_id,
-                                                reason,
+                                                session_id: session_id.clone(),
+                                                worker: worker.clone(),
+                                                task_id: task_id.clone(),
+                                                reason: reason.clone(),
+                                            },
+                                        );
+                                        send_coding_event(
+                                            ov,
+                                            CodingUiEvent::ConflictDetected {
+                                                session_id: session_id.clone(),
+                                                path: String::new(),
+                                                worker_a: worker.clone(),
+                                                worker_b: String::new(),
+                                                reason: reason.clone(),
                                             },
                                         );
                                     }
@@ -1011,6 +1274,8 @@ impl ZhongshuApp {
                                         success,
                                         exit_code,
                                         step,
+                                        file_locations,
+                                        suggestion,
                                     } => {
                                         send_coding_event(
                                             ov,
@@ -1018,6 +1283,8 @@ impl ZhongshuApp {
                                                 command: command.clone(),
                                                 success,
                                                 exit_code,
+                                                file_locations: file_locations.clone(),
+                                                suggestion: suggestion.clone(),
                                             },
                                         );
                                         ov.send(&serde_json::json!({
@@ -1048,6 +1315,29 @@ impl ZhongshuApp {
                                             "from": from,
                                             "to": to,
                                         }));
+                                    }
+                                    HarnessUiEvent::ArchitectureAnalysis {
+                                        summary,
+                                        components,
+                                    } => {
+                                        let arch_components: Vec<
+                                            crate::overlay_contract::ArchComponent,
+                                        > = components
+                                            .iter()
+                                            .map(|c| {
+                                                crate::overlay_contract::ArchComponent {
+                                                    name: c.name.clone(),
+                                                    description: c.description.clone(),
+                                                }
+                                            })
+                                            .collect();
+                                        send_coding_event(
+                                            ov,
+                                            CodingUiEvent::ArchitectureAnalysis {
+                                                summary: summary.clone(),
+                                                components: arch_components,
+                                            },
+                                        );
                                     }
                                 }
                             }
@@ -1222,6 +1512,10 @@ impl ZhongshuApp {
                 },
                 content: content.clone(),
                 tool_calls: Vec::new(),
+                model: None,
+                duration_ms: None,
+                run_id: None,
+                source_type: None,
             })
             .collect();
         if !entries.is_empty() {
@@ -1266,6 +1560,21 @@ impl ZhongshuApp {
                 }})();"#
             ));
         }
+        // Resend pending auth request if one exists.
+        if let Some(ref pending) = self.pending_auth_request {
+            let request = AuthRequest {
+                request_id: pending.id.clone(),
+                tool: pending.tool.clone(),
+                source: pending.source.clone(),
+                command: pending.command.clone(),
+                working_dir: None,
+                scope: None,
+                url: None,
+                diff: None,
+            };
+            ov.show_auth(&request);
+        }
+
         self.overlay = Some(ov);
         // Replay buffered events so the newly-opened overlay catches up on
         // tool calls, coding session state, run state, etc.
@@ -1312,6 +1621,20 @@ impl ZhongshuApp {
                 },
                 Event::Tool(ToolEvent::Started { name, .. }) => {
                     ov.send(&serde_json::json!({"type":"tool_call","name":name}));
+                    self.panel_debug_entries
+                        .push(crate::overlay_contract::DebugEntryData {
+                            id: format!("dbg-{}-{}", name, std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis())
+                                .unwrap_or(0)),
+                            entry_type: "tool_call".into(),
+                            timestamp: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as i64)
+                                .unwrap_or(0),
+                            summary: format!("工具调用: {name}"),
+                            details: None,
+                        });
                 }
                 Event::Tool(ToolEvent::Completed { name, success, .. }) => {
                     ov.send(&serde_json::json!({
@@ -1319,6 +1642,20 @@ impl ZhongshuApp {
                         "name": name.clone(),
                         "success": success,
                     }));
+                    self.panel_debug_entries
+                        .push(crate::overlay_contract::DebugEntryData {
+                            id: format!("dbg-{}-{}", name, std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis())
+                                .unwrap_or(0)),
+                            entry_type: "tool_result".into(),
+                            timestamp: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as i64)
+                                .unwrap_or(0),
+                            summary: format!("工具结果: {name} {}", if *success { "✓" } else { "✗" }),
+                            details: None,
+                        });
                 }
                 Event::Tool(ToolEvent::Interrupted { name, .. }) => {
                     ov.send(&serde_json::json!({
@@ -1326,6 +1663,54 @@ impl ZhongshuApp {
                         "name": name.clone(),
                         "success": false,
                     }));
+                }
+                Event::Memory(MemoryEvent::Compacted) => {
+                    self.panel_compress_entries
+                        .push(crate::overlay_contract::CompressEntryData {
+                            id: format!("compress-{}", std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis())
+                                .unwrap_or(0)),
+                            timestamp: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as i64)
+                                .unwrap_or(0),
+                            message_count: 0,
+                            token_before: 0,
+                            token_after: 0,
+                            summary: "上下文已压缩".into(),
+                        });
+                }
+                Event::Memory(MemoryEvent::MemoryHit {
+                    query: _,
+                    count,
+                    entries,
+                }) => {
+                    let hit_entries: Vec<crate::overlay_contract::MemoryHitEntry> = entries
+                        .iter()
+                        .map(|v| {
+                            serde_json::from_value(v.clone()).unwrap_or(
+                                crate::overlay_contract::MemoryHitEntry {
+                                    content: String::new(),
+                                    source: String::new(),
+                                },
+                            )
+                        })
+                        .collect();
+                    send_coding_event(
+                        ov,
+                        CodingUiEvent::MemoryHit {
+                            count: *count,
+                            entries: hit_entries.clone(),
+                        },
+                    );
+                    ov.send(
+                        &serde_json::to_value(OverlayToUiEvent::MemoryHit {
+                            count: *count,
+                            entries: hit_entries,
+                        })
+                        .unwrap_or_default(),
+                    );
                 }
                 Event::Harness(event) => match event {
                     HarnessUiEvent::CodingSessionStarted { .. } => {}
@@ -1425,6 +1810,16 @@ impl ZhongshuApp {
                                 reason: reason.clone(),
                             },
                         );
+                        send_coding_event(
+                            ov,
+                            CodingUiEvent::ConflictDetected {
+                                session_id: session_id.clone(),
+                                path: String::new(),
+                                worker_a: worker.clone(),
+                                worker_b: String::new(),
+                                reason: reason.clone(),
+                            },
+                        );
                     }
                     HarnessUiEvent::PatchPreview {
                         session_id,
@@ -1492,6 +1887,8 @@ impl ZhongshuApp {
                         success,
                         exit_code,
                         step,
+                        file_locations,
+                        suggestion,
                     } => {
                         send_coding_event(
                             ov,
@@ -1499,6 +1896,8 @@ impl ZhongshuApp {
                                 command: command.clone(),
                                 success: *success,
                                 exit_code: *exit_code,
+                                file_locations: file_locations.clone(),
+                                suggestion: suggestion.clone(),
                             },
                         );
                         ov.send(&serde_json::json!({
@@ -1522,6 +1921,27 @@ impl ZhongshuApp {
                             "from": from.clone(),
                             "to": to.clone(),
                         }));
+                    }
+                    HarnessUiEvent::ArchitectureAnalysis {
+                        summary,
+                        components,
+                    } => {
+                        let arch_components: Vec<
+                            crate::overlay_contract::ArchComponent,
+                        > = components
+                            .iter()
+                            .map(|c| crate::overlay_contract::ArchComponent {
+                                name: c.name.clone(),
+                                description: c.description.clone(),
+                            })
+                            .collect();
+                        send_coding_event(
+                            ov,
+                            CodingUiEvent::ArchitectureAnalysis {
+                                summary: summary.clone(),
+                                components: arch_components,
+                            },
+                        );
                     }
                 },
                 Event::Run(run_event) => match run_event {
@@ -1710,6 +2130,103 @@ impl ApplicationHandler for ZhongshuApp {
             ControlFlow::Wait
         });
     }
+}
+
+// ── Memory helpers ───────────────────────────────────────────────────
+
+fn load_memory_entries(profile_path: &std::path::Path) -> Vec<crate::overlay_contract::MemoryEntryData> {
+    let raw: serde_json::Value = std::fs::read_to_string(profile_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let Some(arr) = raw.get("long_term_memory").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .map(|entry| {
+            let id = entry["id"].as_str().unwrap_or("").to_string();
+            let content = entry["text"].as_str().unwrap_or("").to_string();
+            let source = entry["source"].as_str().unwrap_or("").to_string();
+            let created_at: i64 = entry["created_at"]
+                .as_str()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let enabled = entry.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+            crate::overlay_contract::MemoryEntryData {
+                id,
+                content,
+                source,
+                confidence: 1.0,
+                last_used: created_at,
+                created_at,
+                enabled,
+                source_text_ref: None,
+                source_url: None,
+            }
+        })
+        .collect()
+}
+
+fn try_delete_memory(profile_path: &std::path::Path, target_id: &str) -> Option<Vec<crate::overlay_contract::MemoryEntryData>> {
+    let raw: serde_json::Value = std::fs::read_to_string(profile_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let serde_json::Value::Object(mut map) = raw else {
+        return None;
+    };
+    let mut entries: Vec<serde_json::Value> = map
+        .get("long_term_memory")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let before = entries.len();
+    entries.retain(|e| e["id"].as_str() != Some(target_id));
+    if entries.len() == before {
+        return None;
+    }
+    map.insert("long_term_memory".into(), serde_json::Value::Array(entries));
+    let json = serde_json::to_string_pretty(&map).ok()?;
+    let tmp = profile_path.with_extension("tmp");
+    std::fs::write(&tmp, &json).ok()?;
+    std::fs::rename(&tmp, profile_path).ok()?;
+    Some(load_memory_entries(profile_path))
+}
+
+fn try_toggle_memory(
+    profile_path: &std::path::Path,
+    target_id: &str,
+    enabled: bool,
+) -> Option<Vec<crate::overlay_contract::MemoryEntryData>> {
+    let raw: serde_json::Value = std::fs::read_to_string(profile_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let serde_json::Value::Object(mut map) = raw else {
+        return None;
+    };
+    let mut entries: Vec<serde_json::Value> = map
+        .get("long_term_memory")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut found = false;
+    for entry in &mut entries {
+        if entry["id"].as_str() == Some(target_id) {
+            entry["enabled"] = serde_json::Value::Bool(enabled);
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        return None;
+    }
+    map.insert("long_term_memory".into(), serde_json::Value::Array(entries));
+    let json = serde_json::to_string_pretty(&map).ok()?;
+    let tmp = profile_path.with_extension("tmp");
+    std::fs::write(&tmp, &json).ok()?;
+    std::fs::rename(&tmp, profile_path).ok()?;
+    Some(load_memory_entries(profile_path))
 }
 
 #[cfg(test)]

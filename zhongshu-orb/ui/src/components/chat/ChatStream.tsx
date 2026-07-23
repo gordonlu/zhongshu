@@ -151,7 +151,10 @@ export function ChatStream({
       ) : null}
       {visibleMessages.map((message) => (
         <article key={message.id} className={`message ${message.role}`}>
-          <div className="message-role">{roleLabel(message.role)}</div>
+          <div className="message-role">
+            {roleLabel(message.role)}
+            {message.model ? <span className="message-model">{message.model}</span> : null}
+          </div>
           {message.role === 'assistant' ? <ToolCallGroup entries={message.toolCalls} /> : null}
           <MessageBody message={message} />
           {message.role !== 'assistant' ? <ToolCallGroup entries={message.toolCalls} /> : null}
@@ -180,7 +183,10 @@ export function ChatStream({
       ))}
       {state.streamingAssistant ? (
         <article className="message assistant streaming">
-          <div className="message-role">Zhongshu</div>
+          <div className="message-role">
+            Zhongshu
+            {state.currentModel ? <span className="message-model">{state.currentModel}</span> : null}
+          </div>
           <ToolCallGroup activities={state.toolActivities} />
           <div className="message-content md-content">
             {renderMarkdown(state.streamingAssistant, true)}
@@ -188,7 +194,10 @@ export function ChatStream({
         </article>
       ) : state.toolActivities.length > 0 ? (
         <article className="message assistant streaming">
-          <div className="message-role">Zhongshu</div>
+          <div className="message-role">
+            Zhongshu
+            {state.currentModel ? <span className="message-model">{state.currentModel}</span> : null}
+          </div>
           <ToolCallGroup activities={state.toolActivities} />
         </article>
       ) : null}

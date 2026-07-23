@@ -39,21 +39,35 @@ impl Worker {
         task: Task,
         callbacks: Option<std::sync::Arc<AgentCallbacks>>,
     ) -> anyhow::Result<Report> {
-        Self::execute_with_cancel(runtime, profile, task, callbacks, CancellationToken::new()).await
+        Self::execute_with_cancel(
+            runtime,
+            profile,
+            task,
+            callbacks,
+            CancellationToken::new(),
+            crate::runtime::ExecutionProfile::Worker,
+        )
+        .await
     }
 
     /// Execute a worker with a caller-owned cancellation scope. The token is
     /// passed through to the ReAct loop and tool executor; cancellation returns
     /// an observable `RunOutcome::Interrupted` report rather than detaching the
     /// in-flight worker future.
+    ///
+    /// `execution_profile` controls checkpoint/journal behavior:
+    /// - `Durable` for background tasks (full recovery),
+    /// - `Worker` for delegation workers (parent manages retry).
     pub async fn execute_with_cancel(
         runtime: &AgentRuntime,
         profile: &AgentProfile,
         task: Task,
         callbacks: Option<std::sync::Arc<AgentCallbacks>>,
         cancel_token: CancellationToken,
+        execution_profile: crate::runtime::ExecutionProfile,
     ) -> anyhow::Result<Report> {
         let mut scoped_runtime = Worker::build_scoped_runtime(runtime, profile);
+        scoped_runtime.profile = execution_profile;
         let run_id = callbacks
             .as_ref()
             .map(|callbacks| callbacks.run_id)
@@ -73,44 +87,8 @@ impl Worker {
             }));
         }
 
-        let internal_callbacks =
-            (callbacks.is_none() && scoped_runtime.ledger.is_some()).then(|| {
-                let ledger_for_start = scoped_runtime.ledger.clone();
-                let ledger_for_end = scoped_runtime.ledger.clone();
-                let run_id_for_start = run_id.to_string();
-                let run_id_for_end = run_id.to_string();
-                std::sync::Arc::new(AgentCallbacks {
-                    on_text: Box::new(|_| {}),
-                    on_tool_start: Box::new(move |name, args| {
-                        if let Some(ledger) = &ledger_for_start {
-                            let key = crate::agent::run::RunController::idempotency_key(name, args);
-                            let _ = ledger.record_tool_call(
-                                &run_id_for_start,
-                                name,
-                                args,
-                                "started",
-                                None,
-                                Some(&key),
-                            );
-                        }
-                    }),
-                    on_tool_done: Box::new(move |name, args, status| {
-                        if let Some(ledger) = &ledger_for_end {
-                            let key = crate::agent::run::RunController::idempotency_key(name, args);
-                            let _ = ledger.record_tool_call(
-                                &run_id_for_end,
-                                name,
-                                args,
-                                status.as_ledger_status(),
-                                None,
-                                Some(&key),
-                            );
-                        }
-                    }),
-                    run_id,
-                })
-            });
-        let callbacks = callbacks.or(internal_callbacks);
+        // Note: ledger recording is now handled by ActionJournal
+        // inside the dispatcher, so no internal callbacks are needed.
 
         let messages = vec![
             Message::system(&profile.system_prompt),
@@ -156,6 +134,7 @@ impl Worker {
         Ok(Report {
             task_id: task.id,
             worker: profile.name.clone(),
+            run_id: run_id.to_string(),
             summary,
             findings: last_content.to_string(),
             success,
@@ -204,6 +183,8 @@ impl Worker {
             // worker scheduler owns that recovery metadata.
             checkpoint_store: None,
             ledger: runtime.ledger.clone(),
+            event_bus: runtime.event_bus.clone(),
+            profile: crate::runtime::ExecutionProfile::Worker,
         }
     }
 

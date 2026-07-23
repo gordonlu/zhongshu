@@ -30,6 +30,8 @@ export type VerificationState = {
   command: string
   success: boolean
   exitCode?: number
+  fileLocations?: string[]
+  suggestion?: string
 }
 
 export type CodingState = {
@@ -345,8 +347,15 @@ function reduceCodingEvent(state: CodingState, event: CodingUiEvent): CodingStat
             command: event.command,
             success: event.success,
             exitCode: event.exit_code,
+            fileLocations: event.file_locations,
+            suggestion: event.suggestion,
           },
         ],
+      }
+    case 'workspace_detected':
+      return {
+        ...state,
+        active: true,
       }
     case 'recovery_feedback':
       return {
@@ -383,6 +392,11 @@ function reduceCodingEvent(state: CodingState, event: CodingUiEvent): CodingStat
           },
         ],
       }
+    case 'model_fallback':
+    case 'architecture_analysis':
+    case 'conflict_detected':
+    case 'memory_hit':
+      return state
   }
 }
 

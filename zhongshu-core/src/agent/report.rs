@@ -12,6 +12,8 @@ pub struct Report {
     pub task_id: String,
     /// Worker 名称（对应 profile.name）
     pub worker: String,
+    /// The run_id that produced this report.
+    pub run_id: String,
     /// 摘要（≤200 字，给 Primary Agent 快速浏览）
     pub summary: String,
     /// 详细发现（Worker 的完整输出）

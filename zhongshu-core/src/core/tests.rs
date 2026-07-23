@@ -326,9 +326,12 @@ mod tests {
                 0.9,
                 Some("agent"),
                 None,
+                None,
+                None,
+                None,
             )
             .unwrap();
-        let accepted = policy.evaluate().unwrap();
+        let accepted = policy.promote_candidates().unwrap();
         assert_eq!(
             accepted.len(),
             1,
@@ -350,9 +353,12 @@ mod tests {
                 0.3,
                 Some("agent"),
                 None,
+                None,
+                None,
+                None,
             )
             .unwrap();
-        let accepted = policy.evaluate().unwrap();
+        let accepted = policy.promote_candidates().unwrap();
         assert_eq!(accepted.len(), 0, "low confidence should not be promoted");
     }
 
@@ -363,12 +369,12 @@ mod tests {
         let policy = MemoryPolicy::new(db);
 
         candidates
-            .insert("user prefers terminal", Some("preference"), 0.9, None, None)
+            .insert("user prefers terminal", Some("preference"), 0.9, None, None, None, None, None)
             .unwrap();
         candidates
-            .insert("user likes vscode", Some("preference"), 0.9, None, None)
+            .insert("user likes vscode", Some("preference"), 0.9, None, None, None, None, None)
             .unwrap();
-        policy.evaluate().unwrap();
+        policy.promote_candidates().unwrap();
 
         let results = policy.search("terminal", 10).unwrap();
         assert_eq!(results.len(), 1);

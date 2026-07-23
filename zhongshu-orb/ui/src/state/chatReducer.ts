@@ -5,6 +5,8 @@ export type ChatMessage = {
   role: 'user' | 'assistant' | 'system'
   content: string
   toolCalls: ToolCallEntry[]
+  model?: string
+  duration_ms?: number
   interrupted?: true
 }
 
@@ -18,6 +20,7 @@ export type ToolActivity = {
 export type ChatState = {
   messages: ChatMessage[]
   streamingAssistant: string
+  currentModel?: string
   toolActivities: ToolActivity[]
   hasMoreHistory: boolean
   runtimeState: string
@@ -48,6 +51,11 @@ export function chatReducer(state: ChatState, event: OverlayToUiEvent): ChatStat
         ],
         streamingAssistant: '',
       }
+    case 'model':
+      return {
+        ...state,
+        currentModel: event.label,
+      }
     case 'stop': {
       if (!state.streamingAssistant.trim()) return { ...state, streamingAssistant: '' }
       const partialContent = state.streamingAssistant.trimEnd()
@@ -60,10 +68,12 @@ export function chatReducer(state: ChatState, event: OverlayToUiEvent): ChatStat
             role: 'assistant',
             content: partialContent,
             toolCalls: state.toolActivities.map(toolActivityToEntry),
+            model: state.currentModel,
             interrupted: true,
           },
         ],
         streamingAssistant: '',
+        currentModel: undefined,
         toolActivities: [],
       }
     }
@@ -83,9 +93,12 @@ export function chatReducer(state: ChatState, event: OverlayToUiEvent): ChatStat
             role: 'assistant',
             content: state.streamingAssistant,
             toolCalls: state.toolActivities.map(toolActivityToEntry),
+            model: state.currentModel,
+            duration_ms: event.duration_ms,
           },
         ],
         streamingAssistant: '',
+        currentModel: undefined,
         toolActivities: [],
       }
     }
@@ -159,6 +172,8 @@ function entryToMessage(entry: ChatEntry): ChatMessage {
     role: entry.role === 'User' ? 'user' : entry.role === 'Assistant' ? 'assistant' : 'system',
     content: entry.content,
     toolCalls: entry.tool_calls,
+    model: entry.model,
+    duration_ms: entry.duration_ms,
   }
 }
 

@@ -273,7 +273,8 @@ fn main() {
     let observation_store = ObservationStore::new(Database::new(core_db_path.clone()));
     let suggestion_engine = SuggestionEngine::new(Database::new(core_db_path.clone()));
     let suggestion_tool = SuggestionTool::new(suggestion_engine.clone()).with_event_bus(eb.clone());
-    let memory_policy = MemoryPolicy::new(Database::new(core_db_path.clone()));
+    let memory_policy = MemoryPolicy::new(Database::new(core_db_path.clone()))
+        .with_event_bus((*eb).clone());
     let memory_candidate_store = MemoryCandidateStore::new(Database::new(core_db_path.clone()));
     let provider = cfg.llm.build_provider(&base_url);
 
@@ -390,7 +391,7 @@ fn main() {
     let run_controller = controller.run_controller.clone();
     let inbox = Arc::new(AgentInbox::new(controller.clone()));
     inbox.start();
-    services::spawn_auto_evolution(observer.clone(), controller.clone(), equipment.clone());
+    services::spawn_auto_evolution(observer.clone(), controller.clone(), equipment.clone(), core_db_path.clone());
     services::spawn_runbook_to_skill(
         eb.clone(),
         llm_registry.clone(),
@@ -398,6 +399,7 @@ fn main() {
         equipment.clone(),
         controller.clone(),
     );
+    services::spawn_policy_learner(core_db_path.clone());
 
     let mut task_scheduler = TaskScheduler::new(Duration::from_secs(1));
 
@@ -468,6 +470,7 @@ fn main() {
         },
     );
     worker_runtime_value.ledger = Some(RunLedger::new(Database::new(core_db_path.clone())));
+    worker_runtime_value.event_bus = Some((*eb).clone());
     let mut planner_runtime_value = worker_runtime_value.clone();
     let planner_model = if cfg.llm.model_routing.enabled {
         cfg.llm.model_routing.pro_model.clone()

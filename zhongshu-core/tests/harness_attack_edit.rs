@@ -170,6 +170,7 @@ fn worker_patch_outside_owned_files_detected() {
     let report = Report {
         task_id: "t1".into(),
         worker: "w1".into(),
+        run_id: "test".into(),
         summary: "".into(),
         findings: "".into(),
         confidence: 0.5,
@@ -213,6 +214,7 @@ fn worker_patch_inside_owned_files_allowed() {
     let report = Report {
         task_id: "t1".into(),
         worker: "w1".into(),
+        run_id: "test".into(),
         summary: "".into(),
         findings: "".into(),
         confidence: 0.5,

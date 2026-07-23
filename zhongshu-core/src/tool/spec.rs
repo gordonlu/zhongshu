@@ -24,6 +24,23 @@ pub enum WorkspaceScope {
     Unrestricted,
 }
 
+/// Determines how a tool call should be handled when replaying or retrying
+/// after an interruption or crash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayPolicy {
+    /// Re-execute the tool — safe for idempotent reads.
+    AlwaysExecute,
+    /// Skip if a completed record exists for the same arguments.
+    SkipIfCommitted,
+    /// Query the external system for outcome before retrying.
+    QueryBeforeRetry,
+    /// Verify workspace state before retrying (e.g. check file hash).
+    VerifyBeforeRetry,
+    /// Never automatically retry; require user approval.
+    NeverAutomaticRetry,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SideEffect {
     ReadOnly,
@@ -43,6 +60,7 @@ pub struct ToolSpec {
     pub supports_concurrent_execution: bool,
     pub requires_approval: bool,
     pub side_effect: SideEffect,
+    pub replay_policy: ReplayPolicy,
 }
 
 impl ToolSpec {
@@ -56,6 +74,7 @@ impl ToolSpec {
             supports_concurrent_execution: false,
             requires_approval: true,
             side_effect: SideEffect::ReadOnly,
+            replay_policy: ReplayPolicy::AlwaysExecute,
         }
     }
 
@@ -74,6 +93,7 @@ impl ToolSpec {
             supports_concurrent_execution: read_only && !destructive,
             requires_approval: destructive || matches!(effect, ToolEffect::System),
             side_effect: infer_side_effect(name),
+            replay_policy: infer_replay_policy(name),
         }
     }
 
@@ -121,6 +141,11 @@ impl ToolSpec {
         if !matches!(se, SideEffect::ReadOnly) {
             self.read_only = false;
         }
+        self
+    }
+
+    pub fn replay_policy(mut self, rp: ReplayPolicy) -> Self {
+        self.replay_policy = rp;
         self
     }
 }
@@ -246,6 +271,25 @@ pub fn infer_side_effect(name: &str) -> SideEffect {
         "shell" => SideEffect::Irreversible,
 
         _ => SideEffect::ReadOnly,
+    }
+}
+
+pub fn infer_replay_policy(name: &str) -> ReplayPolicy {
+    match name {
+        // Reads are safe to re-execute
+        "read" | "read_file" | "list_dir" | "grep" | "glob" | "search_files" | "webfetch"
+        | "web_search" | "search" | "system_info" | "self_test" | "memory_query" => {
+            ReplayPolicy::AlwaysExecute
+        }
+        // Edits must verify file state before retry
+        "write_file" | "edit" | "patch" | "fs" => ReplayPolicy::VerifyBeforeRetry,
+        // External/browser actions should check outcome before retry
+        "browser" | "browser_automation" | "browser_session" | "screenshot" | "automation"
+        | "desktop" => ReplayPolicy::QueryBeforeRetry,
+        // Shell is always re-executed (writes are side-effect tracked by the tool)
+        "shell" => ReplayPolicy::AlwaysExecute,
+        // Default: skip if committed (conservative)
+        _ => ReplayPolicy::SkipIfCommitted,
     }
 }
 

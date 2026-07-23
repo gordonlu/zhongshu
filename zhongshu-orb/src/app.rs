@@ -14,11 +14,14 @@ use tokio::sync::RwLock;
 use zhongshu_core::agent::llm::LlmProvider;
 use zhongshu_core::agent::run::RunController;
 use zhongshu_core::agent::{
-    run_agent_with_context, AgentBudget, AgentCallbacks, AgentProfile, AgentRuntime, ModelRouter,
-    Worker,
+    execute_agent_loop, AgentBudget, AgentCallbacks, AgentProfile, AgentRuntime, LoopResult,
+    ModelRouter, RunOutcome, Worker,
 };
-use zhongshu_core::core::context::{ContextMessage, ContextPackBuilder, ContextRole, RecentUnit};
+use zhongshu_core::agent::loop_::ToolCompletionStatus;
+use zhongshu_core::core::checkpoint::CheckpointStore;
+use zhongshu_core::core::context::{ContextPack, ContextMessage, ContextPackBuilder, ContextRole, RecentUnit};
 use zhongshu_core::core::{Database, RunbookStore};
+use uuid::Uuid;
 use zhongshu_core::event::{
     AgentEvent, AgentState, Event, EventBus, HarnessUiEvent, MessageId, ResponseEvent,
     ResponseRole, ResponseTx, ToolEvent,
@@ -27,6 +30,7 @@ use zhongshu_core::harness::trace::runbook::events_to_runbook;
 use zhongshu_core::integration::DeeplosslessProxy;
 use zhongshu_core::patch::PatchDiffPayload;
 use zhongshu_core::task::TaskQueue;
+use zhongshu_core::runtime::ExecutionProfile;
 use zhongshu_core::tool::ToolRegistry;
 
 pub(crate) fn publish_harness_events(
@@ -213,12 +217,15 @@ pub(crate) fn publish_harness_events(
                 success,
                 exit_code,
                 step,
+                ..
             } => {
                 eb.publish(Event::Harness(HarnessUiEvent::Verification {
                     command: command.clone(),
                     success: *success,
                     exit_code: *exit_code,
                     step: *step,
+                    file_locations: None,
+                    suggestion: None,
                 }));
             }
             zhongshu_core::harness::trace::event::HarnessEvent::RecoveryFeedback {
@@ -451,25 +458,11 @@ impl AgentController {
     }
 
     /// Cancel the currently running agent task.
+    /// Uses the unified graceful cancel path so in-flight tools with
+    /// side effects are reconciled before the run finishes.
     pub fn cancel(&self) {
-        let ct = self.current_task.clone();
-        let state = self.state.clone();
-        let eb = self.event_bus.clone();
-        tokio::spawn(async move {
-            if let Some(h) = ct.lock().await.take() {
-                h.abort();
-                tracing::info!("agent task cancelled by user");
-                *state.write().await = AgentState::Idle;
-                eb.publish(Event::Agent(AgentEvent::StateChanged {
-                    from: AgentState::Thinking,
-                    to: AgentState::Done { success: false },
-                }));
-                eb.publish(Event::Agent(AgentEvent::StateChanged {
-                    from: AgentState::Done { success: false },
-                    to: AgentState::Idle,
-                }));
-            }
-        });
+        self.run_controller
+            .request_cancel(zhongshu_core::runtime::cancellation::CancelMode::Graceful);
     }
 
     pub(crate) fn event_bus(&self) -> &Arc<EventBus> {
@@ -514,7 +507,7 @@ impl AgentController {
             .try_write()
             .map(|mut s| {
                 if matches!(*s, AgentState::Idle) {
-                    *s = AgentState::Thinking;
+                    *s = AgentState::from(zhongshu_core::runtime::RunStatus::Running);
                     true
                 } else {
                     false
@@ -544,7 +537,7 @@ impl AgentController {
         self.event_bus
             .publish(Event::Agent(AgentEvent::StateChanged {
                 from: AgentState::Idle,
-                to: AgentState::Thinking,
+                to: self.run_controller.agent_state(),
             }));
     }
 
@@ -734,105 +727,39 @@ impl AgentController {
             let recovery_budget = budget.clone();
             let recovery_reasoning = reasoning_str.clone();
 
-            let mut runtime = AgentRuntime::with_llm(p, m, t, budget);
-            runtime.reasoning_effort = reasoning_str;
-            // Checkpoint store: saves the agent state before each tool call
-            // so a crashed process can recover from the last good state.
-            runtime.checkpoint_store = Some(zhongshu_core::core::checkpoint::CheckpointStore::new(
-                zhongshu_core::core::Database::new(core_db_path.clone()),
-            ));
-            // Ledger: needed for reconciling in-flight tools after crash recovery.
-            runtime.ledger = rc.get_ledger();
-            // Idempotency checker: queries the ledger to see if a tool call
-            // was already completed. Returns true if the tool should be skipped.
-            {
-                let rc = rc.clone();
-                runtime.idempotency_checker = Some(Arc::new(move |name: &str, args: &str| {
-                    rc.is_tool_completed(name, args)
-                }));
-            }
-
-            let tool_names = Arc::new(Mutex::new(Vec::<String>::new()));
-            let callbacks = {
-                let tn = tool_names.clone();
-                let eb1 = eb.clone();
-                let eb2 = eb.clone();
-                AgentCallbacks {
-                    on_text: {
-                        let tx = tx.clone();
-                        Box::new(move |x: &str| {
-                            if !x.is_empty() {
-                                tracing::debug!(len = x.len(), "on_text");
-                                let _ = tx.try_send(ResponseEvent::MessageDelta {
-                                    id: aid,
-                                    delta: x.to_string(),
-                                    run_id,
-                                });
-                            } else {
-                                tracing::debug!("on_text empty");
-                            }
-                        })
-                    },
-                    on_tool_start: {
-                        let run_id = run_id.to_string();
-                        let rc = rc.clone();
-                        Box::new(move |name: &str, args: &str| {
-                            tn.lock().unwrap().push(name.to_string());
-                            rc.record_tool_call_start(name, args);
-                            eb1.publish(Event::Tool(ToolEvent::Started {
-                                name: name.to_string(),
-                                run_id: run_id.clone(),
-                            }));
-                        })
-                    },
-                    on_tool_done: {
-                        let run_id = run_id.to_string();
-                        let rc = rc.clone();
-                        Box::new(move |name: &str, args: &str, status| {
-                            rc.record_tool_call_end(name, args, status.as_ledger_status(), None);
-                            if status
-                                == zhongshu_core::agent::loop_::ToolCompletionStatus::UnknownEffect
-                            {
-                                eb2.publish(Event::Tool(ToolEvent::Interrupted {
-                                    name: name.to_string(),
-                                    run_id: run_id.clone(),
-                                    tool_call_id: String::new(),
-                                }));
-                            } else {
-                                eb2.publish(Event::Tool(ToolEvent::Completed {
-                                    name: name.to_string(),
-                                    success: status.is_success(),
-                                    run_id: run_id.clone(),
-                                }));
-                            }
-                        })
-                    },
-                    run_id,
-                }
+            // ── Execute initial attempt via shared kernel ──────────
+            let attempt_svc = RunAttemptServices {
+                event_bus: eb.clone(),
+                response_tx: tx.clone(),
+                core_db_path: core_db_path.clone(),
+                run_controller: rc.clone(),
             };
-
-            let cancel_token = rc.cancel_token();
-            let r = tokio::time::timeout(
-                AGENT_TIMEOUT,
-                run_agent_with_context(
-                    &mut runtime,
-                    context_pack,
-                    Some(Arc::new(callbacks)),
-                    &input,
-                    cancel_token,
-                ),
-            )
-            .await;
-
-            // Initial values are always overwritten before first use,
-            // but are kept as a fallback for unexpected code paths.
             #[allow(unused_assignments)]
             let mut stop_reason = String::new();
             #[allow(unused_assignments)]
             let mut overall_success = false;
 
-            match r {
-                Ok(Ok(rr)) => {
+            let model_name = m.clone();
+            let attempt_budget = budget.clone();
+            match run_attempt(
+                RunAttemptRequest {
+                    run_id,
+                    input: input.clone(),
+                    context_pack,
+                    provider: p,
+                    model: m,
+                    tools: t,
+                    budget,
+                    reasoning_effort: reasoning_str,
+                    message_id: aid,
+                    profile: ExecutionProfile::Resumable,
+                },
+                attempt_svc,
+            )
+            .await
+            {
+                Ok(attempt_result) => {
+                    let rr = &attempt_result.loop_result;
                     let conversation_id = proxy.lock().await.current_conv_id().await;
                     persist_trace_runbook(
                         core_db_path.clone(),
@@ -841,18 +768,20 @@ impl AgentController {
                         conversation_id,
                     );
                     publish_harness_events(&eb, &rr.trace_events);
-                    let last = rr.messages.last().map(|x| x.content.as_str()).unwrap_or("");
-                    // Append to conversation history for next turn.
+                    let last = rr
+                        .messages
+                        .last()
+                        .map(|x| x.content.as_str())
+                        .unwrap_or("");
                     history_arc
                         .lock()
                         .unwrap()
                         .push(("user".to_string(), input.clone()));
                     if !last.is_empty() {
-                        let tools_used = tool_names.lock().unwrap();
+                        let tools_used = &attempt_result.tool_names;
                         let history_content = if tools_used.is_empty() {
                             last.to_string()
                         } else {
-                            // Deduplicate consecutive identical tool calls.
                             let mut deduped: Vec<(&str, u32)> = Vec::new();
                             for name in tools_used.iter().map(|s| s.as_str()) {
                                 if let Some(last) = deduped.last_mut() {
@@ -881,22 +810,18 @@ impl AgentController {
                             .unwrap()
                             .push(("assistant".to_string(), history_content));
                     }
-                    // Todos may be useful from an unverified submission, but a
-                    // goal is only completed when fresh verification exists.
                     memory.extract_todos(last);
-                    if rr.outcome == zhongshu_core::agent::RunOutcome::CompletedVerified {
+                    if rr.outcome == RunOutcome::CompletedVerified {
                         memory.extract_goal_completions(last);
                         memory.archive_completed_goals(KEEP_COMPLETED_GOALS);
                     }
                     stop_reason = format!("{:?}", rr.stop_reason);
-                    overall_success =
-                        rr.outcome == zhongshu_core::agent::RunOutcome::CompletedVerified;
-                    // Build and log an exportable RunReceipt.
+                    overall_success = rr.outcome == RunOutcome::CompletedVerified;
                     let receipt = zhongshu_core::core::receipt::RunReceipt::from_loop_result(
-                        &rr,
+                        rr,
                         &run_id.to_string(),
-                        &runtime.model,
-                        &runtime.budget,
+                        &model_name,
+                        &attempt_budget,
                         0,
                         vec![],
                         vec![],
@@ -913,20 +838,17 @@ impl AgentController {
                         .send(ResponseEvent::MessageCompleted { id: aid, run_id })
                         .await;
                     let outcome_state = match rr.outcome {
-                        zhongshu_core::agent::RunOutcome::CompletedVerified => {
-                            AgentState::Done { success: true }
-                        }
-                        zhongshu_core::agent::RunOutcome::CompletedUnverified => {
-                            AgentState::Submitted
-                        }
+                        RunOutcome::CompletedVerified => AgentState::Done { success: true },
+                        RunOutcome::CompletedUnverified => AgentState::Submitted,
                         _ => AgentState::Done { success: false },
                     };
+                    *state_arc.write().await = outcome_state;
                     eb.publish(Event::Agent(AgentEvent::StateChanged {
                         from: AgentState::Thinking,
                         to: outcome_state,
                     }));
                 }
-                Ok(Err(e)) => {
+                Err(RunAttemptError::AgentError(e)) => {
                     tracing::error!("agent run failed: {e:#}");
                     stop_reason = "error".to_string();
                     overall_success = false;
@@ -940,12 +862,13 @@ impl AgentController {
                     let _ = tx
                         .send(ResponseEvent::MessageCompleted { id: aid, run_id })
                         .await;
+                    *state_arc.write().await = AgentState::Done { success: false };
                     eb.publish(Event::Agent(AgentEvent::StateChanged {
                         from: AgentState::Thinking,
                         to: AgentState::Done { success: false },
                     }));
                 }
-                Err(_) => {
+                Err(RunAttemptError::Timeout) => {
                     tracing::warn!("agent task timed out after 300s");
                     stop_reason = "timeout".to_string();
                     overall_success = false;
@@ -959,6 +882,7 @@ impl AgentController {
                     let _ = tx
                         .send(ResponseEvent::MessageCompleted { id: aid, run_id })
                         .await;
+                    *state_arc.write().await = AgentState::Done { success: false };
                     eb.publish(Event::Agent(AgentEvent::StateChanged {
                         from: AgentState::Thinking,
                         to: AgentState::Done { success: false },
@@ -988,93 +912,31 @@ impl AgentController {
                             {
                                 rc.set_state(zhongshu_core::agent::run::RunState::Resuming);
                                 let _run_id = rc.begin_resume();
-                                let new_tn = Arc::new(Mutex::new(Vec::<String>::new()));
-                                let new_callbacks = AgentCallbacks {
-                                    on_text: {
-                                        let tx = tx.clone();
-                                        Box::new(move |x: &str| {
-                                            if !x.is_empty() {
-                                                let _ = tx.try_send(ResponseEvent::MessageDelta {
-                                                    id: aid,
-                                                    delta: x.to_string(),
-                                                    run_id,
-                                                });
-                                            }
-                                        })
-                                    },
-                                    on_tool_start: {
-                                        let run_id = run_id.to_string();
-                                        let eb1 = eb.clone();
-                                        let rc_start = rc.clone();
-                                        Box::new(move |name: &str, args: &str| {
-                                            rc_start.record_tool_call_start(name, args);
-                                            eb1.publish(Event::Tool(ToolEvent::Started {
-                                                name: name.to_string(),
-                                                run_id: run_id.clone(),
-                                            }));
-                                        })
-                                    },
-                                    on_tool_done: {
-                                        let run_id = run_id.to_string();
-                                        let eb2 = eb.clone();
-                                        let rc_done = rc.clone();
-                                        Box::new(move |name: &str, args: &str, status| {
-                                            rc_done.record_tool_call_end(
-                                                name,
-                                                args,
-                                                status.as_ledger_status(),
-                                                None,
-                                            );
-                                            if status == zhongshu_core::agent::loop_::ToolCompletionStatus::UnknownEffect {
-                                                eb2.publish(Event::Tool(ToolEvent::Interrupted {
-                                                    name: name.to_string(),
-                                                    run_id: run_id.clone(),
-                                                    tool_call_id: String::new(),
-                                                }));
-                                            } else {
-                                                eb2.publish(Event::Tool(ToolEvent::Completed {
-                                                    name: name.to_string(),
-                                                    success: status.is_success(),
-                                                    run_id: run_id.clone(),
-                                                }));
-                                            }
-                                        })
-                                    },
-                                    run_id,
+                                let recovery_svc = RunAttemptServices {
+                                    event_bus: eb.clone(),
+                                    response_tx: tx.clone(),
+                                    core_db_path: core_db_path.clone(),
+                                    run_controller: rc.clone(),
                                 };
-                                let new_token = rc.cancel_token();
-                                let mut recovery_runtime = AgentRuntime::with_llm(
-                                    recovery_provider,
-                                    recovery_model,
-                                    recovery_tools,
-                                    recovery_budget,
-                                );
-                                recovery_runtime.reasoning_effort = recovery_reasoning;
-                                recovery_runtime.checkpoint_store =
-                                    Some(zhongshu_core::core::checkpoint::CheckpointStore::new(
-                                        zhongshu_core::core::Database::new(core_db_path.clone()),
-                                    ));
-                                recovery_runtime.ledger = rc.get_ledger();
-                                {
-                                    let rc = rc.clone();
-                                    recovery_runtime.idempotency_checker =
-                                        Some(Arc::new(move |name: &str, args: &str| {
-                                            rc.is_tool_completed(name, args)
-                                        }));
-                                }
-                                let r2 = tokio::time::timeout(
-                                    AGENT_TIMEOUT,
-                                    run_agent_with_context(
-                                        &mut recovery_runtime,
-                                        recovery_pack,
-                                        Some(Arc::new(new_callbacks)),
-                                        &input,
-                                        new_token,
-                                    ),
+                                match run_attempt(
+                                    RunAttemptRequest {
+                                        run_id,
+                                        input: input.clone(),
+                                        context_pack: recovery_pack,
+                                        provider: recovery_provider,
+                                        model: recovery_model,
+                                        tools: recovery_tools,
+                                        budget: recovery_budget,
+                                        reasoning_effort: recovery_reasoning,
+                                        message_id: aid,
+                                        profile: ExecutionProfile::Resumable,
+                                    },
+                                    recovery_svc,
                                 )
-                                .await;
-                                match r2 {
-                                    Ok(Ok(rr)) => {
+                                .await
+                                {
+                                    Ok(attempt_result) => {
+                                        let rr = &attempt_result.loop_result;
                                         let conversation_id =
                                             proxy.lock().await.current_conv_id().await;
                                         persist_trace_runbook(
@@ -1094,7 +956,7 @@ impl AgentController {
                                             .unwrap()
                                             .push(("user".to_string(), input.clone()));
                                         if !last.is_empty() {
-                                            let tools_used = new_tn.lock().unwrap();
+                                            let tools_used = &attempt_result.tool_names;
                                             let history_content = if tools_used.is_empty() {
                                                 last.to_string()
                                             } else {
@@ -1127,9 +989,7 @@ impl AgentController {
                                                 .push(("assistant".to_string(), history_content));
                                         }
                                         memory.extract_todos(last);
-                                        if rr.outcome
-                                            == zhongshu_core::agent::RunOutcome::CompletedVerified
-                                        {
+                                        if rr.outcome == RunOutcome::CompletedVerified {
                                             memory.extract_goal_completions(last);
                                             memory.archive_completed_goals(KEEP_COMPLETED_GOALS);
                                         }
@@ -1139,22 +999,28 @@ impl AgentController {
                                                 run_id,
                                             })
                                             .await;
-                                        let recovery_success = rr.outcome
-                                            == zhongshu_core::agent::RunOutcome::CompletedVerified;
                                         stop_reason = format!("{:?}", rr.stop_reason);
-                                        overall_success = recovery_success;
+                                        overall_success =
+                                            rr.outcome == RunOutcome::CompletedVerified;
                                         let outcome_state = match rr.outcome {
-                                            zhongshu_core::agent::RunOutcome::CompletedVerified => AgentState::Done { success: true },
-                                            zhongshu_core::agent::RunOutcome::CompletedUnverified => AgentState::Submitted,
+                                            RunOutcome::CompletedVerified => {
+                                                AgentState::Done { success: true }
+                                            }
+                                            RunOutcome::CompletedUnverified => {
+                                                AgentState::Submitted
+                                            }
                                             _ => AgentState::Done { success: false },
                                         };
+                                        *state_arc.write().await = outcome_state;
                                         eb.publish(Event::Agent(AgentEvent::StateChanged {
                                             from: AgentState::Thinking,
                                             to: outcome_state,
                                         }));
                                     }
-                                    Ok(Err(e)) => {
-                                        tracing::error!("recovery agent run failed: {e:#}");
+                                    Err(RunAttemptError::AgentError(e)) => {
+                                        tracing::error!(
+                                            "recovery agent run failed: {e:#}"
+                                        );
                                         stop_reason = "recovery_failed".to_string();
                                         overall_success = false;
                                         let _ = tx
@@ -1170,12 +1036,13 @@ impl AgentController {
                                                 run_id,
                                             })
                                             .await;
+                                        *state_arc.write().await = AgentState::Done { success: false };
                                         eb.publish(Event::Agent(AgentEvent::StateChanged {
                                             from: AgentState::Thinking,
                                             to: AgentState::Done { success: false },
                                         }));
                                     }
-                                    Err(_) => {
+                                    Err(RunAttemptError::Timeout) => {
                                         tracing::warn!("recovery agent task timed out");
                                         stop_reason = "recovery_timeout".to_string();
                                         overall_success = false;
@@ -1192,6 +1059,7 @@ impl AgentController {
                                                 run_id,
                                             })
                                             .await;
+                                        *state_arc.write().await = AgentState::Done { success: false };
                                         eb.publish(Event::Agent(AgentEvent::StateChanged {
                                             from: AgentState::Thinking,
                                             to: AgentState::Done { success: false },
@@ -1201,26 +1069,222 @@ impl AgentController {
                             }
                         }
                     }
-                    Some(zhongshu_core::agent::run::InterruptionAction::CancelAndReplan {
-                        reason,
-                    }) => {
-                        tracing::info!("interruption cancelled: {reason}");
+                    Some(zhongshu_core::agent::run::InterruptionAction::Stop) => {
+                        tracing::info!("interruption stopped");
                         stop_reason = "cancelled".to_string();
                         overall_success = false;
                         let _ = tx
                             .send(ResponseEvent::MessageDelta {
                                 id: aid,
-                                delta: format!("[已停止: {reason}]"),
+                                delta: "[已停止]".into(),
                                 run_id,
                             })
                             .await;
                         let _ = tx
                             .send(ResponseEvent::MessageCompleted { id: aid, run_id })
                             .await;
+                        *state_arc.write().await = AgentState::Done { success: false };
                         eb.publish(Event::Agent(AgentEvent::StateChanged {
                             from: AgentState::Thinking,
                             to: AgentState::Done { success: false },
                         }));
+                    }
+                    Some(zhongshu_core::agent::run::InterruptionAction::CancelAndReplan {
+                        reason,
+                    }) => {
+                        tracing::info!("interruption: {reason} — replanning");
+                        if let Some(prompt) = rc.build_recovery_prompt() {
+                            let recovery_input = format!(
+                                "[重新规划]\n用户改变了方向。请优先处理用户的新消息，根据新方向重新规划任务。\n\n{prompt}"
+                            );
+                            if let Ok((recovery_pack, _)) = ContextPackBuilder::new()
+                                .stable_system(sys)
+                                .state(recovery_state)
+                                .with_evidence(Vec::new())
+                                .with_recent(recovery_recent)
+                                .input(recovery_input)
+                                .build(max_ctx as usize)
+                            {
+                                rc.set_state(zhongshu_core::agent::run::RunState::Resuming);
+                                let _run_id = rc.begin_resume();
+                                let replan_svc = RunAttemptServices {
+                                    event_bus: eb.clone(),
+                                    response_tx: tx.clone(),
+                                    core_db_path: core_db_path.clone(),
+                                    run_controller: rc.clone(),
+                                };
+                                match run_attempt(
+                                    RunAttemptRequest {
+                                        run_id,
+                                        input: input.clone(),
+                                        context_pack: recovery_pack,
+                                        provider: recovery_provider,
+                                        model: recovery_model,
+                                        tools: recovery_tools,
+                                        budget: recovery_budget,
+                                        reasoning_effort: recovery_reasoning,
+                                        message_id: aid,
+                                        profile: ExecutionProfile::Resumable,
+                                    },
+                                    replan_svc,
+                                )
+                                .await
+                                {
+                                    Ok(attempt_result) => {
+                                        let rr = &attempt_result.loop_result;
+                                        let conversation_id =
+                                            proxy.lock().await.current_conv_id().await;
+                                        persist_trace_runbook(
+                                            core_db_path.clone(),
+                                            &input,
+                                            &rr.trace_events,
+                                            conversation_id,
+                                        );
+                                        publish_harness_events(&eb, &rr.trace_events);
+                                        let last = rr
+                                            .messages
+                                            .last()
+                                            .map(|x| x.content.as_str())
+                                            .unwrap_or("");
+                                        history_arc
+                                            .lock()
+                                            .unwrap()
+                                            .push(("user".to_string(), input.clone()));
+                                        if !last.is_empty() {
+                                            let tools_used = &attempt_result.tool_names;
+                                            let history_content = if tools_used.is_empty() {
+                                                last.to_string()
+                                            } else {
+                                                let mut deduped: Vec<(&str, u32)> = Vec::new();
+                                                for name in tools_used.iter().map(|s| s.as_str()) {
+                                                    if let Some(last) = deduped.last_mut() {
+                                                        if last.0 == name {
+                                                            last.1 += 1;
+                                                            continue;
+                                                        }
+                                                    }
+                                                    deduped.push((name, 1));
+                                                }
+                                                let badge = deduped
+                                                    .iter()
+                                                    .map(|(n, c)| {
+                                                        if *c > 1 {
+                                                            format!("✓ {n} ×{c}")
+                                                        } else {
+                                                            format!("✓ {n}")
+                                                        }
+                                                    })
+                                                    .collect::<Vec<_>>()
+                                                    .join(" · ");
+                                                format!("[工具: {badge}]\n\n{last}")
+                                            };
+                                            history_arc
+                                                .lock()
+                                                .unwrap()
+                                                .push(("assistant".to_string(), history_content));
+                                        }
+                                        memory.extract_todos(last);
+                                        if rr.outcome == RunOutcome::CompletedVerified {
+                                            memory.extract_goal_completions(last);
+                                            memory.archive_completed_goals(KEEP_COMPLETED_GOALS);
+                                        }
+                                        let _ = tx
+                                            .send(ResponseEvent::MessageCompleted {
+                                                id: aid,
+                                                run_id,
+                                            })
+                                            .await;
+                                        stop_reason = format!("{:?}", rr.stop_reason);
+                                        overall_success =
+                                            rr.outcome == RunOutcome::CompletedVerified;
+                                        let outcome_state = match rr.outcome {
+                                            RunOutcome::CompletedVerified => {
+                                                AgentState::Done { success: true }
+                                            }
+                                            RunOutcome::CompletedUnverified => {
+                                                AgentState::Submitted
+                                            }
+                                            _ => AgentState::Done { success: false },
+                                        };
+                                        *state_arc.write().await = outcome_state;
+                                        eb.publish(Event::Agent(AgentEvent::StateChanged {
+                                            from: AgentState::Thinking,
+                                            to: outcome_state,
+                                        }));
+                                    }
+                                    Err(RunAttemptError::AgentError(e)) => {
+                                        tracing::error!(
+                                            "replan agent run failed: {e:#}"
+                                        );
+                                        stop_reason = "replan_failed".to_string();
+                                        overall_success = false;
+                                        let _ = tx
+                                            .send(ResponseEvent::MessageDelta {
+                                                id: aid,
+                                                delta: format!("{e:#}"),
+                                                run_id,
+                                            })
+                                            .await;
+                                        let _ = tx
+                                            .send(ResponseEvent::MessageCompleted {
+                                                id: aid,
+                                                run_id,
+                                            })
+                                            .await;
+                                        *state_arc.write().await = AgentState::Done { success: false };
+                                        eb.publish(Event::Agent(AgentEvent::StateChanged {
+                                            from: AgentState::Thinking,
+                                            to: AgentState::Done { success: false },
+                                        }));
+                                    }
+                                    Err(RunAttemptError::Timeout) => {
+                                        tracing::warn!("replan agent task timed out");
+                                        stop_reason = "replan_timeout".to_string();
+                                        overall_success = false;
+                                        let _ = tx
+                                            .send(ResponseEvent::MessageDelta {
+                                                id: aid,
+                                                delta: "[重新规划超时]".into(),
+                                                run_id,
+                                            })
+                                            .await;
+                                        let _ = tx
+                                            .send(ResponseEvent::MessageCompleted {
+                                                id: aid,
+                                                run_id,
+                                            })
+                                            .await;
+                                        *state_arc.write().await = AgentState::Done { success: false };
+                                        eb.publish(Event::Agent(AgentEvent::StateChanged {
+                                            from: AgentState::Thinking,
+                                            to: AgentState::Done { success: false },
+                                        }));
+                                    }
+                                }
+                            }
+                        } else {
+                            // No context to recover — fall back to a clean stop
+                            tracing::info!(
+                                "no recovery context for CancelAndReplan — stopping"
+                            );
+                            stop_reason = "cancelled".to_string();
+                            overall_success = false;
+                            let _ = tx
+                                .send(ResponseEvent::MessageDelta {
+                                    id: aid,
+                                    delta: format!("[已停止: {reason}]"),
+                                    run_id,
+                                })
+                                .await;
+                            let _ = tx
+                                .send(ResponseEvent::MessageCompleted { id: aid, run_id })
+                                .await;
+                            *state_arc.write().await = AgentState::Done { success: false };
+                            eb.publish(Event::Agent(AgentEvent::StateChanged {
+                                from: AgentState::Thinking,
+                                to: AgentState::Done { success: false },
+                            }));
+                        }
                     }
                     Some(zhongshu_core::agent::run::InterruptionAction::PauseAndRespond {
                         summary,
@@ -1238,6 +1302,7 @@ impl AgentController {
                         let _ = tx
                             .send(ResponseEvent::MessageCompleted { id: aid, run_id })
                             .await;
+                        *state_arc.write().await = AgentState::Done { success: false };
                         eb.publish(Event::Agent(AgentEvent::StateChanged {
                             from: AgentState::Thinking,
                             to: AgentState::Done { success: false },
@@ -1259,6 +1324,7 @@ impl AgentController {
                         let _ = tx
                             .send(ResponseEvent::MessageCompleted { id: aid, run_id })
                             .await;
+                        *state_arc.write().await = AgentState::Done { success: false };
                         eb.publish(Event::Agent(AgentEvent::StateChanged {
                             from: AgentState::Thinking,
                             to: AgentState::Done { success: false },
@@ -1275,14 +1341,29 @@ impl AgentController {
             }
 
             // Notify run controller of completion (handles state cleanup and events)
-            rc.finish_run(&stop_reason).await;
+            let run_outcome_label = if overall_success {
+                "CompletedVerified"
+            } else if stop_reason.contains("interrupted")
+                || stop_reason == "stopped"
+            {
+                "Interrupted"
+            } else if stop_reason.contains("timeout") {
+                "BudgetExhausted"
+            } else if stop_reason.contains("error") || stop_reason.contains("failed") {
+                "Failed"
+            } else {
+                "CompletedUnverified"
+            };
+            rc.finish_run(&stop_reason, Some(run_outcome_label)).await;
+
+            // Derive terminal UI state from canonical RunStatus
+            let terminal_state = rc.agent_state();
+            *state_arc.write().await = terminal_state;
 
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             *state_arc.write().await = AgentState::Idle;
             eb.publish(Event::Agent(AgentEvent::StateChanged {
-                from: AgentState::Done {
-                    success: overall_success,
-                },
+                from: terminal_state,
                 to: AgentState::Idle,
             }));
         });
@@ -1290,6 +1371,159 @@ impl AgentController {
         tokio::spawn(async move {
             *ct.lock().await = Some(handle);
         });
+    }
+}
+
+// ── Shared attempt types ────────────────────────────────────────────
+
+/// Everything that varies per-attempt.
+pub struct RunAttemptRequest {
+    pub run_id: Uuid,
+    pub input: String,
+    pub context_pack: ContextPack,
+    pub provider: Arc<dyn LlmProvider>,
+    pub model: String,
+    pub tools: ToolRegistry,
+    pub budget: AgentBudget,
+    pub reasoning_effort: Option<String>,
+    pub message_id: MessageId,
+    pub profile: ExecutionProfile,
+}
+
+/// Stable infrastructure an attempt needs to run.
+pub struct RunAttemptServices {
+    pub event_bus: Arc<EventBus>,
+    pub response_tx: ResponseTx,
+    pub core_db_path: PathBuf,
+    pub run_controller: Arc<RunController>,
+}
+
+/// Normal return from a successful attempt.
+pub struct RunAttemptResult {
+    pub loop_result: LoopResult,
+    pub tool_names: Vec<String>,
+}
+
+#[derive(Debug)]
+pub enum RunAttemptError {
+    AgentError(anyhow::Error),
+    Timeout,
+}
+
+/// Execute a single agent attempt — the shared execution kernel
+/// for normal runs, recovery runs, and replan runs.
+///
+/// Owns:
+///   1. AgentRuntime construction (checkpoint, ledger, event_bus, idempotency)
+///   2. Callback construction (streaming text, tool lifecycle)
+///   3. run_agent_with_context() with timeout
+///   4. Normalized result extraction
+pub(crate) async fn run_attempt(
+    req: RunAttemptRequest,
+    svc: RunAttemptServices,
+) -> Result<RunAttemptResult, RunAttemptError> {
+    let tool_names = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    let mut runtime =
+        AgentRuntime::with_llm(req.provider, req.model, req.tools, req.budget);
+    runtime.reasoning_effort = req.reasoning_effort;
+    runtime.profile = req.profile;
+
+    // Checkpoint store: saves state before each tool call for crash recovery.
+    // Only enabled for profiles that need cross-crash recovery.
+    if req.profile.saves_checkpoint() {
+        runtime.checkpoint_store =
+            Some(CheckpointStore::new(Database::new(svc.core_db_path.clone())));
+    }
+
+    // Ledger: needed for reconciling in-flight tools.
+    runtime.ledger = svc.run_controller.get_ledger();
+
+    // Event bus: publish events to the UI layer.
+    runtime.event_bus = Some((*svc.event_bus).clone());
+
+    // Idempotency checker: skip already-completed tool calls.
+    {
+        let rc = svc.run_controller.clone();
+        runtime.idempotency_checker = Some(Arc::new(move |name: &str, args: &str| {
+            rc.is_tool_completed(name, args)
+        }));
+    }
+
+    // Build callbacks
+    let tn = tool_names.clone();
+    let callbacks = AgentCallbacks {
+        on_text: {
+            let tx = svc.response_tx.clone();
+            Box::new(move |x: &str| {
+                if !x.is_empty() {
+                    let _ = tx.try_send(ResponseEvent::MessageDelta {
+                        id: req.message_id,
+                        delta: x.to_string(),
+                        run_id: req.run_id,
+                    });
+                }
+            })
+        },
+        on_tool_start: {
+            let run_id = req.run_id.to_string();
+            let eb = svc.event_bus.clone();
+            let rc = svc.run_controller.clone();
+            Box::new(move |name: &str, args: &str| {
+                tn.lock().unwrap().push(name.to_string());
+                rc.record_tool_call_start(name, args);
+                eb.publish(Event::Tool(ToolEvent::Started {
+                    name: name.to_string(),
+                    run_id: run_id.clone(),
+                }));
+            })
+        },
+        on_tool_done: {
+            let run_id = req.run_id.to_string();
+            let eb = svc.event_bus.clone();
+            let rc = svc.run_controller.clone();
+            Box::new(move |name: &str, args: &str, status| {
+                rc.record_tool_call_end(name, args, status.as_ledger_status(), None);
+                if status == ToolCompletionStatus::UnknownEffect {
+                    eb.publish(Event::Tool(ToolEvent::Interrupted {
+                        name: name.to_string(),
+                        run_id: run_id.clone(),
+                        tool_call_id: String::new(),
+                    }));
+                } else {
+                    eb.publish(Event::Tool(ToolEvent::Completed {
+                        name: name.to_string(),
+                        success: status.is_success(),
+                        run_id: run_id.clone(),
+                    }));
+                }
+            })
+        },
+        run_id: req.run_id,
+    };
+
+    let cancel_token = svc.run_controller.cancel_token();
+    let r = tokio::time::timeout(
+        AGENT_TIMEOUT,
+        execute_agent_loop(
+            &mut runtime,
+            req.context_pack,
+            Some(Arc::new(callbacks)),
+            &req.input,
+            cancel_token,
+            req.profile,
+        ),
+    )
+    .await;
+
+    let tools = tool_names.lock().unwrap().clone();
+    match r {
+        Ok(Ok(loop_result)) => Ok(RunAttemptResult {
+            loop_result,
+            tool_names: tools,
+        }),
+        Ok(Err(e)) => Err(RunAttemptError::AgentError(e)),
+        Err(_) => Err(RunAttemptError::Timeout),
     }
 }
 
@@ -1324,6 +1558,13 @@ impl AgentInbox {
     pub fn submit(&self, message: String) {
         self.queue.lock().unwrap().push_back(message);
         self.try_flush();
+    }
+
+    /// Queue a message without flushing immediately.
+    /// The message will be picked up by the inbox listener when the agent
+    /// transitions to Idle. Used for supplement input during busy state.
+    pub fn push(&self, message: String) {
+        self.queue.lock().unwrap().push_back(message);
     }
 
     fn try_flush(&self) {

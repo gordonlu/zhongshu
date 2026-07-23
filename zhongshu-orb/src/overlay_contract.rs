@@ -33,12 +33,15 @@ impl From<zhongshu_core::patch::PatchDiffPayload> for PatchDiffPayload {
 pub struct ToolCallEntry {
     pub name: String,
     pub status: ToolStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ToolStatus {
     Running,
     Done { success: bool },
+    Cancelled { reason: Option<String> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -46,6 +49,14 @@ pub struct ChatEntry {
     pub role: EntryRole,
     pub content: String,
     pub tool_calls: Vec<ToolCallEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -61,6 +72,14 @@ pub struct AuthRequest {
     pub source: String,
     pub tool: String,
     pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<PatchDiffPayload>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -190,8 +209,20 @@ pub struct OrganizationRecoveryResult {
 pub enum OverlayToUiEvent {
     Delta {
         content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_type: Option<String>,
     },
-    Complete,
+    Model {
+        label: String,
+    },
+    Complete {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+    },
     History {
         entries: Vec<ChatEntry>,
         has_more: bool,
@@ -202,10 +233,16 @@ pub enum OverlayToUiEvent {
     },
     ToolCall {
         name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<String>,
     },
     ToolResult {
         name: String,
         success: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        external_source: Option<bool>,
     },
     Auth {
         request: AuthRequest,
@@ -264,6 +301,118 @@ pub enum OverlayToUiEvent {
         from: String,
         to: String,
     },
+    MemoryEntries {
+        entries: Vec<MemoryEntryData>,
+    },
+    ChromeState {
+        state: ChromeStateData,
+    },
+    DebugEntries {
+        entries: Vec<DebugEntryData>,
+    },
+    CompressEntries {
+        entries: Vec<CompressEntryData>,
+    },
+    AuthEntries {
+        entries: Vec<AuthEntryData>,
+    },
+    MemoryHit {
+        count: usize,
+        entries: Vec<MemoryHitEntry>,
+    },
+    ModelFallback {
+        from: String,
+        to: String,
+        reason: String,
+    },
+    EquipmentProposal {
+        id: String,
+        name: String,
+        version: String,
+        source: String,
+        description: String,
+    },
+    EquipmentPreview {
+        id: String,
+        manifest: serde_json::Value,
+        capabilities: Vec<String>,
+    },
+    PrivacyNotice {
+        text: String,
+    },
+    LoginStateHint {
+        hint: String,
+    },
+    TaskArtifact {
+        task_id: String,
+        artifact: serde_json::Value,
+    },
+    ContextInconsistency {
+        label: String,
+        detail: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryEntryData {
+    pub id: String,
+    pub content: String,
+    pub source: String,
+    pub confidence: f64,
+    pub last_used: i64,
+    pub created_at: i64,
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_text_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChromeStateData {
+    pub connected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub recent_actions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screenshot: Option<String>,
+    #[serde(default)]
+    pub console_errors: usize,
+    #[serde(default)]
+    pub network_requests: usize,
+    #[serde(default)]
+    pub busy: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DebugEntryData {
+    pub id: String,
+    pub entry_type: String,
+    pub timestamp: i64,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CompressEntryData {
+    pub id: String,
+    pub timestamp: i64,
+    pub message_count: usize,
+    pub token_before: usize,
+    pub token_after: usize,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AuthEntryData {
+    pub id: String,
+    pub tool: String,
+    pub command: String,
+    pub source: String,
+    pub approved: bool,
+    pub timestamp: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -320,6 +469,15 @@ pub enum CodingUiEvent {
         command: String,
         success: bool,
         exit_code: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_locations: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        suggestion: Option<String>,
+    },
+    WorkspaceDetected {
+        path: String,
+        description: String,
+        file_count: usize,
     },
     RecoveryFeedback {
         rule_id: String,
@@ -338,6 +496,38 @@ pub enum CodingUiEvent {
         conversation_id: Option<i64>,
         replay_execution_id: Option<String>,
     },
+    ModelFallback {
+        from_model: String,
+        to_model: String,
+        reason: String,
+    },
+    ArchitectureAnalysis {
+        summary: String,
+        components: Vec<ArchComponent>,
+    },
+    ConflictDetected {
+        session_id: Option<String>,
+        path: String,
+        worker_a: String,
+        worker_b: String,
+        reason: String,
+    },
+    MemoryHit {
+        count: usize,
+        entries: Vec<MemoryHitEntry>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArchComponent {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryHitEntry {
+    pub content: String,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -368,7 +558,58 @@ pub enum UiToOverlayCommand {
     CloseWindow,
     CancelTask(String),
     CompleteTask(String),
+    EditPlan {
+        session_id: String,
+        steps: Vec<PlanStepEdit>,
+    },
+    DeleteStep {
+        session_id: String,
+        step_id: String,
+    },
+    ReorderSteps {
+        session_id: String,
+        step_ids: Vec<String>,
+    },
+    ExecuteStep {
+        session_id: String,
+        step_id: String,
+    },
+    ListMemories,
+    DeleteMemory(String),
+    ToggleMemory {
+        id: String,
+        enabled: bool,
+    },
+    ClearBrowserData,
+    OpenBrowserProfile,
+    CancelBrowserAction,
+    RetryStep {
+        session_id: String,
+        step_id: String,
+    },
+    RerunFromStep {
+        session_id: String,
+        step_id: String,
+    },
+    FlagSensitive(bool),
+    SessionOptOut(bool),
+    ExclusionRules(Vec<String>),
+    JumpToIde {
+        path: String,
+        line: Option<usize>,
+    },
+    ResolveConflict {
+        path: String,
+        resolution: String,
+        merged_content: Option<String>,
+    },
     Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanStepEdit {
+    pub step_id: String,
+    pub title: String,
 }
 
 pub fn chat_coding_smoke_events() -> Vec<OverlayToUiEvent> {
@@ -378,6 +619,9 @@ pub fn chat_coding_smoke_events() -> Vec<OverlayToUiEvent> {
         },
         OverlayToUiEvent::Delta {
             content: "offline proof: running safe self-test".into(),
+            model: None,
+            duration_ms: None,
+            source_type: None,
         },
         OverlayToUiEvent::Coding {
             event: CodingUiEvent::PlanCreated {
@@ -408,6 +652,8 @@ pub fn chat_coding_smoke_events() -> Vec<OverlayToUiEvent> {
                 command: "cargo test -p zhongshu-core offline_proof".into(),
                 success: true,
                 exit_code: Some(0),
+                file_locations: None,
+                suggestion: None,
             },
         },
         OverlayToUiEvent::Coding {
@@ -417,7 +663,7 @@ pub fn chat_coding_smoke_events() -> Vec<OverlayToUiEvent> {
                 dropped_recent: 0,
             },
         },
-        OverlayToUiEvent::Complete,
+        OverlayToUiEvent::Complete { duration_ms: None },
     ]
 }
 
@@ -510,6 +756,117 @@ pub fn parse_ui_command(body: &str) -> UiToOverlayCommand {
             .as_str()
             .map(|id| UiToOverlayCommand::CompleteTask(id.to_string()))
             .unwrap_or(UiToOverlayCommand::Unknown),
+        Some("edit_plan") => {
+            let session_id = msg["session_id"].as_str().map(String::from);
+            let steps: Option<Vec<PlanStepEdit>> = msg.get("steps")
+                .and_then(|v| serde_json::from_value(v.clone()).ok());
+            match (session_id, steps) {
+                (Some(session_id), Some(steps)) if !steps.is_empty() => {
+                    UiToOverlayCommand::EditPlan { session_id, steps }
+                }
+                _ => UiToOverlayCommand::Unknown,
+            }
+        }
+        Some("delete_step") => {
+            let session_id = msg["session_id"].as_str().map(String::from);
+            let step_id = msg["step_id"].as_str().map(String::from);
+            match (session_id, step_id) {
+                (Some(session_id), Some(step_id)) => {
+                    UiToOverlayCommand::DeleteStep { session_id, step_id }
+                }
+                _ => UiToOverlayCommand::Unknown,
+            }
+        }
+        Some("reorder_steps") => {
+            let session_id = msg["session_id"].as_str().map(String::from);
+            let step_ids: Option<Vec<String>> = msg.get("step_ids")
+                .and_then(|v| serde_json::from_value(v.clone()).ok());
+            match (session_id, step_ids) {
+                (Some(session_id), Some(step_ids)) if !step_ids.is_empty() => {
+                    UiToOverlayCommand::ReorderSteps { session_id, step_ids }
+                }
+                _ => UiToOverlayCommand::Unknown,
+            }
+        }
+        Some("execute_step") => {
+            let session_id = msg["session_id"].as_str().map(String::from);
+            let step_id = msg["step_id"].as_str().map(String::from);
+            match (session_id, step_id) {
+                (Some(session_id), Some(step_id)) => {
+                    UiToOverlayCommand::ExecuteStep { session_id, step_id }
+                }
+                _ => UiToOverlayCommand::Unknown,
+            }
+        }
+        Some("list_memories") => UiToOverlayCommand::ListMemories,
+        Some("delete_memory") => msg["id"]
+            .as_str()
+            .map(|id| UiToOverlayCommand::DeleteMemory(id.to_string()))
+            .unwrap_or(UiToOverlayCommand::Unknown),
+        Some("toggle_memory") => {
+            let id = msg["id"].as_str().map(String::from);
+            let enabled = msg["enabled"].as_bool();
+            match (id, enabled) {
+                (Some(id), Some(enabled)) => {
+                    UiToOverlayCommand::ToggleMemory { id, enabled }
+                }
+                _ => UiToOverlayCommand::Unknown,
+            }
+        }
+        Some("clear_browser_data") => UiToOverlayCommand::ClearBrowserData,
+        Some("open_browser_profile") => UiToOverlayCommand::OpenBrowserProfile,
+        Some("cancel_browser_action") => UiToOverlayCommand::CancelBrowserAction,
+        Some("retry_step") => {
+            let session_id = msg["session_id"].as_str().map(String::from);
+            let step_id = msg["step_id"].as_str().map(String::from);
+            match (session_id, step_id) {
+                (Some(session_id), Some(step_id)) => {
+                    UiToOverlayCommand::RetryStep { session_id, step_id }
+                }
+                _ => UiToOverlayCommand::Unknown,
+            }
+        }
+        Some("rerun_from_step") => {
+            let session_id = msg["session_id"].as_str().map(String::from);
+            let step_id = msg["step_id"].as_str().map(String::from);
+            match (session_id, step_id) {
+                (Some(session_id), Some(step_id)) => {
+                    UiToOverlayCommand::RerunFromStep { session_id, step_id }
+                }
+                _ => UiToOverlayCommand::Unknown,
+            }
+        }
+        Some("flag_sensitive") => {
+            UiToOverlayCommand::FlagSensitive(msg["enabled"].as_bool().unwrap_or(false))
+        }
+        Some("session_opt_out") => {
+            UiToOverlayCommand::SessionOptOut(msg["enabled"].as_bool().unwrap_or(false))
+        }
+        Some("exclusion_rules") => {
+            let patterns: Vec<String> = msg.get("patterns")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            UiToOverlayCommand::ExclusionRules(patterns)
+        }
+        Some("jump_to_ide") => {
+            let path = msg["path"].as_str().map(String::from);
+            let line = msg.get("line").and_then(|v| v.as_u64()).map(|n| n as usize);
+            match path {
+                Some(path) => UiToOverlayCommand::JumpToIde { path, line },
+                None => UiToOverlayCommand::Unknown,
+            }
+        }
+        Some("resolve_conflict") => {
+            let path = msg["path"].as_str().map(String::from);
+            let resolution = msg["resolution"].as_str().map(String::from);
+            let merged_content = msg.get("merged_content").and_then(|v| v.as_str()).map(String::from);
+            match (path, resolution) {
+                (Some(path), Some(resolution)) => {
+                    UiToOverlayCommand::ResolveConflict { path, resolution, merged_content }
+                }
+                _ => UiToOverlayCommand::Unknown,
+            }
+        }
         _ => UiToOverlayCommand::Unknown,
     }
 }
@@ -772,7 +1129,7 @@ mod tests {
             .any(|event| matches!(event, OverlayToUiEvent::Delta { .. })));
         assert!(events
             .iter()
-            .any(|event| matches!(event, OverlayToUiEvent::Complete)));
+            .any(|event| matches!(event, OverlayToUiEvent::Complete { .. })));
 
         for event in events {
             let json = serde_json::to_value(&event).expect("event json");

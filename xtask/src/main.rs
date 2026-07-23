@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod architecture_check;
 mod benchmark;
 
 fn main() {
@@ -23,6 +24,7 @@ fn run() -> Result<(), String> {
     match args.first().map(String::as_str) {
         Some("proof") => run_proof(&args[1..]),
         Some("benchmark") => benchmark::run(&args[1..]),
+        Some("architecture-check") => architecture_check::run(),
         Some("-h") | Some("--help") | None => {
             print_help();
             Ok(())

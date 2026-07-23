@@ -186,6 +186,23 @@ pub enum TaskStatus {
     Cancelled,
 }
 
+impl From<crate::runtime::RunStatus> for TaskStatus {
+    fn from(s: crate::runtime::RunStatus) -> Self {
+        match s {
+            crate::runtime::RunStatus::Created => TaskStatus::Pending,
+            crate::runtime::RunStatus::Running | crate::runtime::RunStatus::Recovering => {
+                TaskStatus::Running
+            }
+            crate::runtime::RunStatus::WaitingApproval => TaskStatus::WaitingApproval,
+            crate::runtime::RunStatus::Paused => TaskStatus::Running,
+            crate::runtime::RunStatus::Completed => TaskStatus::Completed,
+            crate::runtime::RunStatus::Failed
+            | crate::runtime::RunStatus::Cancelled
+            | crate::runtime::RunStatus::UnknownOutcome => TaskStatus::Failed,
+        }
+    }
+}
+
 impl TaskStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -387,6 +404,52 @@ pub struct TaskArtifact {
     pub relation: String,
 }
 
+// ── Candidate Status ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CandidateStatus {
+    Proposed,
+    UnderReview,
+    Shadowing,
+    Approved,
+    Limited,
+    Active,
+    Suspended,
+    Rejected,
+    RolledBack,
+}
+
+impl CandidateStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CandidateStatus::Proposed => "proposed",
+            CandidateStatus::UnderReview => "under_review",
+            CandidateStatus::Shadowing => "shadowing",
+            CandidateStatus::Approved => "approved",
+            CandidateStatus::Limited => "limited",
+            CandidateStatus::Active => "active",
+            CandidateStatus::Suspended => "suspended",
+            CandidateStatus::Rejected => "rejected",
+            CandidateStatus::RolledBack => "rolled_back",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "proposed" => Some(CandidateStatus::Proposed),
+            "under_review" => Some(CandidateStatus::UnderReview),
+            "shadowing" => Some(CandidateStatus::Shadowing),
+            "approved" => Some(CandidateStatus::Approved),
+            "limited" => Some(CandidateStatus::Limited),
+            "active" => Some(CandidateStatus::Active),
+            "suspended" => Some(CandidateStatus::Suspended),
+            "rejected" => Some(CandidateStatus::Rejected),
+            "rolled_back" => Some(CandidateStatus::RolledBack),
+            _ => None,
+        }
+    }
+}
+
 // ── Memory Candidate ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -397,11 +460,81 @@ pub struct MemoryCandidate {
     pub confidence: f64,
     pub source_type: Option<String>,
     pub source_id: Option<String>,
+    pub run_id: Option<String>,
+    pub runbook_id: Option<String>,
+    pub source_task_id: Option<String>,
     pub status: String,
     pub created_at: i64,
 }
 
-// ── Memory ───────────────────────────────────────────────────────────
+// ── Skill Candidate ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillCandidate {
+    pub id: String,
+    pub name: String,
+    pub manifest_json: String,
+    pub source_runbook_id: Option<String>,
+    pub source_task_id: Option<String>,
+    pub run_id: Option<String>,
+    pub status: String,
+    pub created_at: i64,
+}
+
+// ── Policy Candidate ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PolicyArea {
+    ContextTokenAllocation,
+    HistoryRetrievalRanking,
+    ModelUpgradeThreshold,
+    RetryReplanSelection,
+    SkillRecommendationOrder,
+    WorkerAssignmentStrategy,
+    UserApprovalPreference,
+}
+
+impl PolicyArea {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PolicyArea::ContextTokenAllocation => "context_token_allocation",
+            PolicyArea::HistoryRetrievalRanking => "history_retrieval_ranking",
+            PolicyArea::ModelUpgradeThreshold => "model_upgrade_threshold",
+            PolicyArea::RetryReplanSelection => "retry_replan_selection",
+            PolicyArea::SkillRecommendationOrder => "skill_recommendation_order",
+            PolicyArea::WorkerAssignmentStrategy => "worker_assignment_strategy",
+            PolicyArea::UserApprovalPreference => "user_approval_preference",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "context_token_allocation" => Some(PolicyArea::ContextTokenAllocation),
+            "history_retrieval_ranking" => Some(PolicyArea::HistoryRetrievalRanking),
+            "model_upgrade_threshold" => Some(PolicyArea::ModelUpgradeThreshold),
+            "retry_replan_selection" => Some(PolicyArea::RetryReplanSelection),
+            "skill_recommendation_order" => Some(PolicyArea::SkillRecommendationOrder),
+            "worker_assignment_strategy" => Some(PolicyArea::WorkerAssignmentStrategy),
+            "user_approval_preference" => Some(PolicyArea::UserApprovalPreference),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyCandidate {
+    pub id: String,
+    pub area: String,
+    pub title: String,
+    pub config_snapshot: String,
+    pub proposed_value: String,
+    pub rationale: String,
+    pub status: String,
+    pub baseline_metric: Option<String>,
+    pub canary_metric: Option<String>,
+    pub source_run_id: Option<String>,
+    pub created_at: i64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MemoryType {

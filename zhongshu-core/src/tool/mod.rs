@@ -23,8 +23,8 @@ pub use executor::{
 };
 use serde::{Deserialize, Serialize};
 pub use spec::{
-    infer_side_effect, ObservableToolInput, SideEffect, ToolEffect, ToolReplayKey,
-    ToolResultSummary, ToolSpec, WorkspaceScope,
+    infer_replay_policy, infer_side_effect, ObservableToolInput, ReplayPolicy, SideEffect,
+    ToolEffect, ToolReplayKey, ToolResultSummary, ToolSpec, WorkspaceScope,
 };
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -552,6 +552,10 @@ pub fn build_browser_client() -> Result<reqwest::Client, reqwest::Error> {
 pub fn sanitize_web_content(text: &str) -> String {
     let mut result = text.to_string();
 
+    // Strip protocol-level XML-like tags that an attacker could use to
+    // fake observation/tool boundaries (e.g. <observation>, <tool_result>, ...).
+    result = strip_protocol_tags(&result);
+
     // Remove zero-width characters often used to smuggle injection.
     result.retain(|c| c != '\u{200B}' && c != '\u{200C}' && c != '\u{200D}' && c != '\u{FEFF}');
 
@@ -581,6 +585,41 @@ pub fn sanitize_web_content(text: &str) -> String {
         }
     }
 
+    result
+}
+
+/// Strip protocol-level XML-like tags that an attacker could use to fake
+/// observation/tool/authority boundaries in web content seen by the LLM.
+fn strip_protocol_tags(text: &str) -> String {
+    let dangerous_tags = [
+        "observation", "tool_result", "tool_call", "system",
+        "compressed_summary", "authority", "auth_request",
+    ];
+    let mut result = text.to_string();
+    for tag in &dangerous_tags {
+        // Strip opening tags: <tag ... >
+        let open_start = format!("<{tag}");
+        let mut cleaned = String::with_capacity(result.len());
+        let mut remaining = result.as_str();
+        while let Some(pos) = remaining.find(&open_start) {
+            cleaned.push_str(&remaining[..pos]);
+            remaining = &remaining[pos..];
+            // Find the closing >
+            if let Some(close) = remaining.find('>') {
+                remaining = &remaining[close + 1..];
+            } else {
+                break;
+            }
+        }
+        cleaned.push_str(remaining);
+        result = cleaned;
+
+        // Strip closing tags: </tag> and </tag >
+        let close1 = format!("</{}>", tag);
+        let close2 = format!("</{} >", tag);
+        result = result.replace(&close1, "");
+        result = result.replace(&close2, "");
+    }
     result
 }
 

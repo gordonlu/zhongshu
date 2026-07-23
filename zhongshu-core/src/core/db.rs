@@ -244,6 +244,42 @@ impl Database {
                 ON organization_graph_checkpoints(clean_terminal, updated_at);",
         )?;
 
+        // Phase 5 migration: candidate source refs + skill candidates
+        for sql in &[
+            "ALTER TABLE memory_candidates ADD COLUMN run_id TEXT",
+            "ALTER TABLE memory_candidates ADD COLUMN runbook_id TEXT",
+            "ALTER TABLE memory_candidates ADD COLUMN source_task_id TEXT",
+        ] {
+            let _ = conn.execute_batch(sql);
+        }
+        let _ = conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS skill_candidates (
+                id                  TEXT PRIMARY KEY,
+                name                TEXT NOT NULL,
+                manifest_json       TEXT NOT NULL,
+                source_runbook_id   TEXT,
+                source_task_id      TEXT,
+                run_id              TEXT,
+                status              TEXT NOT NULL DEFAULT 'proposed',
+                created_at          INTEGER NOT NULL
+            );",
+        );
+        let _ = conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS policy_candidates (
+                id                  TEXT PRIMARY KEY,
+                area                TEXT NOT NULL,
+                title               TEXT NOT NULL,
+                config_snapshot     TEXT NOT NULL,
+                proposed_value      TEXT NOT NULL,
+                rationale           TEXT NOT NULL,
+                status              TEXT NOT NULL DEFAULT 'proposed',
+                baseline_metric     TEXT,
+                canary_metric       TEXT,
+                source_run_id       TEXT,
+                created_at          INTEGER NOT NULL
+            );",
+        );
+
         tracing::info!("core database migrated at {}", self.path.display());
         Ok(())
     }

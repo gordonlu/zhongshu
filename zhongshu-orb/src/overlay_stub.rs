@@ -12,12 +12,15 @@ use crate::overlay_host::{OverlayHandleExt, OverlayHostCommand, OverlayHostDiagn
 pub struct ToolCallEntry {
     pub name: String,
     pub status: ToolStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ToolStatus {
     Running,
     Done { success: bool },
+    Cancelled { reason: Option<String> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +28,14 @@ pub struct ChatEntry {
     pub role: EntryRole,
     pub content: String,
     pub tool_calls: Vec<ToolCallEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +51,14 @@ pub struct AuthRequest {
     pub source: String,
     pub tool: String,
     pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<PatchDiffPayload>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

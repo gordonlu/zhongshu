@@ -61,9 +61,11 @@ impl DigestBuilder {
             .collect::<Vec<_>>()
             .join("\n---\n");
 
+        let ts = chrono::Utc::now().timestamp();
         let digest_report = Report {
-            task_id: format!("digest-{}", chrono::Utc::now().timestamp()),
+            task_id: format!("digest-{ts}"),
             worker: "digest".into(),
+            run_id: format!("digest-{ts}"),
             summary,
             findings,
             success: true,
@@ -90,6 +92,7 @@ mod tests {
         Report {
             task_id: "t1".into(),
             worker: worker.into(),
+            run_id: "unknown".into(),
             summary: summary.into(),
             findings: "detailed findings".into(),
             success: true,

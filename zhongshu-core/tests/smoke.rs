@@ -19,7 +19,8 @@ use zhongshu_core::agent::llm::{
 };
 use zhongshu_core::agent::run::{InterruptionAction, RunController};
 use zhongshu_core::agent::{
-    run_agent, AgentBudget, AgentProfile, AgentRuntime, AttentionManager, Report, Worker,
+    execute_agent_loop_with_messages, AgentBudget, AgentProfile, AgentRuntime, AttentionManager,
+    Report, Worker,
 };
 use zhongshu_core::event::{Event, EventBus, SourceEvent};
 use zhongshu_core::rule::{Rule, RuleCondition, RuleEngine, RuleTask};
@@ -271,6 +272,7 @@ async fn smoke_attention_manager_drains_digest_queue() {
         mgr.process(Report {
             task_id: format!("t{i}"),
             worker: "w".into(),
+            run_id: "test".into(),
             summary: "sum".into(),
             findings: "findings".into(),
             confidence: 0.5,
@@ -312,6 +314,7 @@ fn smoke_context_pack_full_pipeline() {
         confidence: 0.9,
         relevance: 0.8,
         trust: TrustLevel::Untrusted,
+            pinned: false,
     }];
 
     let state = StateBlock {
@@ -383,6 +386,7 @@ fn smoke_context_pack_crops_excess_evidence() {
             confidence: if i < 3 { 0.9 } else { 0.1 },
             relevance: if i < 3 { 0.9 } else { 0.1 },
             trust: TrustLevel::Untrusted,
+            pinned: false,
         })
         .collect();
 
@@ -534,12 +538,13 @@ async fn smoke_token_cancellation_stops_agent_loop() {
     // Cancel immediately so the agent loop sees it on first iteration
     cancel_token.cancel();
 
-    let result = run_agent(
+    let result = execute_agent_loop_with_messages(
         &mut runtime,
         vec![Message::user("请一直运行")],
         None,
         "cancel-test",
         cancel_token,
+        zhongshu_core::runtime::ExecutionProfile::Interactive,
     )
     .await;
 
@@ -574,8 +579,8 @@ fn smoke_run_controller_interrupt_captures_context() {
     let action = controller.interrupt("停下");
 
     assert!(
-        matches!(action, InterruptionAction::CancelAndReplan { .. }),
-        "interrupt('停下') should produce CancelAndReplan, got {action:?}"
+        matches!(action, InterruptionAction::Stop),
+        "interrupt('停下') should produce Stop, got {action:?}"
     );
     assert!(
         controller.is_interrupted(),

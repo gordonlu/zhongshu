@@ -742,13 +742,17 @@ impl Tool for SandboxShellTool {
                 "--ro-bind",
                 "/usr",
                 "/usr",
-                "--ro-bind",
-                "/bin",
-                "/bin",
-                "--ro-bind",
-                "/etc",
-                "/etc",
             ]);
+            // Mount /bin only if it's a real directory (not a symlink to /usr/bin).
+            // On modern Ubuntu /bin -> usr/bin, and bwrap --ro-bind follows
+            // symlinks, causing the mount to fail.
+            if std::fs::metadata("/bin")
+                .map(|m| m.is_dir())
+                .unwrap_or(false)
+            {
+                process.args(["--ro-bind", "/bin", "/bin"]);
+            }
+            process.args(["--ro-bind", "/etc", "/etc"]);
             process.arg(if self.0.inner.sealed.load(Ordering::Acquire) {
                 "--ro-bind"
             } else {
@@ -776,7 +780,7 @@ impl Tool for SandboxShellTool {
                 "--chdir",
                 "/workspace",
                 "--",
-                "/bin/sh",
+                "/usr/bin/sh",
                 "-lc",
                 command,
             ]);

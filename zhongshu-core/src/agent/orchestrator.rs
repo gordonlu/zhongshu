@@ -3284,8 +3284,15 @@ impl Orchestrator {
         // merge review still requires a CompletedVerified report, so this
         // short-circuit does not weaken acceptance.
         profile.verification_policy = crate::agent::profile::VerificationPolicy::NotRequired;
-        let result =
-            Worker::execute_with_cancel(&runtime, &profile, task, None, cancel_token, crate::runtime::ExecutionProfile::Worker).await;
+        let result = Worker::execute_with_cancel(
+            &runtime,
+            &profile,
+            task,
+            None,
+            cancel_token,
+            crate::runtime::ExecutionProfile::Worker,
+        )
+        .await;
         if let Some(sandbox) = sandbox {
             if let Err(cleanup_error) = sandbox.cleanup() {
                 return match result {

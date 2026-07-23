@@ -1,7 +1,7 @@
 use rusqlite::params;
 
 use crate::core::db::Database;
-use crate::core::models::{CandidateStatus, SkillCandidate, id, now};
+use crate::core::models::{id, now, CandidateStatus, SkillCandidate};
 
 #[derive(Clone)]
 pub struct SkillCandidateStore {
@@ -52,7 +52,8 @@ impl SkillCandidateStore {
             ),
         };
         let mut stmt = conn.prepare(&sql)?;
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
         let rows = stmt.query_map(params_refs.as_slice(), Self::row)?;
         rows.collect()
     }
@@ -79,11 +80,13 @@ impl SkillCandidateStore {
     /// Returns `Ok(false)` if the current status does not allow activation.
     pub fn activate(&self, id: &str) -> rusqlite::Result<bool> {
         let conn = self.db.conn()?;
-        let current: Option<String> = conn.query_row(
-            "SELECT status FROM skill_candidates WHERE id = ?1",
-            params![id],
-            |row| row.get(0),
-        ).ok();
+        let current: Option<String> = conn
+            .query_row(
+                "SELECT status FROM skill_candidates WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .ok();
         match current.as_deref() {
             Some("approved" | "limited") => {
                 self.update_status(id, CandidateStatus::Active.as_str())
@@ -96,11 +99,13 @@ impl SkillCandidateStore {
     /// Returns `Ok(false)` if the current status does not allow rollback.
     pub fn rollback(&self, id: &str) -> rusqlite::Result<bool> {
         let conn = self.db.conn()?;
-        let current: Option<String> = conn.query_row(
-            "SELECT status FROM skill_candidates WHERE id = ?1",
-            params![id],
-            |row| row.get(0),
-        ).ok();
+        let current: Option<String> = conn
+            .query_row(
+                "SELECT status FROM skill_candidates WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .ok();
         match current.as_deref() {
             Some("active" | "limited") => {
                 self.update_status(id, CandidateStatus::RolledBack.as_str())
@@ -111,10 +116,7 @@ impl SkillCandidateStore {
 
     pub fn delete(&self, id: &str) -> rusqlite::Result<bool> {
         let conn = self.db.conn()?;
-        let n = conn.execute(
-            "DELETE FROM skill_candidates WHERE id = ?1",
-            params![id],
-        )?;
+        let n = conn.execute("DELETE FROM skill_candidates WHERE id = ?1", params![id])?;
         Ok(n > 0)
     }
 

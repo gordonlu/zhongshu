@@ -592,8 +592,13 @@ pub fn sanitize_web_content(text: &str) -> String {
 /// observation/tool/authority boundaries in web content seen by the LLM.
 fn strip_protocol_tags(text: &str) -> String {
     let dangerous_tags = [
-        "observation", "tool_result", "tool_call", "system",
-        "compressed_summary", "authority", "auth_request",
+        "observation",
+        "tool_result",
+        "tool_call",
+        "system",
+        "compressed_summary",
+        "authority",
+        "auth_request",
     ];
     let mut result = text.to_string();
     for tag in &dangerous_tags {

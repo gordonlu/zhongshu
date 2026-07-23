@@ -24,6 +24,7 @@ pub use attention::AttentionLevel;
 pub use attention_manager::AttentionManager;
 pub use auto_delegation::{AutoDelegationDecision, AutoDelegationPlanner, AutoDelegationStrategy};
 pub use dispatcher::AttentionDispatcher;
+pub use entry::{execute_agent_loop, execute_agent_loop_with_messages};
 pub use execution_graph::{
     ExecutionArtifact, ExecutionEdge, ExecutionEdgeKind, ExecutionEffectExpectation,
     ExecutionEffectIntent, ExecutionGraph, ExecutionGraphCheckpoint, ExecutionGraphError,
@@ -32,7 +33,6 @@ pub use execution_graph::{
     ExecutionScheduleReport, ExecutionTransition, NodeExecutionOutcome, NodeRequirements,
     EXECUTION_GRAPH_CHECKPOINT_VERSION,
 };
-pub use entry::{execute_agent_loop, execute_agent_loop_with_messages};
 pub use loop_::{
     AgentBudget, AgentCallbacks, LoopResult, RunOutcome, StopReason, ToolCompletionStatus,
 };

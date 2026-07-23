@@ -588,7 +588,16 @@ pub fn spawn_task_executor(
                         ttl,
                         out.chars().take(200).collect::<String>()
                     );
-                    let _ = mc.insert(&summary, Some("procedure"), 0.8, Some("task"), Some(&tid), None, None, None);
+                    let _ = mc.insert(
+                        &summary,
+                        Some("procedure"),
+                        0.8,
+                        Some("task"),
+                        Some(&tid),
+                        None,
+                        None,
+                        None,
+                    );
                     ebus.publish(Event::Task(TaskEvent::Completed {
                         task_id: tid.clone(),
                         title: ttl.clone(),
@@ -603,7 +612,10 @@ pub fn spawn_task_executor(
                 let ttl = title.clone();
                 tokio::task::spawn_blocking(move || {
                     trepo.set_summary(&tid, &format!("unverified: {ttl}")).ok();
-                    tracing::info!("executor: task '{}' not completed — verification missing", ttl);
+                    tracing::info!(
+                        "executor: task '{}' not completed — verification missing",
+                        ttl
+                    );
                 });
             }
             lease_handle.abort();
@@ -1125,9 +1137,14 @@ pub fn spawn_policy_learner(core_db_path: PathBuf) {
                 }
             }
             // Promote approved candidates to active
-            if let Ok(approved) = store.list(Some(zhongshu_core::core::models::CandidateStatus::Approved.as_str())) {
+            if let Ok(approved) = store.list(Some(
+                zhongshu_core::core::models::CandidateStatus::Approved.as_str(),
+            )) {
                 for c in approved {
-                    if let Err(e) = store.update_status(&c.id, zhongshu_core::core::models::CandidateStatus::Active.as_str()) {
+                    if let Err(e) = store.update_status(
+                        &c.id,
+                        zhongshu_core::core::models::CandidateStatus::Active.as_str(),
+                    ) {
                         tracing::warn!("policy_learner: failed to activate {}: {e}", c.id);
                     } else {
                         tracing::info!(

@@ -633,17 +633,16 @@ pub(crate) async fn run_agent_with_verification_policy(
                 }
 
                 if action_result.status == crate::action::ActionStatus::Cancelled {
-                    messages.push(Message::system("用户已中断当前操作，之前的审批请求已取消。"));
+                    messages.push(Message::system(
+                        "用户已中断当前操作，之前的审批请求已取消。",
+                    ));
                 }
                 continue;
             }
 
             // ── Trace recording ───────────────────────────────────────
             let tool_success = matches!(action_result.output_status, ToolStatus::Success);
-            let exit_code = action_result
-                .tool_output
-                .as_ref()
-                .and_then(tool_exit_code);
+            let exit_code = action_result.tool_output.as_ref().and_then(tool_exit_code);
             record_trace(
                 runtime,
                 HarnessEvent::ToolCall {
@@ -702,7 +701,10 @@ pub(crate) async fn run_agent_with_verification_policy(
 
             // Harness: post-tool checks
             let termination = action_result.tool_termination;
-            let output = action_result.tool_output.clone().unwrap_or_else(|| ToolOutput::error(String::from("missing")));
+            let output = action_result
+                .tool_output
+                .clone()
+                .unwrap_or_else(|| ToolOutput::error(String::from("missing")));
             {
                 // Update last_edit_step for mutation tools and shell mutations
                 let shell_has_new_mutations = if tc.function.name == "shell" {
@@ -991,7 +993,6 @@ pub(crate) async fn run_agent_with_verification_policy(
                         let text = crate::harness::render::render_feedback(fb);
                         info!("arch semantic: {text}");
                     }
-
                 }
             }
         }

@@ -369,10 +369,28 @@ mod tests {
         let policy = MemoryPolicy::new(db);
 
         candidates
-            .insert("user prefers terminal", Some("preference"), 0.9, None, None, None, None, None)
+            .insert(
+                "user prefers terminal",
+                Some("preference"),
+                0.9,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         candidates
-            .insert("user likes vscode", Some("preference"), 0.9, None, None, None, None, None)
+            .insert(
+                "user likes vscode",
+                Some("preference"),
+                0.9,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         policy.promote_candidates().unwrap();
 

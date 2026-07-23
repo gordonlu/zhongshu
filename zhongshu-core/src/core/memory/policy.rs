@@ -156,9 +156,8 @@ impl MemoryPolicy {
         let mut stmt = conn.prepare(
             "SELECT id, type, content, embedding, created_at, updated_at FROM memories ORDER BY updated_at DESC LIMIT ?1",
         )?;
-        let result: rusqlite::Result<Vec<Memory>> = stmt
-            .query_map(params![limit], map_memory_row)?
-            .collect();
+        let result: rusqlite::Result<Vec<Memory>> =
+            stmt.query_map(params![limit], map_memory_row)?.collect();
         if let Ok(ref memories) = result {
             self.emit_memory_hit("list", memories);
         }

@@ -38,7 +38,10 @@ impl ExecutionProfile {
     /// - `Durable`     → true  (cross-process crash recovery)
     /// - `Worker`      → false (parent manages retry)
     pub fn saves_checkpoint(&self) -> bool {
-        matches!(self, ExecutionProfile::Resumable | ExecutionProfile::Durable)
+        matches!(
+            self,
+            ExecutionProfile::Resumable | ExecutionProfile::Durable
+        )
     }
 
     /// Whether tool actions should be recorded in the append-only journal.
@@ -48,6 +51,9 @@ impl ExecutionProfile {
     /// - `Durable`     → true  (cross-process audit trail)
     /// - `Worker`      → false (parent manages auditing)
     pub fn records_journal(&self) -> bool {
-        matches!(self, ExecutionProfile::Resumable | ExecutionProfile::Durable)
+        matches!(
+            self,
+            ExecutionProfile::Resumable | ExecutionProfile::Durable
+        )
     }
 }

@@ -314,7 +314,7 @@ fn smoke_context_pack_full_pipeline() {
         confidence: 0.9,
         relevance: 0.8,
         trust: TrustLevel::Untrusted,
-            pinned: false,
+        pinned: false,
     }];
 
     let state = StateBlock {

@@ -120,10 +120,16 @@ impl Tool for MemoryQueryTool {
                     None => return ToolOutput::error("propose 需要 content"),
                 };
                 let mem_type = arguments["memory_type"].as_str();
-                match self
-                    .candidates
-                    .insert(content, mem_type, 0.8, Some("agent"), None, None, None, None)
-                {
+                match self.candidates.insert(
+                    content,
+                    mem_type,
+                    0.8,
+                    Some("agent"),
+                    None,
+                    None,
+                    None,
+                    None,
+                ) {
                     Ok(mc) => ToolOutput::success(json!({
                         "status": "proposed",
                         "candidate_id": mc.id,

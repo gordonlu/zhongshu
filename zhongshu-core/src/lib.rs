@@ -1,7 +1,6 @@
 pub mod action;
 pub mod agent;
 pub mod authority;
-pub mod runtime;
 pub mod coding;
 pub mod core;
 pub mod desktop;
@@ -13,6 +12,7 @@ pub mod heartbeat;
 pub mod integration;
 pub mod patch;
 pub mod rule;
+pub mod runtime;
 pub mod source;
 pub mod task;
 pub mod tool;

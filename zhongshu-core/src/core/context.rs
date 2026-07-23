@@ -232,7 +232,10 @@ impl ContextComposer for DefaultComposer {
         if context_tag.is_empty() {
             format!("<user_input>\n{}\n</user_input>", input)
         } else {
-            format!("<context>\n{}</context>\n\n<user_input>\n{}\n</user_input>", context_tag, input)
+            format!(
+                "<context>\n{}</context>\n\n<user_input>\n{}\n</user_input>",
+                context_tag, input
+            )
         }
     }
 }
@@ -262,7 +265,11 @@ impl ContextComposer for MarkdownComposer {
             if !state.memories.is_empty() {
                 state_lines.push("\n## Memories".to_string());
                 for m in &state.memories {
-                    state_lines.push(format!("- [{confidence}] {content}", confidence = m.confidence, content = m.content));
+                    state_lines.push(format!(
+                        "- [{confidence}] {content}",
+                        confidence = m.confidence,
+                        content = m.content
+                    ));
                 }
             }
             if !state_lines.is_empty() {
@@ -552,9 +559,7 @@ impl ContextPackBuilder {
 
         // Score + crop evidence
         // First, separate pinned blocks (must always keep) from scorables
-        let (pinned, scorables): (Vec<_>, Vec<_>) = evidence
-            .into_iter()
-            .partition(|e| e.pinned);
+        let (pinned, scorables): (Vec<_>, Vec<_>) = evidence.into_iter().partition(|e| e.pinned);
 
         let evidence_with_scores: Vec<(usize, f32, EvidenceBlock)> = scorables
             .into_iter()

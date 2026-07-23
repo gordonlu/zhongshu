@@ -29,7 +29,9 @@ pub use execution_runner::{
 };
 pub use goal::{GoalRepository, GoalTool};
 pub use ledger::RunLedger;
-pub use memory::{MemoryCandidateStore, MemoryPolicy, MemoryQueryTool, PolicyCandidateStore, SkillCandidateStore};
+pub use memory::{
+    MemoryCandidateStore, MemoryPolicy, MemoryQueryTool, PolicyCandidateStore, SkillCandidateStore,
+};
 pub use models::*;
 pub use observation::ObservationStore;
 pub use receipt::RunReceipt;

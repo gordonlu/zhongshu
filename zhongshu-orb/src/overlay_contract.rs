@@ -758,7 +758,8 @@ pub fn parse_ui_command(body: &str) -> UiToOverlayCommand {
             .unwrap_or(UiToOverlayCommand::Unknown),
         Some("edit_plan") => {
             let session_id = msg["session_id"].as_str().map(String::from);
-            let steps: Option<Vec<PlanStepEdit>> = msg.get("steps")
+            let steps: Option<Vec<PlanStepEdit>> = msg
+                .get("steps")
                 .and_then(|v| serde_json::from_value(v.clone()).ok());
             match (session_id, steps) {
                 (Some(session_id), Some(steps)) if !steps.is_empty() => {
@@ -771,19 +772,24 @@ pub fn parse_ui_command(body: &str) -> UiToOverlayCommand {
             let session_id = msg["session_id"].as_str().map(String::from);
             let step_id = msg["step_id"].as_str().map(String::from);
             match (session_id, step_id) {
-                (Some(session_id), Some(step_id)) => {
-                    UiToOverlayCommand::DeleteStep { session_id, step_id }
-                }
+                (Some(session_id), Some(step_id)) => UiToOverlayCommand::DeleteStep {
+                    session_id,
+                    step_id,
+                },
                 _ => UiToOverlayCommand::Unknown,
             }
         }
         Some("reorder_steps") => {
             let session_id = msg["session_id"].as_str().map(String::from);
-            let step_ids: Option<Vec<String>> = msg.get("step_ids")
+            let step_ids: Option<Vec<String>> = msg
+                .get("step_ids")
                 .and_then(|v| serde_json::from_value(v.clone()).ok());
             match (session_id, step_ids) {
                 (Some(session_id), Some(step_ids)) if !step_ids.is_empty() => {
-                    UiToOverlayCommand::ReorderSteps { session_id, step_ids }
+                    UiToOverlayCommand::ReorderSteps {
+                        session_id,
+                        step_ids,
+                    }
                 }
                 _ => UiToOverlayCommand::Unknown,
             }
@@ -792,9 +798,10 @@ pub fn parse_ui_command(body: &str) -> UiToOverlayCommand {
             let session_id = msg["session_id"].as_str().map(String::from);
             let step_id = msg["step_id"].as_str().map(String::from);
             match (session_id, step_id) {
-                (Some(session_id), Some(step_id)) => {
-                    UiToOverlayCommand::ExecuteStep { session_id, step_id }
-                }
+                (Some(session_id), Some(step_id)) => UiToOverlayCommand::ExecuteStep {
+                    session_id,
+                    step_id,
+                },
                 _ => UiToOverlayCommand::Unknown,
             }
         }
@@ -807,9 +814,7 @@ pub fn parse_ui_command(body: &str) -> UiToOverlayCommand {
             let id = msg["id"].as_str().map(String::from);
             let enabled = msg["enabled"].as_bool();
             match (id, enabled) {
-                (Some(id), Some(enabled)) => {
-                    UiToOverlayCommand::ToggleMemory { id, enabled }
-                }
+                (Some(id), Some(enabled)) => UiToOverlayCommand::ToggleMemory { id, enabled },
                 _ => UiToOverlayCommand::Unknown,
             }
         }
@@ -820,9 +825,10 @@ pub fn parse_ui_command(body: &str) -> UiToOverlayCommand {
             let session_id = msg["session_id"].as_str().map(String::from);
             let step_id = msg["step_id"].as_str().map(String::from);
             match (session_id, step_id) {
-                (Some(session_id), Some(step_id)) => {
-                    UiToOverlayCommand::RetryStep { session_id, step_id }
-                }
+                (Some(session_id), Some(step_id)) => UiToOverlayCommand::RetryStep {
+                    session_id,
+                    step_id,
+                },
                 _ => UiToOverlayCommand::Unknown,
             }
         }
@@ -830,9 +836,10 @@ pub fn parse_ui_command(body: &str) -> UiToOverlayCommand {
             let session_id = msg["session_id"].as_str().map(String::from);
             let step_id = msg["step_id"].as_str().map(String::from);
             match (session_id, step_id) {
-                (Some(session_id), Some(step_id)) => {
-                    UiToOverlayCommand::RerunFromStep { session_id, step_id }
-                }
+                (Some(session_id), Some(step_id)) => UiToOverlayCommand::RerunFromStep {
+                    session_id,
+                    step_id,
+                },
                 _ => UiToOverlayCommand::Unknown,
             }
         }
@@ -843,7 +850,8 @@ pub fn parse_ui_command(body: &str) -> UiToOverlayCommand {
             UiToOverlayCommand::SessionOptOut(msg["enabled"].as_bool().unwrap_or(false))
         }
         Some("exclusion_rules") => {
-            let patterns: Vec<String> = msg.get("patterns")
+            let patterns: Vec<String> = msg
+                .get("patterns")
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
                 .unwrap_or_default();
             UiToOverlayCommand::ExclusionRules(patterns)
@@ -859,11 +867,16 @@ pub fn parse_ui_command(body: &str) -> UiToOverlayCommand {
         Some("resolve_conflict") => {
             let path = msg["path"].as_str().map(String::from);
             let resolution = msg["resolution"].as_str().map(String::from);
-            let merged_content = msg.get("merged_content").and_then(|v| v.as_str()).map(String::from);
+            let merged_content = msg
+                .get("merged_content")
+                .and_then(|v| v.as_str())
+                .map(String::from);
             match (path, resolution) {
-                (Some(path), Some(resolution)) => {
-                    UiToOverlayCommand::ResolveConflict { path, resolution, merged_content }
-                }
+                (Some(path), Some(resolution)) => UiToOverlayCommand::ResolveConflict {
+                    path,
+                    resolution,
+                    merged_content,
+                },
                 _ => UiToOverlayCommand::Unknown,
             }
         }

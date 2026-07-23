@@ -6,8 +6,8 @@ use crate::action::lifecycle::{ActionRequest, ActionResult, ActionStatus};
 use crate::action::policy::ActionPolicy;
 use crate::agent::{AgentCallbacks, ToolCompletionStatus};
 use crate::tool::{
-    infer_side_effect, SideEffect, ToolExecutionPolicy, ToolExecutor, ToolOutput, ToolStatus,
-    ToolTermination, ToolRegistry,
+    infer_side_effect, SideEffect, ToolExecutionPolicy, ToolExecutor, ToolOutput, ToolRegistry,
+    ToolStatus, ToolTermination,
 };
 
 /// Run the full per-action lifecycle: idempotency check → start callback →
@@ -22,11 +22,13 @@ pub async fn dispatch(
     cancel_token: &CancellationToken,
     callbacks: Option<&AgentCallbacks>,
 ) -> ActionResult {
-    let executor =
-        ToolExecutor::with_policy(registry, ToolExecutionPolicy {
+    let executor = ToolExecutor::with_policy(
+        registry,
+        ToolExecutionPolicy {
             timeout: tool_timeout,
             ..Default::default()
-        });
+        },
+    );
     dispatch_with(request, &executor, journal, cancel_token, callbacks).await
 }
 
@@ -71,7 +73,11 @@ pub async fn dispatch_with(
 
     // ── Execute ────────────────────────────────────────────────────────
     let execution = executor
-        .execute(&request.tool_name, &request.arguments, Some(cancel_token.clone()))
+        .execute(
+            &request.tool_name,
+            &request.arguments,
+            Some(cancel_token.clone()),
+        )
         .await;
     let termination = execution.termination;
     let output = execution.output;

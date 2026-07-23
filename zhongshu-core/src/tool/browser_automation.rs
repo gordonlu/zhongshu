@@ -468,7 +468,10 @@ async fn console_messages(_args: &Value) -> anyhow::Result<Value> {
         )
         .await?;
     if let Some(msgs) = result.as_array() {
-        let error_count = msgs.iter().filter(|m| m["level"].as_str() == Some("error")).count();
+        let error_count = msgs
+            .iter()
+            .filter(|m| m["level"].as_str() == Some("error"))
+            .count();
         add_chrome_console_errors(error_count).await;
     }
     Ok(sanitize_external_value(
@@ -849,8 +852,10 @@ pub struct ChromeSnapshot {
     pub busy: bool,
 }
 
-static CHROME_SNAPSHOT: Lazy<Mutex<ChromeSnapshot>> = Lazy::new(|| Mutex::new(ChromeSnapshot::default()));
-static CHROME_RECENT_ACTIONS: Lazy<Mutex<VecDeque<String>>> = Lazy::new(|| Mutex::new(VecDeque::new()));
+static CHROME_SNAPSHOT: Lazy<Mutex<ChromeSnapshot>> =
+    Lazy::new(|| Mutex::new(ChromeSnapshot::default()));
+static CHROME_RECENT_ACTIONS: Lazy<Mutex<VecDeque<String>>> =
+    Lazy::new(|| Mutex::new(VecDeque::new()));
 
 pub async fn current_chrome_snapshot() -> ChromeSnapshot {
     CHROME_SNAPSHOT.lock().await.clone()

@@ -11,17 +11,19 @@ const AGENT_TIMEOUT: Duration = Duration::from_secs(300);
 use crate::agent::AgentMemory;
 use crate::config;
 use tokio::sync::RwLock;
+use uuid::Uuid;
 use zhongshu_core::agent::llm::LlmProvider;
+use zhongshu_core::agent::loop_::ToolCompletionStatus;
 use zhongshu_core::agent::run::RunController;
 use zhongshu_core::agent::{
     execute_agent_loop, AgentBudget, AgentCallbacks, AgentProfile, AgentRuntime, LoopResult,
     ModelRouter, RunOutcome, Worker,
 };
-use zhongshu_core::agent::loop_::ToolCompletionStatus;
 use zhongshu_core::core::checkpoint::CheckpointStore;
-use zhongshu_core::core::context::{ContextPack, ContextMessage, ContextPackBuilder, ContextRole, RecentUnit};
+use zhongshu_core::core::context::{
+    ContextMessage, ContextPack, ContextPackBuilder, ContextRole, RecentUnit,
+};
 use zhongshu_core::core::{Database, RunbookStore};
-use uuid::Uuid;
 use zhongshu_core::event::{
     AgentEvent, AgentState, Event, EventBus, HarnessUiEvent, MessageId, ResponseEvent,
     ResponseRole, ResponseTx, ToolEvent,
@@ -29,8 +31,8 @@ use zhongshu_core::event::{
 use zhongshu_core::harness::trace::runbook::events_to_runbook;
 use zhongshu_core::integration::DeeplosslessProxy;
 use zhongshu_core::patch::PatchDiffPayload;
-use zhongshu_core::task::TaskQueue;
 use zhongshu_core::runtime::ExecutionProfile;
+use zhongshu_core::task::TaskQueue;
 use zhongshu_core::tool::ToolRegistry;
 
 pub(crate) fn publish_harness_events(
@@ -768,11 +770,7 @@ impl AgentController {
                         conversation_id,
                     );
                     publish_harness_events(&eb, &rr.trace_events);
-                    let last = rr
-                        .messages
-                        .last()
-                        .map(|x| x.content.as_str())
-                        .unwrap_or("");
+                    let last = rr.messages.last().map(|x| x.content.as_str()).unwrap_or("");
                     history_arc
                         .lock()
                         .unwrap()
@@ -1018,9 +1016,7 @@ impl AgentController {
                                         }));
                                     }
                                     Err(RunAttemptError::AgentError(e)) => {
-                                        tracing::error!(
-                                            "recovery agent run failed: {e:#}"
-                                        );
+                                        tracing::error!("recovery agent run failed: {e:#}");
                                         stop_reason = "recovery_failed".to_string();
                                         overall_success = false;
                                         let _ = tx
@@ -1036,7 +1032,8 @@ impl AgentController {
                                                 run_id,
                                             })
                                             .await;
-                                        *state_arc.write().await = AgentState::Done { success: false };
+                                        *state_arc.write().await =
+                                            AgentState::Done { success: false };
                                         eb.publish(Event::Agent(AgentEvent::StateChanged {
                                             from: AgentState::Thinking,
                                             to: AgentState::Done { success: false },
@@ -1059,7 +1056,8 @@ impl AgentController {
                                                 run_id,
                                             })
                                             .await;
-                                        *state_arc.write().await = AgentState::Done { success: false };
+                                        *state_arc.write().await =
+                                            AgentState::Done { success: false };
                                         eb.publish(Event::Agent(AgentEvent::StateChanged {
                                             from: AgentState::Thinking,
                                             to: AgentState::Done { success: false },
@@ -1213,9 +1211,7 @@ impl AgentController {
                                         }));
                                     }
                                     Err(RunAttemptError::AgentError(e)) => {
-                                        tracing::error!(
-                                            "replan agent run failed: {e:#}"
-                                        );
+                                        tracing::error!("replan agent run failed: {e:#}");
                                         stop_reason = "replan_failed".to_string();
                                         overall_success = false;
                                         let _ = tx
@@ -1231,7 +1227,8 @@ impl AgentController {
                                                 run_id,
                                             })
                                             .await;
-                                        *state_arc.write().await = AgentState::Done { success: false };
+                                        *state_arc.write().await =
+                                            AgentState::Done { success: false };
                                         eb.publish(Event::Agent(AgentEvent::StateChanged {
                                             from: AgentState::Thinking,
                                             to: AgentState::Done { success: false },
@@ -1254,7 +1251,8 @@ impl AgentController {
                                                 run_id,
                                             })
                                             .await;
-                                        *state_arc.write().await = AgentState::Done { success: false };
+                                        *state_arc.write().await =
+                                            AgentState::Done { success: false };
                                         eb.publish(Event::Agent(AgentEvent::StateChanged {
                                             from: AgentState::Thinking,
                                             to: AgentState::Done { success: false },
@@ -1264,9 +1262,7 @@ impl AgentController {
                             }
                         } else {
                             // No context to recover — fall back to a clean stop
-                            tracing::info!(
-                                "no recovery context for CancelAndReplan — stopping"
-                            );
+                            tracing::info!("no recovery context for CancelAndReplan — stopping");
                             stop_reason = "cancelled".to_string();
                             overall_success = false;
                             let _ = tx
@@ -1343,9 +1339,7 @@ impl AgentController {
             // Notify run controller of completion (handles state cleanup and events)
             let run_outcome_label = if overall_success {
                 "CompletedVerified"
-            } else if stop_reason.contains("interrupted")
-                || stop_reason == "stopped"
-            {
+            } else if stop_reason.contains("interrupted") || stop_reason == "stopped" {
                 "Interrupted"
             } else if stop_reason.contains("timeout") {
                 "BudgetExhausted"
@@ -1424,16 +1418,16 @@ pub(crate) async fn run_attempt(
 ) -> Result<RunAttemptResult, RunAttemptError> {
     let tool_names = Arc::new(Mutex::new(Vec::<String>::new()));
 
-    let mut runtime =
-        AgentRuntime::with_llm(req.provider, req.model, req.tools, req.budget);
+    let mut runtime = AgentRuntime::with_llm(req.provider, req.model, req.tools, req.budget);
     runtime.reasoning_effort = req.reasoning_effort;
     runtime.profile = req.profile;
 
     // Checkpoint store: saves state before each tool call for crash recovery.
     // Only enabled for profiles that need cross-crash recovery.
     if req.profile.saves_checkpoint() {
-        runtime.checkpoint_store =
-            Some(CheckpointStore::new(Database::new(svc.core_db_path.clone())));
+        runtime.checkpoint_store = Some(CheckpointStore::new(Database::new(
+            svc.core_db_path.clone(),
+        )));
     }
 
     // Ledger: needed for reconciling in-flight tools.

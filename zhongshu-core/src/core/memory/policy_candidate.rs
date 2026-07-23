@@ -1,7 +1,7 @@
 use rusqlite::params;
 
 use crate::core::db::Database;
-use crate::core::models::{CandidateStatus, PolicyArea, PolicyCandidate, id, now};
+use crate::core::models::{id, now, CandidateStatus, PolicyArea, PolicyCandidate};
 
 #[derive(Clone)]
 pub struct PolicyCandidateStore {
@@ -56,7 +56,8 @@ impl PolicyCandidateStore {
             ),
         };
         let mut stmt = conn.prepare(&sql)?;
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
         let rows = stmt.query_map(params_refs.as_slice(), Self::row)?;
         rows.collect()
     }
@@ -90,10 +91,7 @@ impl PolicyCandidateStore {
 
     pub fn delete(&self, id: &str) -> rusqlite::Result<bool> {
         let conn = self.db.conn()?;
-        let n = conn.execute(
-            "DELETE FROM policy_candidates WHERE id = ?1",
-            params![id],
-        )?;
+        let n = conn.execute("DELETE FROM policy_candidates WHERE id = ?1", params![id])?;
         Ok(n > 0)
     }
 

@@ -33,9 +33,7 @@ const RULES: &[Rule] = &[
 ];
 
 pub fn run() -> Result<(), String> {
-    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap();
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let dirs = &[
         workspace_root.join("zhongshu-core/src"),
         workspace_root.join("zhongshu-orb/src"),
@@ -89,8 +87,7 @@ fn check_file(path: &Path, errors: &mut Vec<String>) -> Result<(), String> {
         return Ok(());
     }
 
-    let content = fs::read_to_string(path)
-        .map_err(|e| format!("read {path:?}: {e}"))?;
+    let content = fs::read_to_string(path).map_err(|e| format!("read {path:?}: {e}"))?;
 
     for rule in RULES {
         let is_allowed = rule.allowed.iter().any(|a| relative.contains(a));

@@ -203,15 +203,24 @@ impl ZhongshuApp {
         };
         if !self.panel_debug_entries.is_empty() {
             let entries = std::mem::take(&mut self.panel_debug_entries);
-            ov.send(&serde_json::to_value(OverlayToUiEvent::DebugEntries { entries }).unwrap_or_default());
+            ov.send(
+                &serde_json::to_value(OverlayToUiEvent::DebugEntries { entries })
+                    .unwrap_or_default(),
+            );
         }
         if !self.panel_compress_entries.is_empty() {
             let entries = std::mem::take(&mut self.panel_compress_entries);
-            ov.send(&serde_json::to_value(OverlayToUiEvent::CompressEntries { entries }).unwrap_or_default());
+            ov.send(
+                &serde_json::to_value(OverlayToUiEvent::CompressEntries { entries })
+                    .unwrap_or_default(),
+            );
         }
         if !self.panel_auth_entries.is_empty() {
             let entries = std::mem::take(&mut self.panel_auth_entries);
-            ov.send(&serde_json::to_value(OverlayToUiEvent::AuthEntries { entries }).unwrap_or_default());
+            ov.send(
+                &serde_json::to_value(OverlayToUiEvent::AuthEntries { entries })
+                    .unwrap_or_default(),
+            );
         }
     }
 
@@ -223,7 +232,9 @@ impl ZhongshuApp {
             return;
         }
         self.last_chrome_state_poll = Instant::now();
-        let snap = self.runtime.block_on(browser_automation::current_chrome_snapshot());
+        let snap = self
+            .runtime
+            .block_on(browser_automation::current_chrome_snapshot());
         let state = crate::overlay_contract::ChromeStateData {
             connected: snap.connected,
             url: snap.current_url,
@@ -775,19 +786,34 @@ impl ZhongshuApp {
         }
         if ov.take_list_memories() {
             let entries = load_memory_entries(&crate::config::config_dir().join("agent.json"));
-            ov.send(&serde_json::to_value(OverlayToUiEvent::MemoryEntries { entries }).unwrap_or_default());
+            ov.send(
+                &serde_json::to_value(OverlayToUiEvent::MemoryEntries { entries })
+                    .unwrap_or_default(),
+            );
         }
         if let Some(id) = ov.take_delete_memory() {
-            if let Some(entries) = try_delete_memory(&crate::config::config_dir().join("agent.json"), &id) {
-                ov.send(&serde_json::to_value(OverlayToUiEvent::MemoryEntries { entries }).unwrap_or_default());
+            if let Some(entries) =
+                try_delete_memory(&crate::config::config_dir().join("agent.json"), &id)
+            {
+                ov.send(
+                    &serde_json::to_value(OverlayToUiEvent::MemoryEntries { entries })
+                        .unwrap_or_default(),
+                );
                 ov.toast("记忆已删除");
             } else {
                 ov.toast(&format!("删除失败：未找到记忆 {id}"));
             }
         }
         if let Some((id, enabled)) = ov.take_toggle_memory() {
-            if let Some(entries) = try_toggle_memory(&crate::config::config_dir().join("agent.json"), &id, enabled) {
-                ov.send(&serde_json::to_value(OverlayToUiEvent::MemoryEntries { entries }).unwrap_or_default());
+            if let Some(entries) = try_toggle_memory(
+                &crate::config::config_dir().join("agent.json"),
+                &id,
+                enabled,
+            ) {
+                ov.send(
+                    &serde_json::to_value(OverlayToUiEvent::MemoryEntries { entries })
+                        .unwrap_or_default(),
+                );
             } else {
                 ov.toast(&format!("切换失败：未找到记忆 {id}"));
             }
@@ -925,12 +951,16 @@ impl ZhongshuApp {
                             if let Some(ref ov) = self.overlay {
                                 ov.send(&serde_json::json!({"type":"tool_call","name":name}));
                             }
-                            self.panel_debug_entries
-                                .push(crate::overlay_contract::DebugEntryData {
-                                    id: format!("dbg-{}-{}", name, std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .map(|d| d.as_millis())
-                                        .unwrap_or(0)),
+                            self.panel_debug_entries.push(
+                                crate::overlay_contract::DebugEntryData {
+                                    id: format!(
+                                        "dbg-{}-{}",
+                                        name,
+                                        std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_millis())
+                                            .unwrap_or(0)
+                                    ),
                                     entry_type: "tool_call".into(),
                                     timestamp: std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
@@ -938,7 +968,8 @@ impl ZhongshuApp {
                                         .unwrap_or(0),
                                     summary: format!("工具调用: {name}"),
                                     details: None,
-                                });
+                                },
+                            );
                         }
                         Event::Tool(ToolEvent::Completed { name, success, .. }) => {
                             if let Some(ref ov) = self.overlay {
@@ -952,28 +983,39 @@ impl ZhongshuApp {
                                     if success { "✓" } else { "✗" }
                                 ));
                             }
-                            self.panel_debug_entries
-                                .push(crate::overlay_contract::DebugEntryData {
-                                    id: format!("dbg-{}-{}", name, std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .map(|d| d.as_millis())
-                                        .unwrap_or(0)),
+                            self.panel_debug_entries.push(
+                                crate::overlay_contract::DebugEntryData {
+                                    id: format!(
+                                        "dbg-{}-{}",
+                                        name,
+                                        std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_millis())
+                                            .unwrap_or(0)
+                                    ),
                                     entry_type: "tool_result".into(),
                                     timestamp: std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .map(|d| d.as_millis() as i64)
                                         .unwrap_or(0),
-                                    summary: format!("工具结果: {name} {}", if success { "✓" } else { "✗" }),
+                                    summary: format!(
+                                        "工具结果: {name} {}",
+                                        if success { "✓" } else { "✗" }
+                                    ),
                                     details: None,
-                                });
+                                },
+                            );
                         }
                         Event::Memory(MemoryEvent::Compacted) => {
-                            self.panel_compress_entries
-                                .push(crate::overlay_contract::CompressEntryData {
-                                    id: format!("compress-{}", std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .map(|d| d.as_millis())
-                                        .unwrap_or(0)),
+                            self.panel_compress_entries.push(
+                                crate::overlay_contract::CompressEntryData {
+                                    id: format!(
+                                        "compress-{}",
+                                        std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_millis())
+                                            .unwrap_or(0)
+                                    ),
                                     timestamp: std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .map(|d| d.as_millis() as i64)
@@ -982,7 +1024,8 @@ impl ZhongshuApp {
                                     token_before: 0,
                                     token_after: 0,
                                     summary: "上下文已压缩".into(),
-                                });
+                                },
+                            );
                         }
                         Event::Memory(MemoryEvent::MemoryHit {
                             query: _,
@@ -1324,11 +1367,9 @@ impl ZhongshuApp {
                                             crate::overlay_contract::ArchComponent,
                                         > = components
                                             .iter()
-                                            .map(|c| {
-                                                crate::overlay_contract::ArchComponent {
-                                                    name: c.name.clone(),
-                                                    description: c.description.clone(),
-                                                }
+                                            .map(|c| crate::overlay_contract::ArchComponent {
+                                                name: c.name.clone(),
+                                                description: c.description.clone(),
                                             })
                                             .collect();
                                         send_coding_event(
@@ -1623,10 +1664,14 @@ impl ZhongshuApp {
                     ov.send(&serde_json::json!({"type":"tool_call","name":name}));
                     self.panel_debug_entries
                         .push(crate::overlay_contract::DebugEntryData {
-                            id: format!("dbg-{}-{}", name, std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_millis())
-                                .unwrap_or(0)),
+                            id: format!(
+                                "dbg-{}-{}",
+                                name,
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis())
+                                    .unwrap_or(0)
+                            ),
                             entry_type: "tool_call".into(),
                             timestamp: std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
@@ -1644,16 +1689,23 @@ impl ZhongshuApp {
                     }));
                     self.panel_debug_entries
                         .push(crate::overlay_contract::DebugEntryData {
-                            id: format!("dbg-{}-{}", name, std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_millis())
-                                .unwrap_or(0)),
+                            id: format!(
+                                "dbg-{}-{}",
+                                name,
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis())
+                                    .unwrap_or(0)
+                            ),
                             entry_type: "tool_result".into(),
                             timestamp: std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map(|d| d.as_millis() as i64)
                                 .unwrap_or(0),
-                            summary: format!("工具结果: {name} {}", if *success { "✓" } else { "✗" }),
+                            summary: format!(
+                                "工具结果: {name} {}",
+                                if *success { "✓" } else { "✗" }
+                            ),
                             details: None,
                         });
                 }
@@ -1667,10 +1719,13 @@ impl ZhongshuApp {
                 Event::Memory(MemoryEvent::Compacted) => {
                     self.panel_compress_entries
                         .push(crate::overlay_contract::CompressEntryData {
-                            id: format!("compress-{}", std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_millis())
-                                .unwrap_or(0)),
+                            id: format!(
+                                "compress-{}",
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis())
+                                    .unwrap_or(0)
+                            ),
                             timestamp: std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map(|d| d.as_millis() as i64)
@@ -1926,15 +1981,14 @@ impl ZhongshuApp {
                         summary,
                         components,
                     } => {
-                        let arch_components: Vec<
-                            crate::overlay_contract::ArchComponent,
-                        > = components
-                            .iter()
-                            .map(|c| crate::overlay_contract::ArchComponent {
-                                name: c.name.clone(),
-                                description: c.description.clone(),
-                            })
-                            .collect();
+                        let arch_components: Vec<crate::overlay_contract::ArchComponent> =
+                            components
+                                .iter()
+                                .map(|c| crate::overlay_contract::ArchComponent {
+                                    name: c.name.clone(),
+                                    description: c.description.clone(),
+                                })
+                                .collect();
                         send_coding_event(
                             ov,
                             CodingUiEvent::ArchitectureAnalysis {
@@ -2134,7 +2188,9 @@ impl ApplicationHandler for ZhongshuApp {
 
 // ── Memory helpers ───────────────────────────────────────────────────
 
-fn load_memory_entries(profile_path: &std::path::Path) -> Vec<crate::overlay_contract::MemoryEntryData> {
+fn load_memory_entries(
+    profile_path: &std::path::Path,
+) -> Vec<crate::overlay_contract::MemoryEntryData> {
     let raw: serde_json::Value = std::fs::read_to_string(profile_path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -2151,7 +2207,10 @@ fn load_memory_entries(profile_path: &std::path::Path) -> Vec<crate::overlay_con
                 .as_str()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
-            let enabled = entry.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+            let enabled = entry
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
             crate::overlay_contract::MemoryEntryData {
                 id,
                 content,
@@ -2167,7 +2226,10 @@ fn load_memory_entries(profile_path: &std::path::Path) -> Vec<crate::overlay_con
         .collect()
 }
 
-fn try_delete_memory(profile_path: &std::path::Path, target_id: &str) -> Option<Vec<crate::overlay_contract::MemoryEntryData>> {
+fn try_delete_memory(
+    profile_path: &std::path::Path,
+    target_id: &str,
+) -> Option<Vec<crate::overlay_contract::MemoryEntryData>> {
     let raw: serde_json::Value = std::fs::read_to_string(profile_path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())

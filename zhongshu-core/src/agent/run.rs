@@ -175,8 +175,7 @@ impl RunController {
     }
 
     pub fn set_state(&self, state: RunState) {
-        *self.canonical_status.write().unwrap() =
-            crate::runtime::RunStatus::from_run_state(&state);
+        *self.canonical_status.write().unwrap() = crate::runtime::RunStatus::from_run_state(&state);
         *self.state.write().unwrap() = state;
     }
 
@@ -423,7 +422,11 @@ impl RunController {
                 stop_reason: stop_reason.into(),
             }));
             if let Some(ref ledger) = *self.ledger.read().unwrap() {
-                let _ = ledger.record_run_finished(&rid.to_string(), stop_reason, outcome.unwrap_or(""));
+                let _ = ledger.record_run_finished(
+                    &rid.to_string(),
+                    stop_reason,
+                    outcome.unwrap_or(""),
+                );
             }
         }
     }

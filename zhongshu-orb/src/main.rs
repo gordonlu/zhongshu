@@ -273,8 +273,8 @@ fn main() {
     let observation_store = ObservationStore::new(Database::new(core_db_path.clone()));
     let suggestion_engine = SuggestionEngine::new(Database::new(core_db_path.clone()));
     let suggestion_tool = SuggestionTool::new(suggestion_engine.clone()).with_event_bus(eb.clone());
-    let memory_policy = MemoryPolicy::new(Database::new(core_db_path.clone()))
-        .with_event_bus((*eb).clone());
+    let memory_policy =
+        MemoryPolicy::new(Database::new(core_db_path.clone())).with_event_bus((*eb).clone());
     let memory_candidate_store = MemoryCandidateStore::new(Database::new(core_db_path.clone()));
     let provider = cfg.llm.build_provider(&base_url);
 
@@ -391,7 +391,12 @@ fn main() {
     let run_controller = controller.run_controller.clone();
     let inbox = Arc::new(AgentInbox::new(controller.clone()));
     inbox.start();
-    services::spawn_auto_evolution(observer.clone(), controller.clone(), equipment.clone(), core_db_path.clone());
+    services::spawn_auto_evolution(
+        observer.clone(),
+        controller.clone(),
+        equipment.clone(),
+        core_db_path.clone(),
+    );
     services::spawn_runbook_to_skill(
         eb.clone(),
         llm_registry.clone(),

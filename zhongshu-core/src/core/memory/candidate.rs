@@ -1,7 +1,7 @@
 use rusqlite::params;
 
 use crate::core::db::Database;
-use crate::core::models::{CandidateStatus, MemoryCandidate, id, now};
+use crate::core::models::{id, now, CandidateStatus, MemoryCandidate};
 
 #[derive(Clone)]
 pub struct MemoryCandidateStore {
@@ -65,10 +65,7 @@ impl MemoryCandidateStore {
 
     pub fn delete(&self, id: &str) -> rusqlite::Result<bool> {
         let conn = self.db.conn()?;
-        let n = conn.execute(
-            "DELETE FROM memory_candidates WHERE id = ?1",
-            params![id],
-        )?;
+        let n = conn.execute("DELETE FROM memory_candidates WHERE id = ?1", params![id])?;
         Ok(n > 0)
     }
 

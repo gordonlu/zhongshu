@@ -746,9 +746,12 @@ impl Tool for SandboxShellTool {
             // Mount /bin only if it's a real directory (not a symlink to /usr/bin).
             // On modern Ubuntu /bin -> usr/bin, and bwrap --ro-bind follows
             // symlinks, causing the mount to fail.
-            if std::fs::metadata("/bin")
+            if std::fs::symlink_metadata("/bin")
                 .map(|m| m.is_dir())
                 .unwrap_or(false)
+                && !std::fs::symlink_metadata("/bin")
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false)
             {
                 process.args(["--ro-bind", "/bin", "/bin"]);
             }

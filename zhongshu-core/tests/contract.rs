@@ -16,12 +16,14 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 use zhongshu_core::agent::llm::{
     ChatCompletionRequest, ChatCompletionResponse, FinalChoice, FunctionCall, LlmProvider, Message,
     Role, StreamEvent, ToolCall,
 };
 use zhongshu_core::agent::{
-    execute_agent_loop_with_messages, AgentBudget, AgentRuntime, LoopResult, RunOutcome, StopReason,
+    execute_agent_loop_with_messages, AgentBudget, AgentCallbacks, AgentRuntime, LoopResult,
+    RunOutcome, StopReason,
 };
 use zhongshu_core::tool::{Tool, ToolOutput, ToolRegistry};
 
@@ -573,4 +575,236 @@ async fn pre_cancelled_token_returns_interrupted() {
     .unwrap();
 
     assert_eq!(result.outcome, RunOutcome::Interrupted);
+}
+
+// ── Interruption while provider is streaming text (Invariant 3) ─────────
+//
+// Provider that emits one streaming delta then blocks.
+struct SlowStreamProvider;
+
+#[async_trait]
+impl LlmProvider for SlowStreamProvider {
+    async fn chat(
+        &self,
+        _request: ChatCompletionRequest,
+    ) -> anyhow::Result<ChatCompletionResponse> {
+        Ok(ChatCompletionResponse {
+            choices: vec![FinalChoice {
+                message: Message::assistant("slow stream complete"),
+                finish_reason: Some("stop".into()),
+            }],
+            usage: None,
+        })
+    }
+
+    async fn stream_chat(
+        &self,
+        _request: ChatCompletionRequest,
+        mut on_event: Box<dyn FnMut(StreamEvent) + Send>,
+    ) -> anyhow::Result<()> {
+        on_event(StreamEvent::TextDelta("Starting...".into()));
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        on_event(StreamEvent::Finished {
+            finish_reason: "stop".into(),
+            content: "slow stream complete".into(),
+            tool_calls: Vec::new(),
+        });
+        Ok(())
+    }
+
+    fn model_name(&self) -> &str {
+        "slow-stream"
+    }
+    fn change_model(&self, _model: &str) -> Arc<dyn LlmProvider> {
+        Arc::new(Self)
+    }
+    async fn embed(&self, _input: &str) -> anyhow::Result<Vec<f32>> {
+        Ok(vec![0.0])
+    }
+}
+
+/// (a) Interrupt during streaming: cancel_token fires while stream_chat is
+///     emitting deltas → loop returns Interrupted, partial content is NOT
+///     committed to the message list.
+#[tokio::test]
+async fn cancel_during_streaming_blocks_text_and_returns_interrupted() {
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+
+    let mut runtime = AgentRuntime::new(
+        SlowStreamProvider,
+        ToolRegistry::new(),
+        "contract-test",
+        small_budget(),
+    );
+
+    let callbacks = Arc::new(AgentCallbacks {
+        on_text: Box::new(|_| {}),
+        on_tool_start: Box::new(|_, _| {}),
+        on_tool_done: Box::new(|_, _, _| {}),
+        run_id: Uuid::new_v4(),
+    });
+
+    let handle = tokio::spawn(async move {
+        execute_agent_loop_with_messages(
+            &mut runtime,
+            vec![Message::user("test")],
+            Some(callbacks),
+            "contract-test",
+            cancel_clone,
+            zhongshu_core::runtime::ExecutionProfile::Interactive,
+        )
+        .await
+        .unwrap()
+    });
+
+    // Let the provider emit the first delta.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    cancel.cancel();
+
+    let result = handle.await.unwrap();
+    assert_eq!(result.outcome, RunOutcome::Interrupted);
+    // No full response content should appear in the final messages.
+    assert!(
+        result
+            .messages
+            .iter()
+            .all(|m| !m.content.contains("slow stream complete")),
+        "interrupted stream must not commit streamed content to message list"
+    );
+}
+
+/// (b) Interrupt during tool execution: cancel_token fires while a tool is
+///     running → loop returns Interrupted, tool output is NOT committed.
+#[tokio::test]
+async fn cancel_during_tool_execution_does_not_commit_result() {
+    struct HangingTool;
+    #[async_trait]
+    impl Tool for HangingTool {
+        fn name(&self) -> &str {
+            "hanging_tool"
+        }
+        fn description(&self) -> &str {
+            "hangs until cancelled"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type":"object","properties":{}})
+        }
+        async fn execute(&self, _arguments: &serde_json::Value) -> ToolOutput {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            ToolOutput::success(json!({"done": true}))
+        }
+    }
+
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+
+    let mut runtime = AgentRuntime::new(
+        scripted(&[("hanging_tool", "{}")]),
+        ToolRegistry::new().register(HangingTool),
+        "contract-test",
+        small_budget(),
+    );
+
+    let handle = tokio::spawn(async move {
+        execute_agent_loop_with_messages(
+            &mut runtime,
+            vec![Message::user("run tool")],
+            None,
+            "contract-test",
+            cancel_clone,
+            zhongshu_core::runtime::ExecutionProfile::Interactive,
+        )
+        .await
+        .unwrap()
+    });
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    cancel.cancel();
+
+    let result = handle.await.unwrap();
+    assert_eq!(result.outcome, RunOutcome::Interrupted);
+    // Tool output observation must NOT appear in messages.
+    assert!(
+        result
+            .messages
+            .iter()
+            .all(|m| !m.content.contains("done")),
+        "interrupted tool must not commit tool output to message list"
+    );
+}
+
+/// (c) Interrupt during sync_step (non-streaming, text response): cancel fires
+///     while the LLM call is in flight → loop returns Interrupted.
+#[tokio::test]
+async fn cancel_during_sync_step_returns_interrupted() {
+    struct SlowTextProvider;
+    #[async_trait]
+    impl LlmProvider for SlowTextProvider {
+        async fn chat(
+            &self,
+            _request: ChatCompletionRequest,
+        ) -> anyhow::Result<ChatCompletionResponse> {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Ok(ChatCompletionResponse {
+                choices: vec![FinalChoice {
+                    message: Message::assistant("slow text answer"),
+                    finish_reason: Some("stop".into()),
+                }],
+                usage: None,
+            })
+        }
+        async fn stream_chat(
+            &self,
+            _request: ChatCompletionRequest,
+            _on_event: Box<dyn FnMut(StreamEvent) + Send>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn model_name(&self) -> &str {
+            "slow-text"
+        }
+        fn change_model(&self, _model: &str) -> Arc<dyn LlmProvider> {
+            Arc::new(Self)
+        }
+        async fn embed(&self, _input: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.0])
+        }
+    }
+
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+
+    let mut runtime = AgentRuntime::new(
+        SlowTextProvider,
+        ToolRegistry::new(),
+        "contract-test",
+        small_budget(),
+    );
+
+    let handle = tokio::spawn(async move {
+        execute_agent_loop_with_messages(
+            &mut runtime,
+            vec![Message::user("test")],
+            None,
+            "contract-test",
+            cancel_clone,
+            zhongshu_core::runtime::ExecutionProfile::Interactive,
+        )
+        .await
+        .unwrap()
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    cancel.cancel();
+
+    let result = handle.await.unwrap();
+    assert_eq!(result.outcome, RunOutcome::Interrupted);
+    assert!(
+        result
+            .messages
+            .iter()
+            .all(|m| !m.content.contains("slow text answer")),
+        "interrupted sync step must not commit text content"
+    );
 }

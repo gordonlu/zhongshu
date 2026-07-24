@@ -762,88 +762,97 @@ impl AgentController {
             {
                 Ok(attempt_result) => {
                     let rr = &attempt_result.loop_result;
-                    let conversation_id = proxy.lock().await.current_conv_id().await;
-                    persist_trace_runbook(
-                        core_db_path.clone(),
-                        &input,
-                        &rr.trace_events,
-                        conversation_id,
-                    );
-                    publish_harness_events(&eb, &rr.trace_events);
-                    let last = rr.messages.last().map(|x| x.content.as_str()).unwrap_or("");
-                    history_arc
-                        .lock()
-                        .unwrap()
-                        .push(("user".to_string(), input.clone()));
-                    if !last.is_empty() {
-                        let tools_used = &attempt_result.tool_names;
-                        let history_content = if tools_used.is_empty() {
-                            last.to_string()
-                        } else {
-                            let mut deduped: Vec<(&str, u32)> = Vec::new();
-                            for name in tools_used.iter().map(|s| s.as_str()) {
-                                if let Some(last) = deduped.last_mut() {
-                                    if last.0 == name {
-                                        last.1 += 1;
-                                        continue;
-                                    }
-                                }
-                                deduped.push((name, 1));
-                            }
-                            let badge = deduped
-                                .iter()
-                                .map(|(n, c)| {
-                                    if *c > 1 {
-                                        format!("✓ {n} ×{c}")
-                                    } else {
-                                        format!("✓ {n}")
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .join(" · ");
-                            format!("[工具: {badge}]\n\n{last}")
-                        };
+                    if !rc.is_interrupted() {
+                        let conversation_id = proxy.lock().await.current_conv_id().await;
+                        persist_trace_runbook(
+                            core_db_path.clone(),
+                            &input,
+                            &rr.trace_events,
+                            conversation_id,
+                        );
+                        publish_harness_events(&eb, &rr.trace_events);
+                        let last = rr
+                            .messages
+                            .last()
+                            .map(|x| x.content.as_str())
+                            .unwrap_or("");
                         history_arc
                             .lock()
                             .unwrap()
-                            .push(("assistant".to_string(), history_content));
+                            .push(("user".to_string(), input.clone()));
+                        if !last.is_empty() {
+                            let tools_used = &attempt_result.tool_names;
+                            let history_content = if tools_used.is_empty() {
+                                last.to_string()
+                            } else {
+                                let mut deduped: Vec<(&str, u32)> = Vec::new();
+                                for name in tools_used.iter().map(|s| s.as_str()) {
+                                    if let Some(last) = deduped.last_mut() {
+                                        if last.0 == name {
+                                            last.1 += 1;
+                                            continue;
+                                        }
+                                    }
+                                    deduped.push((name, 1));
+                                }
+                                let badge = deduped
+                                    .iter()
+                                    .map(|(n, c)| {
+                                        if *c > 1 {
+                                            format!("✓ {n} ×{c}")
+                                        } else {
+                                            format!("✓ {n}")
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(" · ");
+                                format!("[工具: {badge}]\n\n{last}")
+                            };
+                            history_arc
+                                .lock()
+                                .unwrap()
+                                .push(("assistant".to_string(), history_content));
+                        }
+                        memory.extract_todos(last);
+                        if rr.outcome == RunOutcome::CompletedVerified {
+                            memory.extract_goal_completions(last);
+                            memory.archive_completed_goals(KEEP_COMPLETED_GOALS);
+                        }
+                        stop_reason = format!("{:?}", rr.stop_reason);
+                        overall_success = rr.outcome == RunOutcome::CompletedVerified;
+                        let receipt =
+                            zhongshu_core::core::receipt::RunReceipt::from_loop_result(
+                                rr,
+                                &run_id.to_string(),
+                                &model_name,
+                                &attempt_budget,
+                                0,
+                                vec![],
+                                vec![],
+                                false,
+                            );
+                        tracing::info!(
+                            run_id = %receipt.run_id,
+                            outcome = %receipt.stop_reason,
+                            tools = receipt.tool_calls_made,
+                            tokens = receipt.estimated_tokens,
+                            "run receipt"
+                        );
+                    } else {
+                        stop_reason = "interrupted".to_string();
+                        overall_success = false;
                     }
-                    memory.extract_todos(last);
-                    if rr.outcome == RunOutcome::CompletedVerified {
-                        memory.extract_goal_completions(last);
-                        memory.archive_completed_goals(KEEP_COMPLETED_GOALS);
-                    }
-                    stop_reason = format!("{:?}", rr.stop_reason);
-                    overall_success = rr.outcome == RunOutcome::CompletedVerified;
-                    let receipt = zhongshu_core::core::receipt::RunReceipt::from_loop_result(
-                        rr,
-                        &run_id.to_string(),
-                        &model_name,
-                        &attempt_budget,
-                        0,
-                        vec![],
-                        vec![],
-                        false,
-                    );
-                    tracing::info!(
-                        run_id = %receipt.run_id,
-                        outcome = %receipt.stop_reason,
-                        tools = receipt.tool_calls_made,
-                        tokens = receipt.estimated_tokens,
-                        "run receipt"
-                    );
                     let _ = tx
                         .send(ResponseEvent::MessageCompleted { id: aid, run_id })
                         .await;
-                    let outcome_state = match rr.outcome {
-                        RunOutcome::CompletedVerified => AgentState::Done { success: true },
-                        RunOutcome::CompletedUnverified => AgentState::Submitted,
-                        _ => AgentState::Done { success: false },
+                    *state_arc.write().await = AgentState::Done {
+                        success: overall_success,
                     };
-                    *state_arc.write().await = outcome_state;
                     eb.publish(Event::Agent(AgentEvent::StateChanged {
                         from: AgentState::Thinking,
-                        to: outcome_state,
+                        to: AgentState::Done {
+                            success: overall_success,
+                        },
                     }));
                 }
                 Err(RunAttemptError::AgentError(e)) => {

@@ -687,4 +687,49 @@ mod tests {
         assert_eq!(ctrl.begin_resume(), run_id);
         assert_eq!(ctrl.run_id(), Some(run_id));
     }
+
+    /// (d) Interrupt captures the user message and flags is_interrupted,
+    ///     ensuring that the caller (spawn_task) can skip writing results.
+    #[test]
+    fn interrupt_saves_user_message_and_sets_interrupted_flag() {
+        let (ctrl, _) = make_controller();
+        ctrl.start_run("original goal");
+        ctrl.set_state(RunState::Streaming);
+
+        let action = ctrl.interrupt("停一下");
+
+        assert!(ctrl.is_interrupted(), "interrupt must set the flag");
+        assert!(matches!(ctrl.state(), RunState::Interrupted { .. }));
+        assert!(matches!(action, InterruptionAction::Stop));
+        let ctx = ctrl.interruption_ctx();
+        assert!(ctx.is_some(), "interruption context must be stored");
+        assert!(
+            ctx.unwrap().user_message.contains("停一下"),
+            "user message must be preserved in interruption context"
+        );
+    }
+
+    /// (e) Even when the cancel token is already triggered (simulating a
+    ///     partial/blocked cancel), interrupt still saves the user message.
+    #[test]
+    fn interrupt_preserves_message_even_when_cancel_fails() {
+        let (ctrl, _) = make_controller();
+        ctrl.start_run("original");
+        ctrl.set_state(RunState::Streaming);
+
+        // Pre-cancel the token to simulate a scenario where cancel()
+        // was already called or is blocked.
+        ctrl.cancel_token.lock().unwrap().cancel();
+
+        let action = ctrl.interrupt("新消息");
+
+        assert!(ctrl.is_interrupted());
+        let ctx = ctrl.interruption_ctx();
+        assert!(ctx.is_some(), "context must survive failed cancel");
+        assert!(
+            ctx.unwrap().user_message.contains("新消息"),
+            "user message must be preserved"
+        );
+        assert!(matches!(action, InterruptionAction::ContinueWithNote { .. }));
+    }
 }

@@ -726,10 +726,7 @@ async fn cancel_during_tool_execution_does_not_commit_result() {
     assert_eq!(result.outcome, RunOutcome::Interrupted);
     // Tool output observation must NOT appear in messages.
     assert!(
-        result
-            .messages
-            .iter()
-            .all(|m| !m.content.contains("done")),
+        result.messages.iter().all(|m| !m.content.contains("done")),
         "interrupted tool must not commit tool output to message list"
     );
 }

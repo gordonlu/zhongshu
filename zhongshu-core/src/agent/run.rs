@@ -730,6 +730,9 @@ mod tests {
             ctx.unwrap().user_message.contains("新消息"),
             "user message must be preserved"
         );
-        assert!(matches!(action, InterruptionAction::ContinueWithNote { .. }));
+        assert!(matches!(
+            action,
+            InterruptionAction::ContinueWithNote { .. }
+        ));
     }
 }

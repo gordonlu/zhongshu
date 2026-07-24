@@ -771,11 +771,7 @@ impl AgentController {
                             conversation_id,
                         );
                         publish_harness_events(&eb, &rr.trace_events);
-                        let last = rr
-                            .messages
-                            .last()
-                            .map(|x| x.content.as_str())
-                            .unwrap_or("");
+                        let last = rr.messages.last().map(|x| x.content.as_str()).unwrap_or("");
                         history_arc
                             .lock()
                             .unwrap()
@@ -820,17 +816,16 @@ impl AgentController {
                         }
                         stop_reason = format!("{:?}", rr.stop_reason);
                         overall_success = rr.outcome == RunOutcome::CompletedVerified;
-                        let receipt =
-                            zhongshu_core::core::receipt::RunReceipt::from_loop_result(
-                                rr,
-                                &run_id.to_string(),
-                                &model_name,
-                                &attempt_budget,
-                                0,
-                                vec![],
-                                vec![],
-                                false,
-                            );
+                        let receipt = zhongshu_core::core::receipt::RunReceipt::from_loop_result(
+                            rr,
+                            &run_id.to_string(),
+                            &model_name,
+                            &attempt_budget,
+                            0,
+                            vec![],
+                            vec![],
+                            false,
+                        );
                         tracing::info!(
                             run_id = %receipt.run_id,
                             outcome = %receipt.stop_reason,

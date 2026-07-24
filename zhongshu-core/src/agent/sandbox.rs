@@ -743,17 +743,10 @@ impl Tool for SandboxShellTool {
                 "/usr",
                 "/usr",
             ]);
-            // Mount /bin only if it's a real directory (not a symlink to /usr/bin).
-            // On modern Ubuntu /bin -> usr/bin, and bwrap --ro-bind follows
-            // symlinks, causing the mount to fail.
-            if std::fs::symlink_metadata("/bin")
-                .map(|m| m.is_dir())
-                .unwrap_or(false)
-                && !std::fs::symlink_metadata("/bin")
-                    .map(|m| m.file_type().is_symlink())
-                    .unwrap_or(false)
-            {
-                process.args(["--ro-bind", "/bin", "/bin"]);
+            // Mount /bin/usr contents using canonical paths so that symlinks
+            // (e.g. /bin -> usr/bin on modern Ubuntu) resolve correctly.
+            if let Ok(resolved) = std::fs::canonicalize("/bin") {
+                process.args(["--ro-bind", resolved.to_str().unwrap(), "/bin"]);
             }
             process.args(["--ro-bind", "/etc", "/etc"]);
             process.arg(if self.0.inner.sealed.load(Ordering::Acquire) {
@@ -763,8 +756,8 @@ impl Tool for SandboxShellTool {
             });
             process.arg(self.0.root()).arg("/workspace");
             for path in ["/lib", "/lib64"] {
-                if Path::new(path).exists() {
-                    process.args(["--ro-bind", path, path]);
+                if let Ok(resolved) = std::fs::canonicalize(path) {
+                    process.args(["--ro-bind", resolved.to_str().unwrap(), path]);
                 }
             }
             for (variable, fallback) in [("CARGO_HOME", ".cargo"), ("RUSTUP_HOME", ".rustup")] {

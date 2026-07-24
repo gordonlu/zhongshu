@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="media/banner.webp">
+    <img src="media/banner.webp" alt="中书 Zhongshu" width="100%">
+  </picture>
+</p>
+
 # 中书 Zhongshu
 
 [![CI](https://github.com/gordonlu/zhongshu/actions/workflows/ci.yml/badge.svg)](https://github.com/gordonlu/zhongshu/actions/workflows/ci.yml)

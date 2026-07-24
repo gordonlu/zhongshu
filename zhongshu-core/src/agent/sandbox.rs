@@ -842,15 +842,17 @@ mod tests {
                 .status,
             crate::tool::ToolStatus::Error
         );
+        let shell_result = registry
+            .execute(
+                "shell",
+                r#"{"command":"test \"$(cat src/a.txt)\" = edited"}"#,
+            )
+            .await;
         assert_eq!(
-            registry
-                .execute(
-                    "shell",
-                    r#"{"command":"test \"$(cat src/a.txt)\" = edited"}"#,
-                )
-                .await
-                .status,
-            crate::tool::ToolStatus::Success
+            shell_result.status,
+            crate::tool::ToolStatus::Success,
+            "shell tool: {:?}",
+            shell_result
         );
         assert_eq!(
             fs::read_to_string(workspace.path().join("src/a.txt")).unwrap(),

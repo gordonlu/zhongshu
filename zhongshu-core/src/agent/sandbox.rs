@@ -733,6 +733,7 @@ impl Tool for SandboxShellTool {
                 "--die-with-parent",
                 "--new-session",
                 "--unshare-all",
+                "--share-net",
                 "--proc",
                 "/proc",
                 "--dev",

@@ -144,6 +144,11 @@ textarea:focus-visible {
   min-width: 0;
 }
 
+.brand-logo {
+  height: 28px;
+  width: auto;
+}
+
 .brand-mark {
   display: grid;
   min-width: 42px;

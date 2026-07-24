@@ -289,11 +289,10 @@ export function App() {
     <div className="app-shell" data-theme={theme} data-layout={isCodingMode ? 'coding' : 'assistant'}>
       <header className="titlebar" onMouseDown={startWindowDrag}>
         <div className="brand">
-          <div className="brand-mark" aria-hidden="true">中书</div>
-          <div>
-            <div className="brand-title">中书</div>
-            <div className="brand-subtitle">Agent workspace</div>
-          </div>
+          <picture>
+            <source srcSet="./logo_light.png" media="(prefers-color-scheme: light)" />
+            <img src="./logo_dark.png" alt="中书" className="brand-logo" />
+          </picture>
         </div>
         <div className="mode-switch" data-no-drag>
           <button

@@ -6,6 +6,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use super::sandbox_backend::{
+    BubblewrapSandboxBackend, SandboxBackend, SandboxError, SandboxRequest,
+};
 use crate::patch::{PatchOperation, WholeFileRequest};
 use crate::tool::{
     SideEffect, Tool, ToolEffect, ToolOutput, ToolRegistry, ToolSpec, WorkspaceScope,
@@ -26,6 +29,7 @@ struct WorkerSandboxInner {
     allowed_dirs: Vec<PathBuf>,
     initial: BTreeMap<PathBuf, Option<String>>,
     sealed: AtomicBool,
+    backend: Box<dyn SandboxBackend>,
 }
 
 impl Drop for WorkerSandboxInner {
@@ -54,6 +58,20 @@ impl WorkerSandbox {
         workspace_root: &Path,
         worker: &str,
         owned_paths: &[PathBuf],
+    ) -> anyhow::Result<Self> {
+        Self::create_with_backend(
+            workspace_root,
+            worker,
+            owned_paths,
+            Box::new(BubblewrapSandboxBackend::new()),
+        )
+    }
+
+    pub fn create_with_backend(
+        workspace_root: &Path,
+        worker: &str,
+        owned_paths: &[PathBuf],
+        backend: Box<dyn SandboxBackend>,
     ) -> anyhow::Result<Self> {
         if owned_paths.is_empty() {
             anyhow::bail!("isolated sandbox requires at least one owned path");
@@ -119,6 +137,7 @@ impl WorkerSandbox {
                 allowed_dirs,
                 initial,
                 sealed: AtomicBool::new(false),
+                backend,
             }),
         };
         root_guard.armed = false;
@@ -717,87 +736,34 @@ impl Tool for SandboxShellTool {
         let Some(command) = arguments.get("command").and_then(serde_json::Value::as_str) else {
             return ToolOutput::error("'command' must be a string");
         };
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = command;
-            return ToolOutput::error("isolated sandbox shell currently requires Linux bubblewrap");
-        }
-        #[cfg(target_os = "linux")]
-        {
-            if !Path::new("/usr/bin/bwrap").exists() {
-                return ToolOutput::error("isolated sandbox shell requires /usr/bin/bwrap");
-            }
-            let mut process = tokio::process::Command::new("/usr/bin/bwrap");
-            process.kill_on_drop(true);
-            process.args([
-                "--die-with-parent",
-                "--new-session",
-                "--unshare-all",
-                "--share-net",
-                "--proc",
-                "/proc",
-                "--dev",
-                "/dev",
-                "--tmpfs",
-                "/tmp",
-                "--ro-bind",
-                "/usr",
-                "/usr",
-            ]);
-            // Mount /bin/usr contents using canonical paths so that symlinks
-            // (e.g. /bin -> usr/bin on modern Ubuntu) resolve correctly.
-            if let Ok(resolved) = std::fs::canonicalize("/bin") {
-                process.args(["--ro-bind", resolved.to_str().unwrap(), "/bin"]);
-            }
-            process.args(["--ro-bind", "/etc", "/etc"]);
-            process.arg(if self.0.inner.sealed.load(Ordering::Acquire) {
-                "--ro-bind"
-            } else {
-                "--bind"
-            });
-            process.arg(self.0.root()).arg("/workspace");
-            for path in ["/lib", "/lib64"] {
-                if let Ok(resolved) = std::fs::canonicalize(path) {
-                    process.args(["--ro-bind", resolved.to_str().unwrap(), path]);
-                }
-            }
-            for (variable, fallback) in [("CARGO_HOME", ".cargo"), ("RUSTUP_HOME", ".rustup")] {
-                let path = std::env::var_os(variable).map(PathBuf::from).or_else(|| {
-                    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(fallback))
+        let request = SandboxRequest {
+            command: command.to_owned(),
+            workdir: self.0.root().to_path_buf(),
+            envs: vec![],
+        };
+        match self.0.inner.backend.execute(request).await {
+            Ok(output) => {
+                let data = serde_json::json!({
+                    "exit_code": output.exit_code,
+                    "stdout": output.stdout,
+                    "stderr": output.stderr,
+                    "sandboxed": true,
+                    "network": "disabled"
                 });
-                if let Some(path) = path.filter(|path| path.exists()) {
-                    process.arg("--ro-bind").arg(&path).arg(&path);
-                    process.arg("--setenv").arg(variable).arg(&path);
+                if output.exit_code == 0 {
+                    ToolOutput::success(data)
+                } else {
+                    ToolOutput::error(data.to_string())
                 }
             }
-            process.args([
-                "--setenv",
-                "HOME",
-                "/tmp",
-                "--chdir",
-                "/workspace",
-                "--",
-                "/usr/bin/sh",
-                "-lc",
-                command,
-            ]);
-            let output = match process.output().await {
-                Ok(output) => output,
-                Err(error) => return ToolOutput::error(format!("sandbox command failed: {error}")),
-            };
-            let exit_code = output.status.code().unwrap_or(-1);
-            let data = serde_json::json!({
-                "exit_code": exit_code,
-                "stdout": String::from_utf8_lossy(&output.stdout),
-                "stderr": String::from_utf8_lossy(&output.stderr),
-                "sandboxed": true,
-                "network": "disabled"
-            });
-            if output.status.success() {
-                ToolOutput::success(data)
-            } else {
-                ToolOutput::error(data.to_string())
-            }
+            Err(error) => ToolOutput::error(match error {
+                SandboxError::BinaryMissing => {
+                    "isolated sandbox shell requires /usr/bin/bwrap".to_owned()
+                }
+                SandboxError::SpawnFailed(msg) | SandboxError::PermissionDenied(msg) => {
+                    format!("sandbox command failed: {msg}")
+                }
+            }),
         }
     }
 }
@@ -805,6 +771,7 @@ impl Tool for SandboxShellTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::sandbox_backend::TestSandboxBackend;
 
     #[tokio::test]
     async fn sandbox_writes_are_isolated_scoped_and_convert_to_patch_operations() {
@@ -812,8 +779,13 @@ mod tests {
         fs::create_dir_all(workspace.path().join("src")).unwrap();
         fs::write(workspace.path().join("src/a.txt"), "before").unwrap();
         fs::write(workspace.path().join("context.txt"), "read only").unwrap();
-        let sandbox =
-            WorkerSandbox::create(workspace.path(), "writer", &[PathBuf::from("src")]).unwrap();
+        let sandbox = WorkerSandbox::create_with_backend(
+            workspace.path(),
+            "writer",
+            &[PathBuf::from("src")],
+            Box::new(TestSandboxBackend::new()),
+        )
+        .unwrap();
         let registry = sandbox.register_tools(ToolRegistry::new());
 
         assert_eq!(
@@ -879,8 +851,13 @@ mod tests {
         fs::create_dir_all(workspace.path().join("src")).unwrap();
         fs::write(workspace.path().join("src/a.txt"), "before").unwrap();
         fs::write(workspace.path().join("project.conf"), "original").unwrap();
-        let sandbox =
-            WorkerSandbox::create(workspace.path(), "writer", &[PathBuf::from("src")]).unwrap();
+        let sandbox = WorkerSandbox::create_with_backend(
+            workspace.path(),
+            "writer",
+            &[PathBuf::from("src")],
+            Box::new(TestSandboxBackend::new()),
+        )
+        .unwrap();
         let registry = sandbox.register_tools(ToolRegistry::new());
 
         assert_eq!(
@@ -976,5 +953,27 @@ mod tests {
         drop(sandbox);
 
         assert!(!root.exists());
+    }
+
+    #[ignore = "requires bubblewrap and unprivileged user namespaces (CI may not support)"]
+    #[tokio::test]
+    async fn bubblewrap_real_filesystem_isolation() {
+        let workspace = tempfile::tempdir().unwrap();
+        fs::create_dir_all(workspace.path().join("src")).unwrap();
+        fs::write(workspace.path().join("src/a.txt"), "original").unwrap();
+        let sandbox =
+            WorkerSandbox::create(workspace.path(), "writer", &[PathBuf::from("src")]).unwrap();
+        let registry = sandbox.register_tools(ToolRegistry::new());
+
+        let result = registry
+            .execute(
+                "shell",
+                r#"{"command":"printf 'sandbox-changed' > src/a.txt"}"#,
+            )
+            .await;
+        assert_eq!(result.status, crate::tool::ToolStatus::Success);
+
+        let host_content = fs::read_to_string(workspace.path().join("src/a.txt")).unwrap();
+        assert_eq!(host_content, "original");
     }
 }

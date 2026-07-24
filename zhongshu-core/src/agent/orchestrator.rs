@@ -11,6 +11,7 @@ use crate::agent::profile::AgentProfile;
 use crate::agent::report::Report;
 use crate::agent::runtime::AgentRuntime;
 use crate::agent::sandbox::WorkerSandbox;
+use crate::agent::sandbox_backend::SandboxBackend;
 use crate::agent::worker::Worker;
 use crate::agent::AttentionLevel;
 #[cfg(test)]
@@ -833,6 +834,7 @@ pub struct Orchestrator {
     pub registry: LlmRegistry,
     pub max_concurrent_workers: usize,
     pub worker_workspace_root: Option<PathBuf>,
+    pub sandbox_backend: Option<Box<dyn SandboxBackend>>,
 }
 
 impl Orchestrator {
@@ -842,11 +844,17 @@ impl Orchestrator {
             registry,
             max_concurrent_workers: DEFAULT_MAX_WORKERS_PER_TASK,
             worker_workspace_root: None,
+            sandbox_backend: None,
         }
     }
 
     pub fn with_worker_workspace_root(mut self, root: impl Into<PathBuf>) -> Self {
         self.worker_workspace_root = Some(root.into());
+        self
+    }
+
+    pub fn with_sandbox_backend(mut self, backend: Box<dyn SandboxBackend>) -> Self {
+        self.sandbox_backend = Some(backend);
         self
     }
 
@@ -3224,11 +3232,20 @@ impl Orchestrator {
             let workspace_root = self.worker_workspace_root.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("isolated sandbox workspace root is not configured")
             })?;
-            let sandbox = WorkerSandbox::create(
-                workspace_root,
-                &assignment.worker_name,
-                &assignment.owned_files,
-            )?;
+            let sandbox = if let Some(backend) = &self.sandbox_backend {
+                WorkerSandbox::create_with_backend(
+                    workspace_root,
+                    &assignment.worker_name,
+                    &assignment.owned_files,
+                    backend.box_clone(),
+                )?
+            } else {
+                WorkerSandbox::create(
+                    workspace_root,
+                    &assignment.worker_name,
+                    &assignment.owned_files,
+                )?
+            };
             runtime.registry =
                 sandbox
                     .register_tools(runtime.registry)
@@ -7506,8 +7523,11 @@ pub mod tests {
             "organization-scripted",
             AgentBudget::default(),
         );
-        let orchestrator =
-            Orchestrator::new(runtime, LlmRegistry::new()).with_worker_workspace_root(temp.path());
+        let orchestrator = Orchestrator::new(runtime, LlmRegistry::new())
+            .with_worker_workspace_root(temp.path())
+            .with_sandbox_backend(Box::new(
+                crate::agent::sandbox_backend::TestSandboxBackend::new(),
+            ));
         let roster = vec![AgentProfile::new(
             "writer",
             "ROLE=sandbox",

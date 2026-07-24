@@ -18,6 +18,7 @@ pub mod router;
 pub mod run;
 pub mod runtime;
 pub mod sandbox;
+pub mod sandbox_backend;
 pub mod worker;
 
 pub use attention::AttentionLevel;
